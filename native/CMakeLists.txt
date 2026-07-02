@@ -19,6 +19,7 @@ add_library(mgt_core STATIC
     src/model_layout.cpp
     src/weight_export.cpp
     src/random_walk_cpu.cpp
+    src/mlp_cpu_ref.cpp
 )
 
 target_include_directories(mgt_core PUBLIC include)
@@ -43,3 +44,6 @@ set_tests_properties(weight_export PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_
 add_executable(test_random_walk_cpu tests/test_random_walk_cpu.cpp)
 target_link_libraries(test_random_walk_cpu PRIVATE mgt_core)
 add_test(NAME random_walk_cpu COMMAND test_random_walk_cpu)
+add_executable(test_mlp_cpu_ref tests/test_mlp_cpu_ref.cpp)
+target_link_libraries(test_mlp_cpu_ref PRIVATE mgt_core)
+add_test(NAME mlp_cpu_ref COMMAND test_mlp_cpu_ref)
