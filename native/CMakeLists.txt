@@ -20,6 +20,7 @@ add_library(mgt_core STATIC
     src/weight_export.cpp
     src/random_walk_cpu.cpp
     src/mlp_cpu_ref.cpp
+    src/memory_plan.cpp
 )
 
 target_include_directories(mgt_core PUBLIC include)
@@ -47,3 +48,6 @@ add_test(NAME random_walk_cpu COMMAND test_random_walk_cpu)
 add_executable(test_mlp_cpu_ref tests/test_mlp_cpu_ref.cpp)
 target_link_libraries(test_mlp_cpu_ref PRIVATE mgt_core)
 add_test(NAME mlp_cpu_ref COMMAND test_mlp_cpu_ref)
+add_executable(test_memory_plan tests/test_memory_plan.cpp)
+target_link_libraries(test_memory_plan PRIVATE mgt_core)
+add_test(NAME memory_plan COMMAND test_memory_plan)
