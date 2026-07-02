@@ -18,6 +18,7 @@ add_library(mgt_core STATIC
     src/puzzle_io.cpp
     src/model_layout.cpp
     src/weight_export.cpp
+    src/random_walk_cpu.cpp
 )
 
 target_include_directories(mgt_core PUBLIC include)
@@ -39,3 +40,6 @@ add_executable(test_weight_export tests/test_weight_export.cpp)
 target_link_libraries(test_weight_export PRIVATE mgt_core)
 add_test(NAME weight_export COMMAND test_weight_export)
 set_tests_properties(weight_export PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/..")
+add_executable(test_random_walk_cpu tests/test_random_walk_cpu.cpp)
+target_link_libraries(test_random_walk_cpu PRIVATE mgt_core)
+add_test(NAME random_walk_cpu COMMAND test_random_walk_cpu)
