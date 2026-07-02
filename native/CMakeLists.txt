@@ -15,6 +15,7 @@ endif()
 
 add_library(mgt_core STATIC
     src/static_contracts.cpp
+    src/puzzle_io.cpp
 )
 
 target_include_directories(mgt_core PUBLIC include)
@@ -24,3 +25,7 @@ target_link_libraries(test_static_contracts PRIVATE mgt_core)
 
 enable_testing()
 add_test(NAME static_contracts COMMAND test_static_contracts)
+add_executable(test_puzzle_io tests/test_puzzle_io.cpp)
+target_link_libraries(test_puzzle_io PRIVATE mgt_core)
+add_test(NAME puzzle_io COMMAND test_puzzle_io)
+set_tests_properties(puzzle_io PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/..")
