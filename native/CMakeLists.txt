@@ -62,4 +62,8 @@ if(MGT_ENABLE_CUDA)
 
     add_executable(test_cuda_compile tests/cuda/test_cuda_compile.cu)
     target_link_libraries(test_cuda_compile PRIVATE mgt_cuda)
+    add_test(NAME cuda_compile COMMAND test_cuda_compile)
+    add_executable(test_cuda_random_walk_smoke tests/cuda/test_cuda_random_walk_smoke.cu)
+    target_link_libraries(test_cuda_random_walk_smoke PRIVATE mgt_cuda)
+    add_test(NAME cuda_random_walk_smoke COMMAND test_cuda_random_walk_smoke)
 endif()

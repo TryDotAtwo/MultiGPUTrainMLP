@@ -1,6 +1,7 @@
 /target/
 /build-native*/
 /build-cuda-compile*/
+/build-gpu-smoke*/
 /runs/
 *.nsys-rep
 *.ncu-rep
