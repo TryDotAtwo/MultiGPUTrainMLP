@@ -55,6 +55,7 @@ if(MGT_ENABLE_CUDA)
     add_library(mgt_cuda STATIC
         cuda/device_context.cu
         cuda/random_walk_kernel.cu
+        cuda/mlp_forward.cu
         cuda/adamw.cu
     )
     target_include_directories(mgt_cuda PUBLIC include cuda)
@@ -69,4 +70,7 @@ if(MGT_ENABLE_CUDA)
     add_executable(test_cuda_adamw_smoke tests/cuda/test_cuda_adamw_smoke.cu)
     target_link_libraries(test_cuda_adamw_smoke PRIVATE mgt_cuda)
     add_test(NAME cuda_adamw_smoke COMMAND test_cuda_adamw_smoke)
+    add_executable(test_cuda_mlp_forward_smoke tests/cuda/test_cuda_mlp_forward_smoke.cu)
+    target_link_libraries(test_cuda_mlp_forward_smoke PRIVATE mgt_cuda)
+    add_test(NAME cuda_mlp_forward_smoke COMMAND test_cuda_mlp_forward_smoke)
 endif()
