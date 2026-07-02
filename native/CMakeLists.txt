@@ -51,3 +51,15 @@ add_test(NAME mlp_cpu_ref COMMAND test_mlp_cpu_ref)
 add_executable(test_memory_plan tests/test_memory_plan.cpp)
 target_link_libraries(test_memory_plan PRIVATE mgt_core)
 add_test(NAME memory_plan COMMAND test_memory_plan)
+if(MGT_ENABLE_CUDA)
+    add_library(mgt_cuda STATIC
+        cuda/device_context.cu
+        cuda/random_walk_kernel.cu
+        cuda/adamw.cu
+    )
+    target_include_directories(mgt_cuda PUBLIC include cuda)
+    target_link_libraries(mgt_cuda PUBLIC mgt_core)
+
+    add_executable(test_cuda_compile tests/cuda/test_cuda_compile.cu)
+    target_link_libraries(test_cuda_compile PRIVATE mgt_cuda)
+endif()

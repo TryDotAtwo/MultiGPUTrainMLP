@@ -1,5 +1,6 @@
 /target/
 /build-native*/
+/build-cuda-compile*/
 /runs/
 *.nsys-rep
 *.ncu-rep
