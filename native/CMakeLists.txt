@@ -21,6 +21,7 @@ add_library(mgt_core STATIC
     src/random_walk_cpu.cpp
     src/mlp_cpu_ref.cpp
     src/memory_plan.cpp
+    src/allreduce.cpp
 )
 
 target_include_directories(mgt_core PUBLIC include)
@@ -51,6 +52,9 @@ add_test(NAME mlp_cpu_ref COMMAND test_mlp_cpu_ref)
 add_executable(test_memory_plan tests/test_memory_plan.cpp)
 target_link_libraries(test_memory_plan PRIVATE mgt_core)
 add_test(NAME memory_plan COMMAND test_memory_plan)
+add_executable(test_allreduce tests/test_allreduce.cpp)
+target_link_libraries(test_allreduce PRIVATE mgt_core)
+add_test(NAME allreduce COMMAND test_allreduce)
 if(MGT_ENABLE_CUDA)
     add_library(mgt_cuda STATIC
         cuda/device_context.cu

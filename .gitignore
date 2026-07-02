@@ -6,3 +6,5 @@
 *.nsys-rep
 *.ncu-rep
 /build-kaggle-2xt4*/
+
+/build-native-docker*/
