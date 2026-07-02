@@ -16,6 +16,8 @@ endif()
 add_library(mgt_core STATIC
     src/static_contracts.cpp
     src/puzzle_io.cpp
+    src/model_layout.cpp
+    src/weight_export.cpp
 )
 
 target_include_directories(mgt_core PUBLIC include)
@@ -29,3 +31,11 @@ add_executable(test_puzzle_io tests/test_puzzle_io.cpp)
 target_link_libraries(test_puzzle_io PRIVATE mgt_core)
 add_test(NAME puzzle_io COMMAND test_puzzle_io)
 set_tests_properties(puzzle_io PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/..")
+add_executable(test_model_layout tests/test_model_layout.cpp)
+target_link_libraries(test_model_layout PRIVATE mgt_core)
+add_test(NAME model_layout COMMAND test_model_layout)
+
+add_executable(test_weight_export tests/test_weight_export.cpp)
+target_link_libraries(test_weight_export PRIVATE mgt_core)
+add_test(NAME weight_export COMMAND test_weight_export)
+set_tests_properties(weight_export PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/..")
