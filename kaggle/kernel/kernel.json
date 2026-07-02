@@ -1,0 +1,9 @@
+{
+  "id": "local/native-multigpu-mlp-trainer",
+  "title": "native-multigpu-mlp-trainer",
+  "code_file": "run_2xt4.sh",
+  "language": "bash",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": true
+}
