@@ -65,6 +65,13 @@ if(MGT_ENABLE_CUDA)
     )
     target_include_directories(mgt_cuda PUBLIC include cuda)
     target_link_libraries(mgt_cuda PUBLIC mgt_core)
+    find_path(NVTX3_INCLUDE_DIR nvtx3/nvToolsExt.h PATHS
+        "${CMAKE_CUDA_COMPILER_TOOLKIT_ROOT}/include"
+        "${CMAKE_CUDA_COMPILER_TOOLKIT_ROOT}/targets/x86_64-linux/include")
+    if(NVTX3_INCLUDE_DIR)
+        target_include_directories(mgt_cuda PUBLIC ${NVTX3_INCLUDE_DIR})
+        target_compile_definitions(mgt_cuda PUBLIC MGT_HAS_NVTX=1)
+    endif()
 
     if(MGT_ENABLE_NCCL)
         find_library(NCCL_LIB nccl)

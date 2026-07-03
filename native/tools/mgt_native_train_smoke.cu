@@ -7,8 +7,12 @@
 #endif
 
 #include <cuda_runtime.h>
+#ifdef MGT_HAS_NVTX
+#include <nvtx3/nvToolsExt.h>
+#endif
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -247,6 +251,11 @@ int main(int argc, char** argv) {
 
     std::filesystem::create_directories(args.output_dir);
     std::ofstream log(args.output_dir / "train.log");
+    std::ofstream profile(args.output_dir / "profile.jsonl");
+    cudaEvent_t step_start = nullptr;
+    cudaEvent_t step_stop = nullptr;
+    if (Check(cudaEventCreate(&step_start)) != 0) return EXIT_FAILURE;
+    if (Check(cudaEventCreate(&step_stop)) != 0) return EXIT_FAILURE;
     log << "rank=" << args.global_rank << " local_rank=" << args.local_rank << " device=" << args.device_id
         << " world_size=" << args.world_size << " phase=start batch_states=" << kSamples
         << " hd1=" << shape.hd1 << " hd2=" << shape.hd2 << " k_min=" << args.k_min << " k_max=" << args.k_max
@@ -255,6 +264,10 @@ int main(int argc, char** argv) {
     const mgt_cuda::AdamWKernelConfig adam{params, 1, 0.0001f, 0.9f, 0.999f, 1.0e-8f, 0.0f};
     float last_loss = 0.0f;
     for (std::uint32_t step = 0; step < args.steps; ++step) {
+#ifdef MGT_HAS_NVTX
+        nvtxRangePushA("mgt_train_step");
+#endif
+        if (Check(cudaEventRecord(step_start, 0)) != 0) return EXIT_FAILURE;
         const mgt_cuda::RandomWalkKernelConfig walks{kSamples, args.k_min, args.k_max};
         if (mgt_cuda::LaunchRandomWalkKernel(walks, 1234, 0, step, args.global_rank, d_moves, d_target, d_states, d_labels, d_meta, 0) != mgt::Status::kOk) return EXIT_FAILURE;
         if (mgt_cuda::LaunchMlpLossGradKernel(shape, d_weights, d_states, d_labels, kSamples, d_loss, d_grad, 0) != mgt::Status::kOk) return EXIT_FAILURE;
@@ -265,9 +278,23 @@ int main(int argc, char** argv) {
         }
 #endif
         if (mgt_cuda::LaunchAdamWKernel(adam, d_weights, d_grad, d_m, d_v, 0) != mgt::Status::kOk) return EXIT_FAILURE;
-        if (Check(cudaDeviceSynchronize()) != 0) return EXIT_FAILURE;
+        if (Check(cudaEventRecord(step_stop, 0)) != 0) return EXIT_FAILURE;
+        if (Check(cudaEventSynchronize(step_stop)) != 0) return EXIT_FAILURE;
+#ifdef MGT_HAS_NVTX
+        nvtxRangePop();
+#endif
+        float step_ms = 0.0f;
+        if (Check(cudaEventElapsedTime(&step_ms, step_start, step_stop)) != 0) return EXIT_FAILURE;
         if (Check(cudaMemcpy(&last_loss, d_loss, sizeof(float), cudaMemcpyDeviceToHost)) != 0) return EXIT_FAILURE;
-        log << "rank=" << args.global_rank << " step=" << step << " phase=train loss=" << last_loss << "\n";
+        std::size_t free_bytes = 0;
+        std::size_t total_bytes = 0;
+        if (Check(cudaMemGetInfo(&free_bytes, &total_bytes)) != 0) return EXIT_FAILURE;
+        const std::size_t used_bytes = total_bytes - free_bytes;
+        log << "rank=" << args.global_rank << " step=" << step << " phase=train loss=" << last_loss << " step_ms=" << step_ms << " memory_bytes=" << used_bytes << "\n";
+        profile << "{\"rank\":" << args.global_rank << ",\"device\":" << args.device_id << ",\"step\":" << step
+                << ",\"phase\":\"train\",\"milliseconds\":" << std::fixed << std::setprecision(3) << step_ms
+                << ",\"batch_states\":" << kSamples << ",\"loss\":" << std::setprecision(6) << last_loss
+                << ",\"memory_bytes\":" << used_bytes << ",\"status\":\"ok\"}\n";
     }
 
     std::vector<float> adam_m(params);
@@ -290,6 +317,8 @@ int main(int argc, char** argv) {
     if (nccl_enabled && mgt_cuda::DestroyNcclRankContext(nccl_context) != mgt::Status::kOk) return EXIT_FAILURE;
 #endif
 
+    cudaEventDestroy(step_stop);
+    cudaEventDestroy(step_start);
     cudaFree(d_target);
     cudaFree(d_moves);
     cudaFree(d_meta);
