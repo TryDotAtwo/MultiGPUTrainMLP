@@ -32,15 +32,22 @@ struct Args {
     std::uint32_t k_max = 9;
     std::uint32_t hd1 = 5;
     std::uint32_t hd2 = 3;
+    std::uint32_t nrd = 1;
     std::filesystem::path nccl_id_file;
     std::filesystem::path resume_checkpoint;
 };
 
 int Check(cudaError_t status) { return status == cudaSuccess ? 0 : 1; }
 
+std::uint64_t ResidualBlockParams(const mgt_cuda::CudaMlpShape& shape) {
+    return 2ULL * (static_cast<std::uint64_t>(shape.hd2) * shape.hd2 + shape.hd2);
+}
+
 std::uint64_t ParamCount(const mgt_cuda::CudaMlpShape& shape) {
-    return static_cast<std::uint64_t>(shape.state_len) * shape.state_value_pad * shape.hd1 +
-           shape.hd1 + static_cast<std::uint64_t>(shape.hd1) * shape.hd2 + shape.hd2 + shape.hd2 + 1;
+    const std::uint64_t input = static_cast<std::uint64_t>(shape.state_len) * shape.state_value_pad * shape.hd1 + shape.hd1;
+    const std::uint64_t hidden = static_cast<std::uint64_t>(shape.hd1) * shape.hd2 + shape.hd2;
+    const std::uint64_t residual = static_cast<std::uint64_t>(shape.residual_blocks) * ResidualBlockParams(shape);
+    return input + hidden + residual + shape.hd2 + 1ULL;
 }
 
 mgt::PuzzleDefinition BuildPuzzle() {
@@ -102,17 +109,21 @@ bool WriteStream1Weights(const std::filesystem::path& output_dir,
     const std::uint64_t input_bias = input_table + static_cast<std::uint64_t>(shape.state_len) * shape.state_value_pad * shape.hd1;
     const std::uint64_t hidden_weight = input_bias + shape.hd1;
     const std::uint64_t hidden_bias = hidden_weight + static_cast<std::uint64_t>(shape.hd1) * shape.hd2;
-    const std::uint64_t output_weight = hidden_bias + shape.hd2;
+    const std::uint64_t residual_base = hidden_bias + shape.hd2;
+    const std::uint64_t output_weight = residual_base + static_cast<std::uint64_t>(shape.residual_blocks) * ResidualBlockParams(shape);
     const std::uint64_t output_bias = output_weight + shape.hd2;
     const std::uint32_t hidden1 = RoundUp(shape.hd1, 8);
     const std::uint32_t hidden2 = RoundUp(shape.hd2, 8);
-    const std::uint32_t residual_count = 1;
+    const std::uint32_t residual_count = shape.residual_blocks;
 
+    const std::uint32_t export_value_pad = mgt::kStateValuePad;
     std::vector<float> buffer;
-    buffer.assign(static_cast<std::uint64_t>(shape.state_len) * shape.state_value_pad * hidden1, 0.0f);
-    for (std::uint32_t row = 0; row < shape.state_len * shape.state_value_pad; ++row) {
-        for (std::uint32_t h = 0; h < shape.hd1; ++h) {
-            buffer[static_cast<std::uint64_t>(row) * hidden1 + h] = weights[input_table + static_cast<std::uint64_t>(row) * shape.hd1 + h];
+    buffer.assign(static_cast<std::uint64_t>(shape.state_len) * export_value_pad * hidden1, 0.0f);
+    for (std::uint32_t pos = 0; pos < shape.state_len; ++pos) {
+        for (std::uint32_t val = 0; val < shape.state_value_pad; ++val) {
+            const std::uint64_t src_row = input_table + (static_cast<std::uint64_t>(pos) * shape.state_value_pad + val) * shape.hd1;
+            const std::uint64_t dst_row = (static_cast<std::uint64_t>(pos) * export_value_pad + val) * hidden1;
+            for (std::uint32_t h = 0; h < shape.hd1; ++h) buffer[dst_row + h] = weights[src_row + h];
         }
     }
     if (!WriteFp16File(output_dir / "weights" / "input_weight_hxk.fp16", buffer)) return false;
@@ -133,12 +144,29 @@ bool WriteStream1Weights(const std::filesystem::path& output_dir,
     for (std::uint32_t j = 0; j < shape.hd2; ++j) buffer[j] = weights[hidden_bias + j];
     if (!WriteFp16File(output_dir / "weights" / "hidden_bias.fp16", buffer)) return false;
 
-    buffer.assign(static_cast<std::uint64_t>(hidden2) * hidden2, 0.0f);
-    if (!WriteFp16File(output_dir / "weights" / "residual0_fc1_weight_hxk.fp16", buffer)) return false;
-    if (!WriteFp16File(output_dir / "weights" / "residual0_fc2_weight_hxk.fp16", buffer)) return false;
-    buffer.assign(hidden2, 0.0f);
-    if (!WriteFp16File(output_dir / "weights" / "residual0_fc1_bias.fp16", buffer)) return false;
-    if (!WriteFp16File(output_dir / "weights" / "residual0_fc2_bias.fp16", buffer)) return false;
+    for (std::uint32_t block = 0; block < residual_count; ++block) {
+        const std::uint64_t block_base = residual_base + static_cast<std::uint64_t>(block) * ResidualBlockParams(shape);
+        const std::uint64_t fc1w = block_base;
+        const std::uint64_t fc1b = fc1w + static_cast<std::uint64_t>(shape.hd2) * shape.hd2;
+        const std::uint64_t fc2w = fc1b + shape.hd2;
+        const std::uint64_t fc2b = fc2w + static_cast<std::uint64_t>(shape.hd2) * shape.hd2;
+        buffer.assign(static_cast<std::uint64_t>(hidden2) * hidden2, 0.0f);
+        for (std::uint32_t i = 0; i < shape.hd2; ++i) {
+            for (std::uint32_t j = 0; j < shape.hd2; ++j) buffer[static_cast<std::uint64_t>(i) * hidden2 + j] = weights[fc1w + static_cast<std::uint64_t>(i) * shape.hd2 + j];
+        }
+        if (!WriteFp16File(output_dir / "weights" / ("residual" + std::to_string(block) + "_fc1_weight_hxk.fp16"), buffer)) return false;
+        buffer.assign(hidden2, 0.0f);
+        for (std::uint32_t j = 0; j < shape.hd2; ++j) buffer[j] = weights[fc1b + j];
+        if (!WriteFp16File(output_dir / "weights" / ("residual" + std::to_string(block) + "_fc1_bias.fp16"), buffer)) return false;
+        buffer.assign(static_cast<std::uint64_t>(hidden2) * hidden2, 0.0f);
+        for (std::uint32_t i = 0; i < shape.hd2; ++i) {
+            for (std::uint32_t j = 0; j < shape.hd2; ++j) buffer[static_cast<std::uint64_t>(i) * hidden2 + j] = weights[fc2w + static_cast<std::uint64_t>(i) * shape.hd2 + j];
+        }
+        if (!WriteFp16File(output_dir / "weights" / ("residual" + std::to_string(block) + "_fc2_weight_hxk.fp16"), buffer)) return false;
+        buffer.assign(hidden2, 0.0f);
+        for (std::uint32_t j = 0; j < shape.hd2; ++j) buffer[j] = weights[fc2b + j];
+        if (!WriteFp16File(output_dir / "weights" / ("residual" + std::to_string(block) + "_fc2_bias.fp16"), buffer)) return false;
+    }
 
     buffer.assign(static_cast<std::uint64_t>(hidden2), 0.0f);
     for (std::uint32_t j = 0; j < shape.hd2; ++j) buffer[j] = weights[output_weight + j];
@@ -153,7 +181,8 @@ bool WriteStream1Weights(const std::filesystem::path& output_dir,
              << "  \"format\": \"stream1_weights\",\n"
              << "  \"version\": 1,\n"
              << "  \"state_len\": " << shape.state_len << ",\n"
-             << "  \"num_classes\": " << shape.state_value_pad << ",\n"
+             << "  \"num_classes\": " << mgt::kStateValuePad << ",\n"
+             << "  \"logical_num_classes\": " << shape.state_value_pad << ",\n"
              << "  \"hd1\": " << hidden1 << ",\n"
              << "  \"hd2\": " << hidden2 << ",\n"
              << "  \"original_hd1\": " << shape.hd1 << ",\n"
@@ -194,6 +223,7 @@ bool WriteCheckpoint(const std::filesystem::path& output_dir,
              << "  \"state_value_pad\": " << shape.state_value_pad << ",\n"
              << "  \"hd1\": " << shape.hd1 << ",\n"
              << "  \"hd2\": " << shape.hd2 << ",\n"
+             << "  \"nrd\": " << shape.residual_blocks << ",\n"
              << "  \"optimizer\": \"AdamW\",\n"
              << "  \"weight_decay\": 0,\n"
              << "  \"dtype\": \"float32\",\n"
@@ -254,6 +284,8 @@ bool ParseArgs(int argc, char** argv, Args* args) {
             if (!ParseUint(value, &args->hd1)) return false;
         } else if (key == "--hd2") {
             if (!ParseUint(value, &args->hd2)) return false;
+        } else if (key == "--nrd") {
+            if (!ParseUint(value, &args->nrd)) return false;
         } else if (key == "--nccl-id-file") {
             args->nccl_id_file = value;
         } else if (key == "--resume-checkpoint") {
@@ -264,7 +296,7 @@ bool ParseArgs(int argc, char** argv, Args* args) {
     }
     return args->steps > 0 && args->world_size > 0 && args->global_rank < args->world_size &&
            args->batch_size > 0 && args->k_min > 0 && args->k_min <= args->k_max &&
-           args->hd1 > 0 && args->hd1 <= 64 && args->hd2 > 0 && args->hd2 <= 64;
+           args->hd1 > 0 && args->hd1 <= 4096 && args->hd2 > 0 && args->hd2 <= 512 && args->nrd <= 32;
 }
 
 }  // namespace
@@ -272,14 +304,14 @@ bool ParseArgs(int argc, char** argv, Args* args) {
 int main(int argc, char** argv) {
     Args args{};
     if (!ParseArgs(argc, argv, &args)) {
-        std::cerr << "usage: mgt_native_train_smoke --output-dir DIR --steps N --device-id ID --world-size N --global-rank R --local-rank R [--batch-size N --k-min N --k-max N --hd1 N --hd2 N --nccl-id-file PATH --resume-checkpoint DIR]\n";
+        std::cerr << "usage: mgt_native_train_smoke --output-dir DIR --steps N --device-id ID --world-size N --global-rank R --local-rank R [--batch-size N --k-min N --k-max N --hd1 N --hd2 N --nrd N --nccl-id-file PATH --resume-checkpoint DIR]\n";
         return EXIT_FAILURE;
     }
     int device_count = 0;
     if (Check(cudaGetDeviceCount(&device_count)) != 0 || device_count <= static_cast<int>(args.device_id)) return EXIT_FAILURE;
     if (Check(cudaSetDevice(static_cast<int>(args.device_id))) != 0) return EXIT_FAILURE;
 
-    const mgt_cuda::CudaMlpShape shape{mgt::kStateLen, 128, args.hd1, args.hd2};
+    const mgt_cuda::CudaMlpShape shape{mgt::kStateLen, mgt::kStateLen, args.hd1, args.hd2, args.nrd};
     const std::uint32_t kSamples = args.batch_size;
     const std::uint64_t params = ParamCount(shape);
     std::vector<float> weights(params);
@@ -341,7 +373,7 @@ int main(int argc, char** argv) {
     if (Check(cudaEventCreate(&step_stop)) != 0) return EXIT_FAILURE;
     log << "rank=" << args.global_rank << " local_rank=" << args.local_rank << " device=" << args.device_id
         << " world_size=" << args.world_size << " phase=start batch_states=" << kSamples
-        << " hd1=" << shape.hd1 << " hd2=" << shape.hd2 << " k_min=" << args.k_min << " k_max=" << args.k_max
+        << " hd1=" << shape.hd1 << " hd2=" << shape.hd2 << " nrd=" << shape.residual_blocks << " k_min=" << args.k_min << " k_max=" << args.k_max
         << " nccl=" << (nccl_enabled ? 1 : 0) << " resumed=" << (resumed ? 1 : 0) << "\n";
 
     const mgt_cuda::AdamWKernelConfig adam{params, 1, 0.0001f, 0.9f, 0.999f, 1.0e-8f, 0.0f};
@@ -390,11 +422,11 @@ int main(int argc, char** argv) {
 
     std::ofstream meta(args.output_dir / "metadata.env");
     meta << "MODEL_MODE=MLP2RB\nOUTPUT_DIM=1\nWORLD_SIZE=" << args.world_size << "\nGLOBAL_RANK=" << args.global_rank
-         << "\nLOCAL_RANK=" << args.local_rank << "\nDEVICE_ID=" << args.device_id << "\nHD1=" << shape.hd1 << "\nHD2=" << shape.hd2
+         << "\nLOCAL_RANK=" << args.local_rank << "\nDEVICE_ID=" << args.device_id << "\nHD1=" << shape.hd1 << "\nHD2=" << shape.hd2 << "\nNUM_CLASSES=" << shape.state_value_pad << "\nNRD=" << shape.residual_blocks
          << "\nK_MIN=" << args.k_min << "\nK_MAX=" << args.k_max << "\nBATCH_SIZE=" << kSamples
          << "\nNCCL_ENABLED=" << (nccl_enabled ? 1 : 0) << "\nRESUME_CHECKPOINT=" << (resumed ? 1 : 0) << "\nNUM_PARAMETERS=" << params << "\n";
     std::ofstream layers(args.output_dir / "layers.json");
-    layers << "{\n  \"model_mode\": \"MLP2RB\",\n  \"output_dim\": 1,\n  \"state_len\": 72,\n  \"state_value_pad\": 128,\n  \"hd1\": " << shape.hd1 << ",\n  \"hd2\": " << shape.hd2 << ",\n  \"num_parameters\": " << params << "\n}\n";
+    layers << "{\n  \"model_mode\": \"MLP2RB\",\n  \"output_dim\": 1,\n  \"state_len\": 72,\n  \"state_value_pad\": 128,\n  \"num_classes\": " << shape.state_value_pad << ",\n  \"hd1\": " << shape.hd1 << ",\n  \"hd2\": " << shape.hd2 << ",\n  \"nrd\": " << shape.residual_blocks << ",\n  \"num_parameters\": " << params << "\n}\n";
 
 #ifdef MGT_HAS_NCCL
     if (nccl_enabled && mgt_cuda::DestroyNcclRankContext(nccl_context) != mgt::Status::kOk) return EXIT_FAILURE;

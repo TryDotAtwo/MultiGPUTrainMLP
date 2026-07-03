@@ -12,9 +12,14 @@ namespace {
 
 int Check(cudaError_t status) { return status == cudaSuccess ? 0 : 1; }
 
+std::uint64_t ResidualBlockParams(const mgt_cuda::CudaMlpShape& shape) {
+    return 2ULL * (static_cast<std::uint64_t>(shape.hd2) * shape.hd2 + shape.hd2);
+}
+
 std::uint64_t ParamCount(const mgt_cuda::CudaMlpShape& shape) {
-    return static_cast<std::uint64_t>(shape.state_len) * shape.state_value_pad * shape.hd1 +
-           shape.hd1 + static_cast<std::uint64_t>(shape.hd1) * shape.hd2 + shape.hd2 + shape.hd2 + 1;
+    return static_cast<std::uint64_t>(shape.state_len) * shape.state_value_pad * shape.hd1 + shape.hd1 +
+           static_cast<std::uint64_t>(shape.hd1) * shape.hd2 + shape.hd2 +
+           static_cast<std::uint64_t>(shape.residual_blocks) * ResidualBlockParams(shape) + shape.hd2 + 1ULL;
 }
 
 mgt::PuzzleDefinition BuildPuzzle() {
@@ -43,7 +48,7 @@ int main() {
     if (Check(cudaGetDeviceCount(&device_count)) != 0 || device_count <= 0) return EXIT_FAILURE;
     if (Check(cudaSetDevice(0)) != 0) return EXIT_FAILURE;
 
-    const mgt_cuda::CudaMlpShape shape{mgt::kStateLen, 128, 5, 3};
+    const mgt_cuda::CudaMlpShape shape{mgt::kStateLen, 128, 5, 3, 1};
     constexpr std::uint32_t kSamples = 32;
     const std::uint64_t params = ParamCount(shape);
     std::vector<float> weights(params);

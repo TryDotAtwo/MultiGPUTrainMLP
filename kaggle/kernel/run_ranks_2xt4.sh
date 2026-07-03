@@ -37,6 +37,7 @@ for rank in $(seq 0 $((world_size - 1))); do
     --k-max "${MGT_K_MAX:-9}" \
     --hd1 "${MGT_HD1:-5}" \
     --hd2 "${MGT_HD2:-3}" \
+    --nrd "${MGT_NRD:-1}" \
     --nccl-id-file "runs/kaggle-2xt4/nccl.id" > "runs/kaggle-2xt4/rank${rank}.stdout" 2>&1 &
   pids+=("$!")
 done

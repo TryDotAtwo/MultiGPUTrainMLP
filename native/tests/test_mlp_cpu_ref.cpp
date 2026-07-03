@@ -4,7 +4,7 @@
 #include <vector>
 
 int main() {
-    const mgt::CpuMlpShape shape{4, 8, 5, 3, 1};
+    const mgt::CpuMlpShape shape{4, 8, 5, 3, 1, 1};
     const std::uint64_t params = mgt::CpuMlpParamCount(shape);
     if (params == 0) return EXIT_FAILURE;
 

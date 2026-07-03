@@ -11,6 +11,7 @@ struct CpuMlpShape {
     std::uint32_t state_value_pad;
     std::uint32_t hd1;
     std::uint32_t hd2;
+    std::uint32_t residual_blocks;
     std::uint32_t output_dim;
 };
 

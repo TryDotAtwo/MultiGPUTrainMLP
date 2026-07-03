@@ -11,6 +11,7 @@ struct CudaMlpShape {
     std::uint32_t state_value_pad;
     std::uint32_t hd1;
     std::uint32_t hd2;
+    std::uint32_t residual_blocks;
 };
 
 __host__ mgt::Status ValidateCudaMlpShape(const CudaMlpShape& shape);

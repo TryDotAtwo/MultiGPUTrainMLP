@@ -17,6 +17,7 @@ pub fn run_training(cfg: &TrainerConfig, output_dir: &Path) -> Result<()> {
     let k_max = read_env_u32("MGT_TRAIN_K_MAX", cfg.k_max)?;
     let hd1 = read_env_u32("MGT_TRAIN_HD1", cfg.hd1)?;
     let hd2 = read_env_u32("MGT_TRAIN_HD2", cfg.hd2)?;
+    let nrd = read_env_u32("MGT_TRAIN_NRD", cfg.residual_blocks)?;
     let nccl_id_file = std::env::var_os("MGT_NCCL_ID_FILE").map(PathBuf::from);
     let resume_checkpoint = std::env::var_os("MGT_RESUME_CHECKPOINT").map(PathBuf::from);
     let bin = resolve_native_binary()?;
@@ -51,7 +52,9 @@ pub fn run_training(cfg: &TrainerConfig, output_dir: &Path) -> Result<()> {
         .arg("--hd1")
         .arg(hd1.to_string())
         .arg("--hd2")
-        .arg(hd2.to_string());
+        .arg(hd2.to_string())
+        .arg("--nrd")
+        .arg(nrd.to_string());
     if let Some(path) = nccl_id_file {
         command.arg("--nccl-id-file").arg(path);
     }
