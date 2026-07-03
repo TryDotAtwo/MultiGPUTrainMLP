@@ -79,6 +79,42 @@ bool WriteBinaryWeights(const std::filesystem::path& output_dir,
     return static_cast<bool>(manifest);
 }
 
+
+bool WriteCheckpoint(const std::filesystem::path& output_dir,
+                     const std::vector<float>& weights,
+                     const std::vector<float>& adam_m,
+                     const std::vector<float>& adam_v,
+                     std::uint32_t steps,
+                     const mgt_cuda::CudaMlpShape& shape) {
+    if (weights.size() != adam_m.size() || weights.size() != adam_v.size()) return false;
+    std::filesystem::create_directories(output_dir / "checkpoint");
+    std::ofstream data(output_dir / "checkpoint" / "state.f32.bin", std::ios::binary);
+    if (!data) return false;
+    data.write(reinterpret_cast<const char*>(weights.data()), static_cast<std::streamsize>(weights.size() * sizeof(float)));
+    data.write(reinterpret_cast<const char*>(adam_m.data()), static_cast<std::streamsize>(adam_m.size() * sizeof(float)));
+    data.write(reinterpret_cast<const char*>(adam_v.data()), static_cast<std::streamsize>(adam_v.size() * sizeof(float)));
+    if (!data) return false;
+    std::ofstream manifest(output_dir / "checkpoint" / "manifest.json", std::ios::binary);
+    if (!manifest) return false;
+    manifest << "{\n"
+             << "  \"format\": \"mgt_train_checkpoint\",\n"
+             << "  \"version\": 1,\n"
+             << "  \"step\": " << steps << ",\n"
+             << "  \"model_mode\": \"MLP2RB\",\n"
+             << "  \"output_dim\": 1,\n"
+             << "  \"state_len\": " << shape.state_len << ",\n"
+             << "  \"state_value_pad\": " << shape.state_value_pad << ",\n"
+             << "  \"hd1\": " << shape.hd1 << ",\n"
+             << "  \"hd2\": " << shape.hd2 << ",\n"
+             << "  \"optimizer\": \"AdamW\",\n"
+             << "  \"weight_decay\": 0,\n"
+             << "  \"dtype\": \"float32\",\n"
+             << "  \"data\": \"state.f32.bin\",\n"
+             << "  \"sections\": [\"weights\", \"adam_m\", \"adam_v\"],\n"
+             << "  \"params_per_section\": " << weights.size() << "\n"
+             << "}\n";
+    return static_cast<bool>(manifest);
+}
 bool ParseUint(const char* text, std::uint32_t* out) {
     try {
         const unsigned long value = std::stoul(text);
@@ -213,8 +249,13 @@ int main(int argc, char** argv) {
         log << "rank=" << args.global_rank << " step=" << step << " phase=train loss=" << last_loss << "\n";
     }
 
+    std::vector<float> adam_m(params);
+    std::vector<float> adam_v(params);
     if (Check(cudaMemcpy(weights.data(), d_weights, params * sizeof(float), cudaMemcpyDeviceToHost)) != 0) return EXIT_FAILURE;
+    if (Check(cudaMemcpy(adam_m.data(), d_m, params * sizeof(float), cudaMemcpyDeviceToHost)) != 0) return EXIT_FAILURE;
+    if (Check(cudaMemcpy(adam_v.data(), d_v, params * sizeof(float), cudaMemcpyDeviceToHost)) != 0) return EXIT_FAILURE;
     if (!WriteBinaryWeights(args.output_dir, weights, shape)) return EXIT_FAILURE;
+    if (!WriteCheckpoint(args.output_dir, weights, adam_m, adam_v, args.steps, shape)) return EXIT_FAILURE;
 
     std::ofstream meta(args.output_dir / "metadata.env");
     meta << "MODEL_MODE=MLP2RB\nOUTPUT_DIM=1\nWORLD_SIZE=" << args.world_size << "\nGLOBAL_RANK=" << args.global_rank
