@@ -28,6 +28,7 @@ struct Args {
     std::uint32_t hd1 = 5;
     std::uint32_t hd2 = 3;
     std::filesystem::path nccl_id_file;
+    std::filesystem::path resume_checkpoint;
 };
 
 int Check(cudaError_t status) { return status == cudaSuccess ? 0 : 1; }
@@ -115,6 +116,20 @@ bool WriteCheckpoint(const std::filesystem::path& output_dir,
              << "}\n";
     return static_cast<bool>(manifest);
 }
+
+bool ReadCheckpoint(const std::filesystem::path& checkpoint_dir,
+                    std::vector<float>* weights,
+                    std::vector<float>* adam_m,
+                    std::vector<float>* adam_v) {
+    if (weights == nullptr || adam_m == nullptr || adam_v == nullptr) return false;
+    if (weights->size() != adam_m->size() || weights->size() != adam_v->size()) return false;
+    std::ifstream data(checkpoint_dir / "state.f32.bin", std::ios::binary);
+    if (!data) return false;
+    data.read(reinterpret_cast<char*>(weights->data()), static_cast<std::streamsize>(weights->size() * sizeof(float)));
+    data.read(reinterpret_cast<char*>(adam_m->data()), static_cast<std::streamsize>(adam_m->size() * sizeof(float)));
+    data.read(reinterpret_cast<char*>(adam_v->data()), static_cast<std::streamsize>(adam_v->size() * sizeof(float)));
+    return static_cast<bool>(data);
+}
 bool ParseUint(const char* text, std::uint32_t* out) {
     try {
         const unsigned long value = std::stoul(text);
@@ -154,6 +169,8 @@ bool ParseArgs(int argc, char** argv, Args* args) {
             if (!ParseUint(value, &args->hd2)) return false;
         } else if (key == "--nccl-id-file") {
             args->nccl_id_file = value;
+        } else if (key == "--resume-checkpoint") {
+            args->resume_checkpoint = value;
         } else {
             return false;
         }
@@ -168,7 +185,7 @@ bool ParseArgs(int argc, char** argv, Args* args) {
 int main(int argc, char** argv) {
     Args args{};
     if (!ParseArgs(argc, argv, &args)) {
-        std::cerr << "usage: mgt_native_train_smoke --output-dir DIR --steps N --device-id ID --world-size N --global-rank R --local-rank R [--batch-size N --k-min N --k-max N --hd1 N --hd2 N --nccl-id-file PATH]\n";
+        std::cerr << "usage: mgt_native_train_smoke --output-dir DIR --steps N --device-id ID --world-size N --global-rank R --local-rank R [--batch-size N --k-min N --k-max N --hd1 N --hd2 N --nccl-id-file PATH --resume-checkpoint DIR]\n";
         return EXIT_FAILURE;
     }
     int device_count = 0;
@@ -179,9 +196,13 @@ int main(int argc, char** argv) {
     const std::uint32_t kSamples = args.batch_size;
     const std::uint64_t params = ParamCount(shape);
     std::vector<float> weights(params);
+    std::vector<float> host_adam_m(params, 0.0f);
+    std::vector<float> host_adam_v(params, 0.0f);
     for (std::uint64_t i = 0; i < params; ++i) {
         weights[i] = static_cast<float>((static_cast<int>(i % 29) - 14) * 0.0001);
     }
+    const bool resumed = !args.resume_checkpoint.empty();
+    if (resumed && !ReadCheckpoint(args.resume_checkpoint, &weights, &host_adam_m, &host_adam_v)) return EXIT_FAILURE;
 
     const mgt::PuzzleDefinition puzzle = BuildPuzzle();
     float* d_weights = nullptr;
@@ -207,8 +228,8 @@ int main(int argc, char** argv) {
     if (Check(cudaMemcpy(d_weights, weights.data(), params * sizeof(float), cudaMemcpyHostToDevice)) != 0) return EXIT_FAILURE;
     if (Check(cudaMemcpy(d_moves, puzzle.moves.data(), mgt::kMoveCount * sizeof(mgt::TrainState80), cudaMemcpyHostToDevice)) != 0) return EXIT_FAILURE;
     if (Check(cudaMemcpy(d_target, &puzzle.target, sizeof(mgt::TrainState80), cudaMemcpyHostToDevice)) != 0) return EXIT_FAILURE;
-    if (Check(cudaMemset(d_m, 0, params * sizeof(float))) != 0) return EXIT_FAILURE;
-    if (Check(cudaMemset(d_v, 0, params * sizeof(float))) != 0) return EXIT_FAILURE;
+    if (Check(cudaMemcpy(d_m, host_adam_m.data(), params * sizeof(float), cudaMemcpyHostToDevice)) != 0) return EXIT_FAILURE;
+    if (Check(cudaMemcpy(d_v, host_adam_v.data(), params * sizeof(float), cudaMemcpyHostToDevice)) != 0) return EXIT_FAILURE;
 
     bool nccl_enabled = false;
 #ifdef MGT_HAS_NCCL
@@ -229,7 +250,7 @@ int main(int argc, char** argv) {
     log << "rank=" << args.global_rank << " local_rank=" << args.local_rank << " device=" << args.device_id
         << " world_size=" << args.world_size << " phase=start batch_states=" << kSamples
         << " hd1=" << shape.hd1 << " hd2=" << shape.hd2 << " k_min=" << args.k_min << " k_max=" << args.k_max
-        << " nccl=" << (nccl_enabled ? 1 : 0) << "\n";
+        << " nccl=" << (nccl_enabled ? 1 : 0) << " resumed=" << (resumed ? 1 : 0) << "\n";
 
     const mgt_cuda::AdamWKernelConfig adam{params, 1, 0.0001f, 0.9f, 0.999f, 1.0e-8f, 0.0f};
     float last_loss = 0.0f;
@@ -261,7 +282,7 @@ int main(int argc, char** argv) {
     meta << "MODEL_MODE=MLP2RB\nOUTPUT_DIM=1\nWORLD_SIZE=" << args.world_size << "\nGLOBAL_RANK=" << args.global_rank
          << "\nLOCAL_RANK=" << args.local_rank << "\nDEVICE_ID=" << args.device_id << "\nHD1=" << shape.hd1 << "\nHD2=" << shape.hd2
          << "\nK_MIN=" << args.k_min << "\nK_MAX=" << args.k_max << "\nBATCH_SIZE=" << kSamples
-         << "\nNCCL_ENABLED=" << (nccl_enabled ? 1 : 0) << "\nNUM_PARAMETERS=" << params << "\n";
+         << "\nNCCL_ENABLED=" << (nccl_enabled ? 1 : 0) << "\nRESUME_CHECKPOINT=" << (resumed ? 1 : 0) << "\nNUM_PARAMETERS=" << params << "\n";
     std::ofstream layers(args.output_dir / "layers.json");
     layers << "{\n  \"model_mode\": \"MLP2RB\",\n  \"output_dim\": 1,\n  \"state_len\": 72,\n  \"state_value_pad\": 128,\n  \"hd1\": " << shape.hd1 << ",\n  \"hd2\": " << shape.hd2 << ",\n  \"num_parameters\": " << params << "\n}\n";
 
