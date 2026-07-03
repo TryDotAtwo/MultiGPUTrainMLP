@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root="${1:?run root required}"
+world_size="${2:?world size required}"
+if [ "$world_size" -lt 1 ]; then
+  echo "world_size must be positive" >&2
+  exit 1
+fi
+seen=""
+for rank in $(seq 0 $((world_size - 1))); do
+  run_dir="$root/rank${rank}"
+  test -d "$run_dir"
+  test -s "$run_dir/metadata.env"
+  test -s "$run_dir/train.log"
+  test -s "$run_dir/layers.json"
+  test -s "$run_dir/weights/manifest.json"
+  test -s "$run_dir/weights/weights.f32.bin"
+  grep -q "WORLD_SIZE=${world_size}" "$run_dir/metadata.env"
+  grep -q "GLOBAL_RANK=${rank}" "$run_dir/metadata.env"
+  grep -q "LOCAL_RANK=${rank}" "$run_dir/metadata.env"
+  grep -q "DEVICE_ID=${rank}" "$run_dir/metadata.env"
+  grep -q 'MODEL_MODE=MLP2RB' "$run_dir/metadata.env"
+  grep -q 'OUTPUT_DIM=1' "$run_dir/metadata.env"
+  grep -q 'phase=train' "$run_dir/train.log"
+  grep -q '"format": "stream1_weights"' "$run_dir/weights/manifest.json"
+  current=$(grep '^GLOBAL_RANK=' "$run_dir/metadata.env" | cut -d= -f2)
+  case " $seen " in
+    *" $current "*) echo "duplicate rank ${current}" >&2; exit 1 ;;
+  esac
+  seen="$seen $current"
+done
+count=$(find "$root" -maxdepth 1 -type d -name 'rank*' | wc -l)
+if [ "$count" -ne "$world_size" ]; then
+  echo "rank directory count ${count} != world_size ${world_size}" >&2
+  exit 1
+fi
+echo "rank_outputs_ok world_size=${world_size}"

@@ -1,6 +1,6 @@
 # Kaggle 2xT4 Smoke Run
 
-Цель этого шага - проверить сборку, CUDA smoke-контур, NCCL-сведение и ранговый запуск перед длинным обучением.
+Цель этого шага - проверить сборку, CUDA smoke-контур, NCCL-сведение, ранговый запуск и контракт артефактов перед длинным обучением.
 
 ## Команды
 
@@ -8,10 +8,7 @@
 bash kaggle/kernel/run_2xt4.sh
 ```
 
-Этот скрипт делает две вещи:
-
-- собирает `build-kaggle-2xt4` с `MGT_ENABLE_CUDA=ON`, `MGT_ENABLE_NCCL=ON`, `CMAKE_CUDA_ARCHITECTURES=75`;
-- запускает CTest smoke-набор и затем `kaggle/kernel/run_ranks_2xt4.sh`.
+Скрипт собирает `build-kaggle-2xt4` с `MGT_ENABLE_CUDA=ON`, `MGT_ENABLE_NCCL=ON`, `CMAKE_CUDA_ARCHITECTURES=75`, запускает CTest smoke-набор, затем запускает ранги через `kaggle/kernel/run_ranks_2xt4.sh`.
 
 Для отдельной проверки рангового запуска:
 
@@ -19,9 +16,15 @@ bash kaggle/kernel/run_2xt4.sh
 bash kaggle/kernel/run_ranks_2xt4.sh
 ```
 
-## Ожидаемый результат
+Для отдельной проверки уже созданных rank-артефактов:
 
-CTest должен пройти:
+```bash
+bash kaggle/kernel/check_rank_outputs.sh runs/kaggle-2xt4 2
+```
+
+## CTest Smoke
+
+Должны пройти:
 
 - `cuda_compile`;
 - `cuda_random_walk_smoke`;
@@ -35,14 +38,27 @@ CTest должен пройти:
 - `native_train_profile_smoke`;
 - `native_train_artifacts`.
 
-Ранговый запуск пишет:
+## Rank Outputs
+
+`run_ranks_2xt4.sh` пишет отдельный каталог на каждый ранг:
 
 - `runs/kaggle-2xt4/rank0/metadata.env`;
 - `runs/kaggle-2xt4/rank0/train.log`;
-- `runs/kaggle-2xt4/rank0/weights/weights.f32.bin`;
-- на двух T4 также `rank1/...` с `WORLD_SIZE=2` и `GLOBAL_RANK=1`.
+- `runs/kaggle-2xt4/rank0/layers.json`;
+- `runs/kaggle-2xt4/rank0/weights/manifest.json`;
+- `runs/kaggle-2xt4/rank0/weights/weights.f32.bin`.
 
-На локальной однокарточной машине `run_ranks_2xt4.sh` запускает `WORLD_SIZE=1`, чтобы Docker-контур разработки не блокировался отсутствием второй карты. На Kaggle при двух видимых T4 запускаются два процесса, по одному на устройство.
+На Kaggle при двух видимых T4 также создается `rank1/...`. Проверка `check_rank_outputs.sh` требует:
+
+- число каталогов `rank*` равно `WORLD_SIZE`;
+- каждый ранг имеет уникальный `GLOBAL_RANK`;
+- `WORLD_SIZE`, `GLOBAL_RANK`, `LOCAL_RANK`, `DEVICE_ID` согласованы с запуском;
+- `MODEL_MODE=MLP2RB`, `OUTPUT_DIM=1` присутствуют в metadata;
+- `train.log` содержит хотя бы один `phase=train`;
+- `weights/manifest.json` объявляет `format=stream1_weights`;
+- файл весов непустой.
+
+На локальной однокарточной машине launcher использует `WORLD_SIZE=1`, чтобы Docker-контур разработки не блокировался отсутствием второй карты. На Kaggle при двух видимых T4 запускаются два процесса, по одному на устройство.
 
 ## Контракт
 

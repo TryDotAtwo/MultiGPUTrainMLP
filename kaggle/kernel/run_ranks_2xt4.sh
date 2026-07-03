@@ -41,11 +41,5 @@ done
 for pid in "${pids[@]}"; do
   wait "$pid"
 done
-for rank in $(seq 0 $((world_size - 1))); do
-  test -s "runs/kaggle-2xt4/rank${rank}/metadata.env"
-  test -s "runs/kaggle-2xt4/rank${rank}/train.log"
-  test -s "runs/kaggle-2xt4/rank${rank}/weights/weights.f32.bin"
-  grep -q "WORLD_SIZE=${world_size}" "runs/kaggle-2xt4/rank${rank}/metadata.env"
-  grep -q "GLOBAL_RANK=${rank}" "runs/kaggle-2xt4/rank${rank}/metadata.env"
-done
+bash kaggle/kernel/check_rank_outputs.sh runs/kaggle-2xt4 "$world_size"
 echo "rank_launch_ok world_size=${world_size}"
