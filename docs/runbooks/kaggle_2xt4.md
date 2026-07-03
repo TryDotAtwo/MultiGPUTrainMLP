@@ -19,7 +19,8 @@ bash kaggle/kernel/run_2xt4.sh
 - `cuda_train_step_smoke` проходит;
 - `nccl_single_rank_smoke` проходит;
 - `nccl_two_device_smoke` на Kaggle видит две T4 и проверяет `allreduce(sum) / WORLD_SIZE`;
-- `native_train_smoke` выполняет несколько шагов online random walks -> backward -> AdamW и пишет train artifacts.
+- `native_train_smoke` выполняет несколько шагов online random walks -> backward -> AdamW и пишет train artifacts;
+- `native_train_artifacts` проверяет `metadata.env`, `layers.json`, `train.log`, `weights/manifest.json` и `weights/weights.f32.bin`.
 
 ## Контракт
 

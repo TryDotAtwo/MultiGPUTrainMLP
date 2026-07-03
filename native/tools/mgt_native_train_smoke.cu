@@ -44,6 +44,26 @@ mgt::PuzzleDefinition BuildPuzzle() {
     return puzzle;
 }
 
+
+bool WriteBinaryWeights(const std::filesystem::path& output_dir, const std::vector<float>& weights) {
+    std::filesystem::create_directories(output_dir / "weights");
+    std::ofstream data(output_dir / "weights" / "weights.f32.bin", std::ios::binary);
+    if (!data) return false;
+    data.write(reinterpret_cast<const char*>(weights.data()), static_cast<std::streamsize>(weights.size() * sizeof(float)));
+    if (!data) return false;
+    std::ofstream manifest(output_dir / "weights" / "manifest.json", std::ios::binary);
+    if (!manifest) return false;
+    manifest << "{\n"
+             << "  \"format\": \"stream1_weights\",\n"
+             << "  \"version\": 1,\n"
+             << "  \"model_mode\": \"MLP2RB\",\n"
+             << "  \"output_dim\": 1,\n"
+             << "  \"dtype\": \"float32\",\n"
+             << "  \"data\": \"weights.f32.bin\",\n"
+             << "  \"total_params\": " << weights.size() << "\n"
+             << "}\n";
+    return static_cast<bool>(manifest);
+}
 bool ParseUint(const char* text, std::uint32_t* out) {
     try {
         const unsigned long value = std::stoul(text);
@@ -141,6 +161,9 @@ int main(int argc, char** argv) {
         if (Check(cudaMemcpy(&last_loss, d_loss, sizeof(float), cudaMemcpyDeviceToHost)) != 0) return EXIT_FAILURE;
         log << "rank=" << args.global_rank << " step=" << step << " phase=train loss=" << last_loss << "\n";
     }
+
+    if (Check(cudaMemcpy(weights.data(), d_weights, params * sizeof(float), cudaMemcpyDeviceToHost)) != 0) return EXIT_FAILURE;
+    if (!WriteBinaryWeights(args.output_dir, weights)) return EXIT_FAILURE;
 
     std::ofstream meta(args.output_dir / "metadata.env");
     meta << "MODEL_MODE=MLP2RB\nOUTPUT_DIM=1\nWORLD_SIZE=" << args.world_size << "\nGLOBAL_RANK=" << args.global_rank
