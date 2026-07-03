@@ -10,3 +10,4 @@
 /build-native-docker*/
 /build-nccl-smoke*/
 /native/native-train-smoke-run/
+/native/native-train-profile-smoke-run/

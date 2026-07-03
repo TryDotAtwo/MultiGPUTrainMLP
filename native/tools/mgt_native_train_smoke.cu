@@ -19,6 +19,11 @@ struct Args {
     std::uint32_t world_size = 1;
     std::uint32_t global_rank = 0;
     std::uint32_t local_rank = 0;
+    std::uint32_t batch_size = 64;
+    std::uint32_t k_min = 1;
+    std::uint32_t k_max = 9;
+    std::uint32_t hd1 = 5;
+    std::uint32_t hd2 = 3;
 };
 
 int Check(cudaError_t status) { return status == cudaSuccess ? 0 : 1; }
@@ -44,8 +49,9 @@ mgt::PuzzleDefinition BuildPuzzle() {
     return puzzle;
 }
 
-
-bool WriteBinaryWeights(const std::filesystem::path& output_dir, const std::vector<float>& weights) {
+bool WriteBinaryWeights(const std::filesystem::path& output_dir,
+                        const std::vector<float>& weights,
+                        const mgt_cuda::CudaMlpShape& shape) {
     std::filesystem::create_directories(output_dir / "weights");
     std::ofstream data(output_dir / "weights" / "weights.f32.bin", std::ios::binary);
     if (!data) return false;
@@ -58,12 +64,17 @@ bool WriteBinaryWeights(const std::filesystem::path& output_dir, const std::vect
              << "  \"version\": 1,\n"
              << "  \"model_mode\": \"MLP2RB\",\n"
              << "  \"output_dim\": 1,\n"
+             << "  \"state_len\": " << shape.state_len << ",\n"
+             << "  \"state_value_pad\": " << shape.state_value_pad << ",\n"
+             << "  \"hd1\": " << shape.hd1 << ",\n"
+             << "  \"hd2\": " << shape.hd2 << ",\n"
              << "  \"dtype\": \"float32\",\n"
              << "  \"data\": \"weights.f32.bin\",\n"
              << "  \"total_params\": " << weights.size() << "\n"
              << "}\n";
     return static_cast<bool>(manifest);
 }
+
 bool ParseUint(const char* text, std::uint32_t* out) {
     try {
         const unsigned long value = std::stoul(text);
@@ -91,11 +102,23 @@ bool ParseArgs(int argc, char** argv, Args* args) {
             if (!ParseUint(value, &args->global_rank)) return false;
         } else if (key == "--local-rank") {
             if (!ParseUint(value, &args->local_rank)) return false;
+        } else if (key == "--batch-size") {
+            if (!ParseUint(value, &args->batch_size)) return false;
+        } else if (key == "--k-min") {
+            if (!ParseUint(value, &args->k_min)) return false;
+        } else if (key == "--k-max") {
+            if (!ParseUint(value, &args->k_max)) return false;
+        } else if (key == "--hd1") {
+            if (!ParseUint(value, &args->hd1)) return false;
+        } else if (key == "--hd2") {
+            if (!ParseUint(value, &args->hd2)) return false;
         } else {
             return false;
         }
     }
-    return args->steps > 0 && args->world_size > 0 && args->global_rank < args->world_size;
+    return args->steps > 0 && args->world_size > 0 && args->global_rank < args->world_size &&
+           args->batch_size > 0 && args->k_min > 0 && args->k_min <= args->k_max &&
+           args->hd1 > 0 && args->hd1 <= 64 && args->hd2 > 0 && args->hd2 <= 64;
 }
 
 }  // namespace
@@ -103,15 +126,15 @@ bool ParseArgs(int argc, char** argv, Args* args) {
 int main(int argc, char** argv) {
     Args args{};
     if (!ParseArgs(argc, argv, &args)) {
-        std::cerr << "usage: mgt_native_train_smoke --output-dir DIR --steps N --device-id ID --world-size N --global-rank R --local-rank R\n";
+        std::cerr << "usage: mgt_native_train_smoke --output-dir DIR --steps N --device-id ID --world-size N --global-rank R --local-rank R [--batch-size N --k-min N --k-max N --hd1 N --hd2 N]\n";
         return EXIT_FAILURE;
     }
     int device_count = 0;
     if (Check(cudaGetDeviceCount(&device_count)) != 0 || device_count <= static_cast<int>(args.device_id)) return EXIT_FAILURE;
     if (Check(cudaSetDevice(static_cast<int>(args.device_id))) != 0) return EXIT_FAILURE;
 
-    const mgt_cuda::CudaMlpShape shape{mgt::kStateLen, 128, 5, 3};
-    constexpr std::uint32_t kSamples = 64;
+    const mgt_cuda::CudaMlpShape shape{mgt::kStateLen, 128, args.hd1, args.hd2};
+    const std::uint32_t kSamples = args.batch_size;
     const std::uint64_t params = ParamCount(shape);
     std::vector<float> weights(params);
     for (std::uint64_t i = 0; i < params; ++i) {
@@ -148,12 +171,13 @@ int main(int argc, char** argv) {
     std::filesystem::create_directories(args.output_dir);
     std::ofstream log(args.output_dir / "train.log");
     log << "rank=" << args.global_rank << " local_rank=" << args.local_rank << " device=" << args.device_id
-        << " world_size=" << args.world_size << " phase=start batch_states=" << kSamples << "\n";
+        << " world_size=" << args.world_size << " phase=start batch_states=" << kSamples
+        << " hd1=" << shape.hd1 << " hd2=" << shape.hd2 << " k_min=" << args.k_min << " k_max=" << args.k_max << "\n";
 
     const mgt_cuda::AdamWKernelConfig adam{params, 1, 0.0001f, 0.9f, 0.999f, 1.0e-8f, 0.0f};
     float last_loss = 0.0f;
     for (std::uint32_t step = 0; step < args.steps; ++step) {
-        const mgt_cuda::RandomWalkKernelConfig walks{kSamples, 1, 9};
+        const mgt_cuda::RandomWalkKernelConfig walks{kSamples, args.k_min, args.k_max};
         if (mgt_cuda::LaunchRandomWalkKernel(walks, 1234, 0, step, args.global_rank, d_moves, d_target, d_states, d_labels, d_meta, 0) != mgt::Status::kOk) return EXIT_FAILURE;
         if (mgt_cuda::LaunchMlpLossGradKernel(shape, d_weights, d_states, d_labels, kSamples, d_loss, d_grad, 0) != mgt::Status::kOk) return EXIT_FAILURE;
         if (mgt_cuda::LaunchAdamWKernel(adam, d_weights, d_grad, d_m, d_v, 0) != mgt::Status::kOk) return EXIT_FAILURE;
@@ -163,13 +187,14 @@ int main(int argc, char** argv) {
     }
 
     if (Check(cudaMemcpy(weights.data(), d_weights, params * sizeof(float), cudaMemcpyDeviceToHost)) != 0) return EXIT_FAILURE;
-    if (!WriteBinaryWeights(args.output_dir, weights)) return EXIT_FAILURE;
+    if (!WriteBinaryWeights(args.output_dir, weights, shape)) return EXIT_FAILURE;
 
     std::ofstream meta(args.output_dir / "metadata.env");
     meta << "MODEL_MODE=MLP2RB\nOUTPUT_DIM=1\nWORLD_SIZE=" << args.world_size << "\nGLOBAL_RANK=" << args.global_rank
-         << "\nLOCAL_RANK=" << args.local_rank << "\nDEVICE_ID=" << args.device_id << "\nNUM_PARAMETERS=" << params << "\n";
+         << "\nLOCAL_RANK=" << args.local_rank << "\nDEVICE_ID=" << args.device_id << "\nHD1=" << shape.hd1 << "\nHD2=" << shape.hd2
+         << "\nK_MIN=" << args.k_min << "\nK_MAX=" << args.k_max << "\nBATCH_SIZE=" << kSamples << "\nNUM_PARAMETERS=" << params << "\n";
     std::ofstream layers(args.output_dir / "layers.json");
-    layers << "{\n  \"model_mode\": \"MLP2RB\",\n  \"output_dim\": 1,\n  \"state_len\": 72,\n  \"state_value_pad\": 128,\n  \"hd1\": 5,\n  \"hd2\": 3,\n  \"num_parameters\": " << params << "\n}\n";
+    layers << "{\n  \"model_mode\": \"MLP2RB\",\n  \"output_dim\": 1,\n  \"state_len\": 72,\n  \"state_value_pad\": 128,\n  \"hd1\": " << shape.hd1 << ",\n  \"hd2\": " << shape.hd2 << ",\n  \"num_parameters\": " << params << "\n}\n";
 
     cudaFree(d_target);
     cudaFree(d_moves);
