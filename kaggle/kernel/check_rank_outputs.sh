@@ -32,7 +32,9 @@ for rank in $(seq 0 $((world_size - 1))); do
   grep -q '"format": "stream1_weights"' "$run_dir/weights/manifest.json"
   grep -q '"dtype": "fp16"' "$run_dir/weights/manifest.json"
   grep -q '"num_classes": 72' "$run_dir/weights/manifest.json"
-  grep -q '"nrd": 1' "$run_dir/weights/manifest.json"
+  grep -q "\"nrd\": ${MGT_NRD:-1}" "$run_dir/weights/manifest.json"
+  grep -q "\"original_hd1\": ${MGT_HD1:-5}" "$run_dir/weights/manifest.json"
+  grep -q "\"original_hd2\": ${MGT_HD2:-3}" "$run_dir/weights/manifest.json"
   grep -q '"format": "mgt_train_checkpoint"' "$run_dir/checkpoint/manifest.json"
   current=$(grep '^GLOBAL_RANK=' "$run_dir/metadata.env" | cut -d= -f2)
   case " $seen " in

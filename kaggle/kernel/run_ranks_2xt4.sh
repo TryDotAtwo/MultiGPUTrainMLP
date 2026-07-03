@@ -23,6 +23,15 @@ else
 fi
 mkdir -p runs/kaggle-2xt4
 rm -f runs/kaggle-2xt4/nccl.id
+if [ "${MGT_FULL_MODEL:-0}" = "1" ]; then
+  export MGT_STEPS="${MGT_STEPS:-1}"
+  export MGT_BATCH_SIZE="${MGT_BATCH_SIZE:-1}"
+  export MGT_K_MIN="${MGT_K_MIN:-1}"
+  export MGT_K_MAX="${MGT_K_MAX:-29}"
+  export MGT_HD1="${MGT_HD1:-2556}"
+  export MGT_HD2="${MGT_HD2:-218}"
+  export MGT_NRD="${MGT_NRD:-16}"
+fi
 pids=()
 for rank in $(seq 0 $((world_size - 1))); do
   ./build-kaggle-2xt4/mgt_native_train \

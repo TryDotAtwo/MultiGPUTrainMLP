@@ -32,8 +32,9 @@ def build_payload(root: Path, output: Path) -> bytes:
     return output.read_bytes()
 
 
-def write_kernel_script(output_dir: Path, payload: bytes) -> None:
+def write_kernel_script(output_dir: Path, payload: bytes, full_model: bool) -> None:
     encoded = base64.b64encode(payload).decode("ascii")
+    full_model_default = "1" if full_model else "0"
     script = f'''import base64
 import os
 import subprocess
@@ -52,6 +53,7 @@ runner = root / "kaggle" / "kernel" / "run_2xt4.sh"
 print("runner_exists=", runner.exists(), "cwd=", root, flush=True)
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0,1")
 os.environ.setdefault("MGT_CUDA_ARCH", "75")
+os.environ.setdefault("MGT_FULL_MODEL", {full_model_default!r})
 result = subprocess.run(["bash", str(runner)])
 sys.exit(result.returncode)
 '''
@@ -82,6 +84,7 @@ def main() -> None:
     parser.add_argument("--output-dir", default="test_results/mgt_kaggle_kernel")
     parser.add_argument("--kernel-id", default="trydotatwo/native-multigpu-mlp-trainer")
     parser.add_argument("--title", default="native-multigpu-mlp-trainer")
+    parser.add_argument("--full-model", action="store_true")
     args = parser.parse_args()
 
     root = Path(__file__).resolve().parents[1]
@@ -89,7 +92,7 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     payload_path = output_dir / "payload.zip"
     payload = build_payload(root, payload_path)
-    write_kernel_script(output_dir, payload)
+    write_kernel_script(output_dir, payload, args.full_model)
     write_metadata(output_dir, args.kernel_id, args.title)
     print(output_dir)
     print(f"payload_bytes={len(payload)}")

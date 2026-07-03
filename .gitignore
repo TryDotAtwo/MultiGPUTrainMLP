@@ -15,3 +15,5 @@
 /native/native-train-nccl-smoke-run/
 /native/native-train-resume-smoke-run/
 /test_results/
+
+__pycache__/
