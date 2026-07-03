@@ -14,6 +14,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -58,33 +59,115 @@ mgt::PuzzleDefinition BuildPuzzle() {
     return puzzle;
 }
 
-bool WriteBinaryWeights(const std::filesystem::path& output_dir,
-                        const std::vector<float>& weights,
-                        const mgt_cuda::CudaMlpShape& shape) {
+std::uint32_t RoundUp(std::uint32_t value, std::uint32_t alignment) {
+    return ((value + alignment - 1U) / alignment) * alignment;
+}
+
+std::uint16_t FloatToFp16(float value) {
+    std::uint32_t bits = 0;
+    static_assert(sizeof(bits) == sizeof(value));
+    std::memcpy(&bits, &value, sizeof(bits));
+    const std::uint32_t sign = (bits >> 16U) & 0x8000U;
+    std::int32_t exp = static_cast<std::int32_t>((bits >> 23U) & 0xffU) - 127 + 15;
+    std::uint32_t mant = bits & 0x7fffffU;
+    if (exp <= 0) {
+        if (exp < -10) return static_cast<std::uint16_t>(sign);
+        mant = (mant | 0x800000U) >> static_cast<std::uint32_t>(1 - exp);
+        return static_cast<std::uint16_t>(sign | ((mant + 0x1000U) >> 13U));
+    }
+    if (exp >= 31) return static_cast<std::uint16_t>(sign | 0x7c00U);
+    return static_cast<std::uint16_t>(sign | (static_cast<std::uint32_t>(exp) << 10U) | ((mant + 0x1000U) >> 13U));
+}
+
+bool WriteFp16File(const std::filesystem::path& path, const std::vector<float>& values) {
+    std::ofstream data(path, std::ios::binary);
+    if (!data) return false;
+    for (float value : values) {
+        const std::uint16_t half = FloatToFp16(value);
+        data.write(reinterpret_cast<const char*>(&half), sizeof(half));
+    }
+    return static_cast<bool>(data);
+}
+
+bool WriteStream1Weights(const std::filesystem::path& output_dir,
+                         const std::vector<float>& weights,
+                         const mgt_cuda::CudaMlpShape& shape) {
     std::filesystem::create_directories(output_dir / "weights");
-    std::ofstream data(output_dir / "weights" / "weights.f32.bin", std::ios::binary);
-    if (!data) return false;
-    data.write(reinterpret_cast<const char*>(weights.data()), static_cast<std::streamsize>(weights.size() * sizeof(float)));
-    if (!data) return false;
+    std::ofstream flat(output_dir / "weights" / "weights.f32.bin", std::ios::binary);
+    if (!flat) return false;
+    flat.write(reinterpret_cast<const char*>(weights.data()), static_cast<std::streamsize>(weights.size() * sizeof(float)));
+    if (!flat) return false;
+
+    const std::uint64_t input_table = 0;
+    const std::uint64_t input_bias = input_table + static_cast<std::uint64_t>(shape.state_len) * shape.state_value_pad * shape.hd1;
+    const std::uint64_t hidden_weight = input_bias + shape.hd1;
+    const std::uint64_t hidden_bias = hidden_weight + static_cast<std::uint64_t>(shape.hd1) * shape.hd2;
+    const std::uint64_t output_weight = hidden_bias + shape.hd2;
+    const std::uint64_t output_bias = output_weight + shape.hd2;
+    const std::uint32_t hidden1 = RoundUp(shape.hd1, 8);
+    const std::uint32_t hidden2 = RoundUp(shape.hd2, 8);
+    const std::uint32_t residual_count = 1;
+
+    std::vector<float> buffer;
+    buffer.assign(static_cast<std::uint64_t>(shape.state_len) * shape.state_value_pad * hidden1, 0.0f);
+    for (std::uint32_t row = 0; row < shape.state_len * shape.state_value_pad; ++row) {
+        for (std::uint32_t h = 0; h < shape.hd1; ++h) {
+            buffer[static_cast<std::uint64_t>(row) * hidden1 + h] = weights[input_table + static_cast<std::uint64_t>(row) * shape.hd1 + h];
+        }
+    }
+    if (!WriteFp16File(output_dir / "weights" / "input_weight_hxk.fp16", buffer)) return false;
+
+    buffer.assign(hidden1, 0.0f);
+    for (std::uint32_t h = 0; h < shape.hd1; ++h) buffer[h] = weights[input_bias + h];
+    if (!WriteFp16File(output_dir / "weights" / "input_bias.fp16", buffer)) return false;
+
+    buffer.assign(static_cast<std::uint64_t>(hidden1) * hidden2, 0.0f);
+    for (std::uint32_t h = 0; h < shape.hd1; ++h) {
+        for (std::uint32_t j = 0; j < shape.hd2; ++j) {
+            buffer[static_cast<std::uint64_t>(h) * hidden2 + j] = weights[hidden_weight + static_cast<std::uint64_t>(h) * shape.hd2 + j];
+        }
+    }
+    if (!WriteFp16File(output_dir / "weights" / "hidden_weight_hxk.fp16", buffer)) return false;
+
+    buffer.assign(hidden2, 0.0f);
+    for (std::uint32_t j = 0; j < shape.hd2; ++j) buffer[j] = weights[hidden_bias + j];
+    if (!WriteFp16File(output_dir / "weights" / "hidden_bias.fp16", buffer)) return false;
+
+    buffer.assign(static_cast<std::uint64_t>(hidden2) * hidden2, 0.0f);
+    if (!WriteFp16File(output_dir / "weights" / "residual0_fc1_weight_hxk.fp16", buffer)) return false;
+    if (!WriteFp16File(output_dir / "weights" / "residual0_fc2_weight_hxk.fp16", buffer)) return false;
+    buffer.assign(hidden2, 0.0f);
+    if (!WriteFp16File(output_dir / "weights" / "residual0_fc1_bias.fp16", buffer)) return false;
+    if (!WriteFp16File(output_dir / "weights" / "residual0_fc2_bias.fp16", buffer)) return false;
+
+    buffer.assign(static_cast<std::uint64_t>(hidden2), 0.0f);
+    for (std::uint32_t j = 0; j < shape.hd2; ++j) buffer[j] = weights[output_weight + j];
+    if (!WriteFp16File(output_dir / "weights" / "output_weight_hxk.fp16", buffer)) return false;
+
+    buffer.assign(1, weights[output_bias]);
+    if (!WriteFp16File(output_dir / "weights" / "output_bias.fp16", buffer)) return false;
+
     std::ofstream manifest(output_dir / "weights" / "manifest.json", std::ios::binary);
     if (!manifest) return false;
     manifest << "{\n"
              << "  \"format\": \"stream1_weights\",\n"
              << "  \"version\": 1,\n"
-             << "  \"model_mode\": \"MLP2RB\",\n"
-             << "  \"output_dim\": 1,\n"
              << "  \"state_len\": " << shape.state_len << ",\n"
-             << "  \"state_value_pad\": " << shape.state_value_pad << ",\n"
-             << "  \"hd1\": " << shape.hd1 << ",\n"
-             << "  \"hd2\": " << shape.hd2 << ",\n"
-             << "  \"dtype\": \"float32\",\n"
-             << "  \"data\": \"weights.f32.bin\",\n"
-             << "  \"total_params\": " << weights.size() << "\n"
+             << "  \"num_classes\": " << shape.state_value_pad << ",\n"
+             << "  \"hd1\": " << hidden1 << ",\n"
+             << "  \"hd2\": " << hidden2 << ",\n"
+             << "  \"original_hd1\": " << shape.hd1 << ",\n"
+             << "  \"original_hd2\": " << shape.hd2 << ",\n"
+             << "  \"hidden_alignment\": 8,\n"
+             << "  \"nrd\": " << residual_count << ",\n"
+             << "  \"output_dim\": 1,\n"
+             << "  \"dtype\": \"fp16\",\n"
+             << "  \"normalization\": \"none\",\n"
+             << "  \"layout\": \"row-major input activations times weight_hxk\",\n"
+             << "  \"flat_debug_weights\": \"weights.f32.bin\"\n"
              << "}\n";
     return static_cast<bool>(manifest);
 }
-
-
 bool WriteCheckpoint(const std::filesystem::path& output_dir,
                      const std::vector<float>& weights,
                      const std::vector<float>& adam_m,
@@ -302,7 +385,7 @@ int main(int argc, char** argv) {
     if (Check(cudaMemcpy(weights.data(), d_weights, params * sizeof(float), cudaMemcpyDeviceToHost)) != 0) return EXIT_FAILURE;
     if (Check(cudaMemcpy(adam_m.data(), d_m, params * sizeof(float), cudaMemcpyDeviceToHost)) != 0) return EXIT_FAILURE;
     if (Check(cudaMemcpy(adam_v.data(), d_v, params * sizeof(float), cudaMemcpyDeviceToHost)) != 0) return EXIT_FAILURE;
-    if (!WriteBinaryWeights(args.output_dir, weights, shape)) return EXIT_FAILURE;
+    if (!WriteStream1Weights(args.output_dir, weights, shape)) return EXIT_FAILURE;
     if (!WriteCheckpoint(args.output_dir, weights, adam_m, adam_v, args.steps, shape)) return EXIT_FAILURE;
 
     std::ofstream meta(args.output_dir / "metadata.env");

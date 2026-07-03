@@ -15,6 +15,9 @@ for rank in $(seq 0 $((world_size - 1))); do
   test -s "$run_dir/layers.json"
   test -s "$run_dir/weights/manifest.json"
   test -s "$run_dir/weights/weights.f32.bin"
+  test -s "$run_dir/weights/input_weight_hxk.fp16"
+  test -s "$run_dir/weights/hidden_weight_hxk.fp16"
+  test -s "$run_dir/weights/output_weight_hxk.fp16"
   test -s "$run_dir/checkpoint/manifest.json"
   test -s "$run_dir/checkpoint/state.f32.bin"
   grep -q "WORLD_SIZE=${world_size}" "$run_dir/metadata.env"
@@ -27,6 +30,9 @@ for rank in $(seq 0 $((world_size - 1))); do
   grep -q 'phase=train' "$run_dir/train.log"
   grep -q 'nccl=1' "$run_dir/train.log"
   grep -q '"format": "stream1_weights"' "$run_dir/weights/manifest.json"
+  grep -q '"dtype": "fp16"' "$run_dir/weights/manifest.json"
+  grep -q '"num_classes": 128' "$run_dir/weights/manifest.json"
+  grep -q '"nrd": 1' "$run_dir/weights/manifest.json"
   grep -q '"format": "mgt_train_checkpoint"' "$run_dir/checkpoint/manifest.json"
   current=$(grep '^GLOBAL_RANK=' "$run_dir/metadata.env" | cut -d= -f2)
   case " $seen " in
