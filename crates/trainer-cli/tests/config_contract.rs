@@ -25,3 +25,12 @@ fn rejects_wrong_output_dim() {
     let err = cfg.validate().unwrap_err().to_string();
     assert!(err.contains("output_dim"));
 }
+
+#[test]
+fn default_config_toml_roundtrips() {
+    let cfg = TrainerConfig::p888_default();
+    let text = toml::to_string_pretty(&cfg).unwrap();
+    let parsed: TrainerConfig = toml::from_str(&text).unwrap();
+    assert_eq!(parsed, cfg);
+    assert!(parsed.validate().is_ok());
+}

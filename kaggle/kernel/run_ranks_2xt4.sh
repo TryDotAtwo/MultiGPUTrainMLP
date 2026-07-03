@@ -3,7 +3,7 @@ set -euo pipefail
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1}
 export MGT_CUDA_ARCH=${MGT_CUDA_ARCH:-75}
 cmake -S native -B build-kaggle-2xt4 -DMGT_ENABLE_CUDA=ON -DMGT_ENABLE_NCCL=ON -DCMAKE_CUDA_ARCHITECTURES=${MGT_CUDA_ARCH}
-cmake --build build-kaggle-2xt4 --config Release --target mgt_native_train_smoke
+cmake --build build-kaggle-2xt4 --config Release --target mgt_native_train
 if command -v nvidia-smi >/dev/null 2>&1; then
   visible_count=$(nvidia-smi -L | wc -l)
 else
@@ -25,7 +25,7 @@ mkdir -p runs/kaggle-2xt4
 rm -f runs/kaggle-2xt4/nccl.id
 pids=()
 for rank in $(seq 0 $((world_size - 1))); do
-  ./build-kaggle-2xt4/mgt_native_train_smoke \
+  ./build-kaggle-2xt4/mgt_native_train \
     --output-dir "runs/kaggle-2xt4/rank${rank}" \
     --steps "${MGT_STEPS:-3}" \
     --device-id "$rank" \

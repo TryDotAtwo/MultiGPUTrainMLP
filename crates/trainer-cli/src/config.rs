@@ -49,7 +49,7 @@ impl TrainerConfig {
             adam_beta1: 0.9,
             adam_beta2: 0.999,
             adam_eps: 1.0e-8,
-            base_seed: 0x8880_0000_0000_0001,
+            base_seed: 0x0888_0000_0000_0001,
             checkpoint_period_steps: 4096,
             weight_export_period_steps: 4096,
         }
