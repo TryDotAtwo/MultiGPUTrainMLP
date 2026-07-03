@@ -34,7 +34,7 @@ impl TrainerConfig {
             target_id: 0,
             state_len: 72,
             state_alignment: 16,
-            state_value_pad: 128,
+            state_value_pad: 72,
             move_count: 18,
             output_dim: 1,
             hd1: 2556,
@@ -80,8 +80,8 @@ impl TrainerConfig {
         if self.state_alignment != 16 {
             bail!("state_alignment must be 16");
         }
-        if self.state_value_pad != 128 {
-            bail!("state_value_pad must be 128");
+        if self.state_value_pad != 72 {
+            bail!("state_value_pad must be 72");
         }
         if self.move_count != 18 {
             bail!("move_count must be 18");

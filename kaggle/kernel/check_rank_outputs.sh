@@ -31,7 +31,7 @@ for rank in $(seq 0 $((world_size - 1))); do
   grep -q 'nccl=1' "$run_dir/train.log"
   grep -q '"format": "stream1_weights"' "$run_dir/weights/manifest.json"
   grep -q '"dtype": "fp16"' "$run_dir/weights/manifest.json"
-  grep -q '"num_classes": 128' "$run_dir/weights/manifest.json"
+  grep -q '"num_classes": 72' "$run_dir/weights/manifest.json"
   grep -q '"nrd": 1' "$run_dir/weights/manifest.json"
   grep -q '"format": "mgt_train_checkpoint"' "$run_dir/checkpoint/manifest.json"
   current=$(grep '^GLOBAL_RANK=' "$run_dir/metadata.env" | cut -d= -f2)

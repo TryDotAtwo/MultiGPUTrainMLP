@@ -48,7 +48,7 @@ int main() {
     if (Check(cudaGetDeviceCount(&device_count)) != 0 || device_count <= 0) return EXIT_FAILURE;
     if (Check(cudaSetDevice(0)) != 0) return EXIT_FAILURE;
 
-    const mgt_cuda::CudaMlpShape shape{mgt::kStateLen, 128, 5, 3, 1};
+    const mgt_cuda::CudaMlpShape shape{mgt::kStateLen, mgt::kStateLen, 5, 3, 1};
     constexpr std::uint32_t kSamples = 32;
     const std::uint64_t params = ParamCount(shape);
     std::vector<float> weights(params);

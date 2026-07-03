@@ -132,11 +132,12 @@ fn read_env_u64(name: &str, default_value: u64) -> Result<u64> {
 
 fn config_snapshot(cfg: &TrainerConfig) -> String {
     format!(
-        "group_id = {}\ntarget_id = {}\nstate_len = {}\nstate_alignment = {}\nstate_value_pad = {}\nmove_count = {}\noutput_dim = {}\nhd1 = {}\nhd2 = {}\nresidual_blocks = {}\nwalkers_per_depth = {}\nk_min = {}\nk_max = {}\nepochs = {}\nlearning_rate = {}\nweight_decay = {}\nadam_beta1 = {}\nadam_beta2 = {}\nadam_eps = {}\nbase_seed = \"0x{:016x}\"\ncheckpoint_period_steps = {}\nweight_export_period_steps = {}\n",
+        "group_id = {}\ntarget_id = {}\nstate_len = {}\nstate_alignment = {}\nstate_storage_len = {}\nnum_classes = {}\nmove_count = {}\noutput_dim = {}\nhd1 = {}\nhd2 = {}\nresidual_blocks = {}\nwalkers_per_depth = {}\nk_min = {}\nk_max = {}\nepochs = {}\nlearning_rate = {}\nweight_decay = {}\nadam_beta1 = {}\nadam_beta2 = {}\nadam_eps = {}\nbase_seed = \"0x{:016x}\"\ncheckpoint_period_steps = {}\nweight_export_period_steps = {}\n",
         cfg.group_id,
         cfg.target_id,
         cfg.state_len,
         cfg.state_alignment,
+        cfg.state_storage_len(),
         cfg.state_value_pad,
         cfg.move_count,
         cfg.output_dim,

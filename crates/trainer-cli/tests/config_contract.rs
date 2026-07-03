@@ -11,7 +11,7 @@ fn p888_default_matches_static_contract() {
     assert_eq!(cfg.state_len, 72);
     assert_eq!(cfg.state_storage_len(), 80);
     assert_eq!(cfg.state_alignment, 16);
-    assert_eq!(cfg.state_value_pad, 128);
+    assert_eq!(cfg.state_value_pad, 72);
     assert_eq!(cfg.move_count, 18);
     assert_eq!(cfg.output_dim, 1);
     assert_eq!(cfg.batch_states_per_rank(), 100_021);

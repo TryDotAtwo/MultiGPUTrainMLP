@@ -220,7 +220,8 @@ bool WriteCheckpoint(const std::filesystem::path& output_dir,
              << "  \"model_mode\": \"MLP2RB\",\n"
              << "  \"output_dim\": 1,\n"
              << "  \"state_len\": " << shape.state_len << ",\n"
-             << "  \"state_value_pad\": " << shape.state_value_pad << ",\n"
+             << "  \"state_storage_len\": " << mgt::kStateStorageLen << ",\n"
+             << "  \"num_classes\": " << shape.state_value_pad << ",\n"
              << "  \"hd1\": " << shape.hd1 << ",\n"
              << "  \"hd2\": " << shape.hd2 << ",\n"
              << "  \"nrd\": " << shape.residual_blocks << ",\n"
@@ -426,7 +427,7 @@ int main(int argc, char** argv) {
          << "\nK_MIN=" << args.k_min << "\nK_MAX=" << args.k_max << "\nBATCH_SIZE=" << kSamples
          << "\nNCCL_ENABLED=" << (nccl_enabled ? 1 : 0) << "\nRESUME_CHECKPOINT=" << (resumed ? 1 : 0) << "\nNUM_PARAMETERS=" << params << "\n";
     std::ofstream layers(args.output_dir / "layers.json");
-    layers << "{\n  \"model_mode\": \"MLP2RB\",\n  \"output_dim\": 1,\n  \"state_len\": 72,\n  \"state_value_pad\": 128,\n  \"num_classes\": " << shape.state_value_pad << ",\n  \"hd1\": " << shape.hd1 << ",\n  \"hd2\": " << shape.hd2 << ",\n  \"nrd\": " << shape.residual_blocks << ",\n  \"num_parameters\": " << params << "\n}\n";
+    layers << "{\n  \"model_mode\": \"MLP2RB\",\n  \"output_dim\": 1,\n  \"state_len\": 72,\n  \"state_storage_len\": 80,\n  \"num_classes\": " << shape.state_value_pad << ",\n  \"hd1\": " << shape.hd1 << ",\n  \"hd2\": " << shape.hd2 << ",\n  \"nrd\": " << shape.residual_blocks << ",\n  \"num_parameters\": " << params << "\n}\n";
 
 #ifdef MGT_HAS_NCCL
     if (nccl_enabled && mgt_cuda::DestroyNcclRankContext(nccl_context) != mgt::Status::kOk) return EXIT_FAILURE;

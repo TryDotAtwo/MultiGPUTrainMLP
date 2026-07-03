@@ -6,7 +6,7 @@ namespace mgt {
 
 inline constexpr std::uint32_t kStateLen = 72;
 inline constexpr std::uint32_t kStateAlignment = 16;
-inline constexpr std::uint32_t kStateValuePad = 128;
+inline constexpr std::uint32_t kStateValuePad = 72;
 inline constexpr std::uint32_t kMoveCount = 18;
 inline constexpr std::uint32_t kOutputDim = 1;
 inline constexpr std::uint32_t kHd1 = 2556;
