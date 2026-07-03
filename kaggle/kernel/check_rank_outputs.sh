@@ -21,7 +21,9 @@ for rank in $(seq 0 $((world_size - 1))); do
   grep -q "DEVICE_ID=${rank}" "$run_dir/metadata.env"
   grep -q 'MODEL_MODE=MLP2RB' "$run_dir/metadata.env"
   grep -q 'OUTPUT_DIM=1' "$run_dir/metadata.env"
+  grep -q 'NCCL_ENABLED=1' "$run_dir/metadata.env"
   grep -q 'phase=train' "$run_dir/train.log"
+  grep -q 'nccl=1' "$run_dir/train.log"
   grep -q '"format": "stream1_weights"' "$run_dir/weights/manifest.json"
   current=$(grep '^GLOBAL_RANK=' "$run_dir/metadata.env" | cut -d= -f2)
   case " $seen " in

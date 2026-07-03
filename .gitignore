@@ -12,3 +12,4 @@
 /native/native-train-smoke-run/
 /native/native-train-profile-smoke-run/
 /runs/kaggle-2xt4/
+/native/native-train-nccl-smoke-run/

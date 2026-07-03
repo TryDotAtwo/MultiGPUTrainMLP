@@ -22,6 +22,7 @@ else
   world_size=1
 fi
 mkdir -p runs/kaggle-2xt4
+rm -f runs/kaggle-2xt4/nccl.id
 pids=()
 for rank in $(seq 0 $((world_size - 1))); do
   ./build-kaggle-2xt4/mgt_native_train_smoke \
@@ -35,7 +36,8 @@ for rank in $(seq 0 $((world_size - 1))); do
     --k-min "${MGT_K_MIN:-1}" \
     --k-max "${MGT_K_MAX:-9}" \
     --hd1 "${MGT_HD1:-5}" \
-    --hd2 "${MGT_HD2:-3}" > "runs/kaggle-2xt4/rank${rank}.stdout" 2>&1 &
+    --hd2 "${MGT_HD2:-3}" \
+    --nccl-id-file "runs/kaggle-2xt4/nccl.id" > "runs/kaggle-2xt4/rank${rank}.stdout" 2>&1 &
   pids+=("$!")
 done
 for pid in "${pids[@]}"; do

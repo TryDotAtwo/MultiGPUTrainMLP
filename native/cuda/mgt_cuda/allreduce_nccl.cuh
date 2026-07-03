@@ -3,18 +3,29 @@
 #include "mgt/allreduce.hpp"
 #include "mgt/status.hpp"
 #include <cuda_runtime.h>
+#include <filesystem>
 #include <cstddef>
 #include <cstdint>
 
 namespace mgt_cuda {
 
-struct NcclSingleRankContext;
+struct NcclRankContext;
 
-mgt::Status CreateNcclSingleRankContext(std::uint32_t device_id, NcclSingleRankContext** context);
-mgt::Status DestroyNcclSingleRankContext(NcclSingleRankContext* context);
+mgt::Status CreateNcclSingleRankContext(std::uint32_t device_id, NcclRankContext** context);
+mgt::Status CreateNcclRankContext(std::uint32_t device_id,
+                                  std::uint32_t world_size,
+                                  std::uint32_t global_rank,
+                                  const std::filesystem::path& id_file,
+                                  NcclRankContext** context);
+mgt::Status DestroyNcclRankContext(NcclRankContext* context);
 mgt::Status NcclAllreduceAverageFloat(const mgt::AllreduceConfig& config,
                                       float* device_gradients,
-                                      NcclSingleRankContext* context,
+                                      NcclRankContext* context,
                                       cudaStream_t stream);
+
+using NcclSingleRankContext = NcclRankContext;
+inline mgt::Status DestroyNcclSingleRankContext(NcclSingleRankContext* context) {
+    return DestroyNcclRankContext(context);
+}
 
 }  // namespace mgt_cuda

@@ -2,6 +2,9 @@
 #include "mgt_cuda/adamw.cuh"
 #include "mgt_cuda/mlp_backward.cuh"
 #include "mgt_cuda/random_walk_kernel.cuh"
+#ifdef MGT_HAS_NCCL
+#include "mgt_cuda/allreduce_nccl.cuh"
+#endif
 
 #include <cuda_runtime.h>
 #include <filesystem>
@@ -24,6 +27,7 @@ struct Args {
     std::uint32_t k_max = 9;
     std::uint32_t hd1 = 5;
     std::uint32_t hd2 = 3;
+    std::filesystem::path nccl_id_file;
 };
 
 int Check(cudaError_t status) { return status == cudaSuccess ? 0 : 1; }
@@ -112,6 +116,8 @@ bool ParseArgs(int argc, char** argv, Args* args) {
             if (!ParseUint(value, &args->hd1)) return false;
         } else if (key == "--hd2") {
             if (!ParseUint(value, &args->hd2)) return false;
+        } else if (key == "--nccl-id-file") {
+            args->nccl_id_file = value;
         } else {
             return false;
         }
@@ -126,7 +132,7 @@ bool ParseArgs(int argc, char** argv, Args* args) {
 int main(int argc, char** argv) {
     Args args{};
     if (!ParseArgs(argc, argv, &args)) {
-        std::cerr << "usage: mgt_native_train_smoke --output-dir DIR --steps N --device-id ID --world-size N --global-rank R --local-rank R [--batch-size N --k-min N --k-max N --hd1 N --hd2 N]\n";
+        std::cerr << "usage: mgt_native_train_smoke --output-dir DIR --steps N --device-id ID --world-size N --global-rank R --local-rank R [--batch-size N --k-min N --k-max N --hd1 N --hd2 N --nccl-id-file PATH]\n";
         return EXIT_FAILURE;
     }
     int device_count = 0;
@@ -168,11 +174,26 @@ int main(int argc, char** argv) {
     if (Check(cudaMemset(d_m, 0, params * sizeof(float))) != 0) return EXIT_FAILURE;
     if (Check(cudaMemset(d_v, 0, params * sizeof(float))) != 0) return EXIT_FAILURE;
 
+    bool nccl_enabled = false;
+#ifdef MGT_HAS_NCCL
+    mgt_cuda::NcclRankContext* nccl_context = nullptr;
+    if (mgt_cuda::CreateNcclRankContext(args.device_id, args.world_size, args.global_rank, args.nccl_id_file, &nccl_context) != mgt::Status::kOk) {
+        return EXIT_FAILURE;
+    }
+    nccl_enabled = true;
+#else
+    if (args.world_size != 1) {
+        std::cerr << "NCCL is required when world_size > 1\n";
+        return EXIT_FAILURE;
+    }
+#endif
+
     std::filesystem::create_directories(args.output_dir);
     std::ofstream log(args.output_dir / "train.log");
     log << "rank=" << args.global_rank << " local_rank=" << args.local_rank << " device=" << args.device_id
         << " world_size=" << args.world_size << " phase=start batch_states=" << kSamples
-        << " hd1=" << shape.hd1 << " hd2=" << shape.hd2 << " k_min=" << args.k_min << " k_max=" << args.k_max << "\n";
+        << " hd1=" << shape.hd1 << " hd2=" << shape.hd2 << " k_min=" << args.k_min << " k_max=" << args.k_max
+        << " nccl=" << (nccl_enabled ? 1 : 0) << "\n";
 
     const mgt_cuda::AdamWKernelConfig adam{params, 1, 0.0001f, 0.9f, 0.999f, 1.0e-8f, 0.0f};
     float last_loss = 0.0f;
@@ -180,6 +201,12 @@ int main(int argc, char** argv) {
         const mgt_cuda::RandomWalkKernelConfig walks{kSamples, args.k_min, args.k_max};
         if (mgt_cuda::LaunchRandomWalkKernel(walks, 1234, 0, step, args.global_rank, d_moves, d_target, d_states, d_labels, d_meta, 0) != mgt::Status::kOk) return EXIT_FAILURE;
         if (mgt_cuda::LaunchMlpLossGradKernel(shape, d_weights, d_states, d_labels, kSamples, d_loss, d_grad, 0) != mgt::Status::kOk) return EXIT_FAILURE;
+#ifdef MGT_HAS_NCCL
+        if (nccl_enabled) {
+            const mgt::AllreduceConfig allreduce{args.world_size, args.global_rank, step, static_cast<std::size_t>(params)};
+            if (mgt_cuda::NcclAllreduceAverageFloat(allreduce, d_grad, nccl_context, 0) != mgt::Status::kOk) return EXIT_FAILURE;
+        }
+#endif
         if (mgt_cuda::LaunchAdamWKernel(adam, d_weights, d_grad, d_m, d_v, 0) != mgt::Status::kOk) return EXIT_FAILURE;
         if (Check(cudaDeviceSynchronize()) != 0) return EXIT_FAILURE;
         if (Check(cudaMemcpy(&last_loss, d_loss, sizeof(float), cudaMemcpyDeviceToHost)) != 0) return EXIT_FAILURE;
@@ -192,9 +219,14 @@ int main(int argc, char** argv) {
     std::ofstream meta(args.output_dir / "metadata.env");
     meta << "MODEL_MODE=MLP2RB\nOUTPUT_DIM=1\nWORLD_SIZE=" << args.world_size << "\nGLOBAL_RANK=" << args.global_rank
          << "\nLOCAL_RANK=" << args.local_rank << "\nDEVICE_ID=" << args.device_id << "\nHD1=" << shape.hd1 << "\nHD2=" << shape.hd2
-         << "\nK_MIN=" << args.k_min << "\nK_MAX=" << args.k_max << "\nBATCH_SIZE=" << kSamples << "\nNUM_PARAMETERS=" << params << "\n";
+         << "\nK_MIN=" << args.k_min << "\nK_MAX=" << args.k_max << "\nBATCH_SIZE=" << kSamples
+         << "\nNCCL_ENABLED=" << (nccl_enabled ? 1 : 0) << "\nNUM_PARAMETERS=" << params << "\n";
     std::ofstream layers(args.output_dir / "layers.json");
     layers << "{\n  \"model_mode\": \"MLP2RB\",\n  \"output_dim\": 1,\n  \"state_len\": 72,\n  \"state_value_pad\": 128,\n  \"hd1\": " << shape.hd1 << ",\n  \"hd2\": " << shape.hd2 << ",\n  \"num_parameters\": " << params << "\n}\n";
+
+#ifdef MGT_HAS_NCCL
+    if (nccl_enabled && mgt_cuda::DestroyNcclRankContext(nccl_context) != mgt::Status::kOk) return EXIT_FAILURE;
+#endif
 
     cudaFree(d_target);
     cudaFree(d_moves);
