@@ -9,6 +9,7 @@ option(MGT_ENABLE_NCCL "Build NCCL allreduce code" ON)
 
 if(MGT_ENABLE_CUDA)
     enable_language(CUDA)
+    find_package(CUDAToolkit REQUIRED)
     set(CMAKE_CUDA_STANDARD 17)
     set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 endif()
@@ -64,7 +65,7 @@ if(MGT_ENABLE_CUDA)
         cuda/adamw.cu
     )
     target_include_directories(mgt_cuda PUBLIC include cuda)
-    target_link_libraries(mgt_cuda PUBLIC mgt_core)
+    target_link_libraries(mgt_cuda PUBLIC mgt_core CUDA::cublas)
     find_path(NVTX3_INCLUDE_DIR nvtx3/nvToolsExt.h PATHS
         "${CMAKE_CUDA_COMPILER_TOOLKIT_ROOT}/include"
         "${CMAKE_CUDA_COMPILER_TOOLKIT_ROOT}/targets/x86_64-linux/include")
