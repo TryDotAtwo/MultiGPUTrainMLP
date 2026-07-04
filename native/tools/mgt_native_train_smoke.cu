@@ -98,7 +98,8 @@ bool WriteFp16File(const std::filesystem::path& path, const std::vector<float>& 
 
 bool WriteStream1Weights(const std::filesystem::path& output_dir,
                          const std::vector<float>& weights,
-                         const mgt_cuda::CudaMlpShape& shape) {
+                         const mgt_cuda::CudaMlpShape& shape,
+                         std::uint32_t requested_hd2) {
     std::filesystem::create_directories(output_dir / "weights");
     std::ofstream flat(output_dir / "weights" / "weights.f32.bin", std::ios::binary);
     if (!flat) return false;
@@ -186,7 +187,7 @@ bool WriteStream1Weights(const std::filesystem::path& output_dir,
              << "  \"hd1\": " << hidden1 << ",\n"
              << "  \"hd2\": " << hidden2 << ",\n"
              << "  \"original_hd1\": " << shape.hd1 << ",\n"
-             << "  \"original_hd2\": " << shape.hd2 << ",\n"
+             << "  \"original_hd2\": " << requested_hd2 << ",\n"
              << "  \"hidden_alignment\": 8,\n"
              << "  \"nrd\": " << residual_count << ",\n"
              << "  \"output_dim\": 1,\n"
@@ -202,7 +203,8 @@ bool WriteCheckpoint(const std::filesystem::path& output_dir,
                      const std::vector<float>& adam_m,
                      const std::vector<float>& adam_v,
                      std::uint32_t steps,
-                     const mgt_cuda::CudaMlpShape& shape) {
+                     const mgt_cuda::CudaMlpShape& shape,
+                     std::uint32_t requested_hd2) {
     if (weights.size() != adam_m.size() || weights.size() != adam_v.size()) return false;
     std::filesystem::create_directories(output_dir / "checkpoint");
     std::ofstream data(output_dir / "checkpoint" / "state.f32.bin", std::ios::binary);
@@ -223,7 +225,8 @@ bool WriteCheckpoint(const std::filesystem::path& output_dir,
              << "  \"state_storage_len\": " << mgt::kStateStorageLen << ",\n"
              << "  \"num_classes\": " << shape.state_value_pad << ",\n"
              << "  \"hd1\": " << shape.hd1 << ",\n"
-             << "  \"hd2\": " << shape.hd2 << ",\n"
+             << "  \"hd2\": " << requested_hd2 << ",\n"
+             << "  \"physical_hd2\": " << shape.hd2 << ",\n"
              << "  \"nrd\": " << shape.residual_blocks << ",\n"
              << "  \"optimizer\": \"AdamW\",\n"
              << "  \"weight_decay\": 0,\n"
@@ -312,7 +315,9 @@ int main(int argc, char** argv) {
     if (Check(cudaGetDeviceCount(&device_count)) != 0 || device_count <= static_cast<int>(args.device_id)) return EXIT_FAILURE;
     if (Check(cudaSetDevice(static_cast<int>(args.device_id))) != 0) return EXIT_FAILURE;
 
-    const mgt_cuda::CudaMlpShape shape{mgt::kStateLen, mgt::kStateLen, args.hd1, args.hd2, args.nrd};
+    const std::uint32_t requested_hd2 = args.hd2;
+    const std::uint32_t physical_hd2 = RoundUp(requested_hd2, 8);
+    const mgt_cuda::CudaMlpShape shape{mgt::kStateLen, mgt::kStateLen, args.hd1, physical_hd2, args.nrd};
     const std::uint32_t kSamples = args.batch_size;
     const std::uint64_t params = ParamCount(shape);
     std::vector<float> weights(params);
@@ -380,7 +385,7 @@ int main(int argc, char** argv) {
     if (Check(cudaEventCreate(&step_stop)) != 0) return EXIT_FAILURE;
     log << "rank=" << args.global_rank << " local_rank=" << args.local_rank << " device=" << args.device_id
         << " world_size=" << args.world_size << " phase=start batch_states=" << kSamples
-        << " hd1=" << shape.hd1 << " hd2=" << shape.hd2 << " nrd=" << shape.residual_blocks << " k_min=" << args.k_min << " k_max=" << args.k_max
+        << " hd1=" << shape.hd1 << " hd2=" << requested_hd2 << " physical_hd2=" << shape.hd2 << " nrd=" << shape.residual_blocks << " k_min=" << args.k_min << " k_max=" << args.k_max
         << " nccl=" << (nccl_enabled ? 1 : 0) << " resumed=" << (resumed ? 1 : 0) << "\n";
 
     const mgt_cuda::AdamWKernelConfig adam{params, 1, 0.0001f, 0.9f, 0.999f, 1.0e-8f, 0.0f};
@@ -439,16 +444,16 @@ int main(int argc, char** argv) {
     if (Check(cudaMemcpy(weights.data(), d_weights, params * sizeof(float), cudaMemcpyDeviceToHost)) != 0) return EXIT_FAILURE;
     if (Check(cudaMemcpy(adam_m.data(), d_m, params * sizeof(float), cudaMemcpyDeviceToHost)) != 0) return EXIT_FAILURE;
     if (Check(cudaMemcpy(adam_v.data(), d_v, params * sizeof(float), cudaMemcpyDeviceToHost)) != 0) return EXIT_FAILURE;
-    if (!WriteStream1Weights(args.output_dir, weights, shape)) return EXIT_FAILURE;
-    if (!WriteCheckpoint(args.output_dir, weights, adam_m, adam_v, args.steps, shape)) return EXIT_FAILURE;
+    if (!WriteStream1Weights(args.output_dir, weights, shape, requested_hd2)) return EXIT_FAILURE;
+    if (!WriteCheckpoint(args.output_dir, weights, adam_m, adam_v, args.steps, shape, requested_hd2)) return EXIT_FAILURE;
 
     std::ofstream meta(args.output_dir / "metadata.env");
     meta << "MODEL_MODE=MLP2RB\nOUTPUT_DIM=1\nWORLD_SIZE=" << args.world_size << "\nGLOBAL_RANK=" << args.global_rank
-         << "\nLOCAL_RANK=" << args.local_rank << "\nDEVICE_ID=" << args.device_id << "\nHD1=" << shape.hd1 << "\nHD2=" << shape.hd2 << "\nNUM_CLASSES=" << shape.state_value_pad << "\nNRD=" << shape.residual_blocks
+         << "\nLOCAL_RANK=" << args.local_rank << "\nDEVICE_ID=" << args.device_id << "\nHD1=" << shape.hd1 << "\nHD2=" << requested_hd2 << "\nPHYSICAL_HD2=" << shape.hd2 << "\nNUM_CLASSES=" << shape.state_value_pad << "\nNRD=" << shape.residual_blocks
          << "\nK_MIN=" << args.k_min << "\nK_MAX=" << args.k_max << "\nBATCH_SIZE=" << kSamples
          << "\nNCCL_ENABLED=" << (nccl_enabled ? 1 : 0) << "\nRESUME_CHECKPOINT=" << (resumed ? 1 : 0) << "\nNUM_PARAMETERS=" << params << "\n";
     std::ofstream layers(args.output_dir / "layers.json");
-    layers << "{\n  \"model_mode\": \"MLP2RB\",\n  \"output_dim\": 1,\n  \"state_len\": 72,\n  \"state_storage_len\": 80,\n  \"num_classes\": " << shape.state_value_pad << ",\n  \"hd1\": " << shape.hd1 << ",\n  \"hd2\": " << shape.hd2 << ",\n  \"nrd\": " << shape.residual_blocks << ",\n  \"num_parameters\": " << params << "\n}\n";
+    layers << "{\n  \"model_mode\": \"MLP2RB\",\n  \"output_dim\": 1,\n  \"state_len\": 72,\n  \"state_storage_len\": 80,\n  \"num_classes\": " << shape.state_value_pad << ",\n  \"hd1\": " << shape.hd1 << ",\n  \"hd2\": " << requested_hd2 << ",\n  \"physical_hd2\": " << shape.hd2 << ",\n  \"nrd\": " << shape.residual_blocks << ",\n  \"num_parameters\": " << params << "\n}\n";
 
 #ifdef MGT_HAS_NCCL
     if (nccl_enabled && mgt_cuda::DestroyNcclRankContext(nccl_context) != mgt::Status::kOk) return EXIT_FAILURE;
