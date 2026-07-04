@@ -28,7 +28,6 @@ struct Workspace {
     float* z2;
     float* block_inputs;
     float* rz1;
-    float* ra1;
     float* rz2;
     float* dy;
     float* dcur;
@@ -50,7 +49,6 @@ std::uint64_t WorkspaceFloats(CudaMlpShape shape, std::uint32_t samples) {
            b * h2 +                 // z2
            b * (r + 1ULL) * h2 +    // block_inputs
            b * r * h2 +             // rz1
-           b * r * h2 +             // ra1
            b * r * h2 +             // rz2
            b +                      // dy
            b * h2 +                 // dcur
@@ -73,7 +71,6 @@ Workspace MakeWorkspace(float* base, CudaMlpShape shape, std::uint32_t samples) 
     w.z2 = base; base += b * h2;
     w.block_inputs = base; base += b * (r + 1ULL) * h2;
     w.rz1 = base; base += b * r * h2;
-    w.ra1 = base; base += b * r * h2;
     w.rz2 = base; base += b * r * h2;
     w.dy = base; base += b;
     w.dcur = base; base += b * h2;
@@ -117,6 +114,22 @@ mgt::Status GemmBackpropInput(cublasHandle_t handle, const float* dz, const floa
     return status == CUBLAS_STATUS_SUCCESS ? mgt::Status::kOk : mgt::Status::kCudaFailure;
 }
 
+
+mgt::Status GemvBiasGrad(cublasHandle_t handle, const float* dz, const float* ones, float* bias_grad, std::uint32_t samples, std::uint32_t cols) {
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+    const cublasStatus_t status = cublasSgemv(handle, CUBLAS_OP_N,
+                                             static_cast<int>(cols), static_cast<int>(samples),
+                                             &alpha, dz, static_cast<int>(cols), ones, 1,
+                                             &beta, bias_grad, 1);
+    return status == CUBLAS_STATUS_SUCCESS ? mgt::Status::kOk : mgt::Status::kCudaFailure;
+}
+
+__global__ void FillOnesKernel(float* values, std::uint32_t count) {
+    const std::uint32_t item = blockIdx.x * blockDim.x + threadIdx.x;
+    if (item >= count) return;
+    values[item] = 1.0f;
+}
 __global__ void InputForwardKernel(CudaMlpShape shape, const float* weights, const mgt::TrainState80* states, std::uint32_t samples, float* a1) {
     const std::uint32_t b = blockIdx.x;
     if (b >= samples) return;
@@ -189,21 +202,6 @@ __global__ void OutputGradKernel(CudaMlpShape shape, const float* final_act, con
     float sum = 0.0f;
     for (std::uint32_t b = 0; b < samples; ++b) sum += final_act[static_cast<std::uint64_t>(b) * shape.hd2 + j] * dy[b];
     grad[OutputWeight(shape) + j] = sum;
-}
-
-__global__ void BiasGradKernel(const float* dz, std::uint32_t rows, std::uint32_t cols, float* bias_grad) {
-    const std::uint32_t col = blockIdx.x;
-    if (col >= cols) return;
-    float sum = 0.0f;
-    for (std::uint32_t row = threadIdx.x; row < rows; row += blockDim.x) sum += dz[static_cast<std::uint64_t>(row) * cols + col];
-    __shared__ float scratch[256];
-    scratch[threadIdx.x] = sum;
-    __syncthreads();
-    for (std::uint32_t stride = blockDim.x >> 1U; stride > 0; stride >>= 1U) {
-        if (threadIdx.x < stride) scratch[threadIdx.x] += scratch[threadIdx.x + stride];
-        __syncthreads();
-    }
-    if (threadIdx.x == 0) bias_grad[col] = scratch[0];
 }
 
 __global__ void ResidualDzFc2Kernel(CudaMlpShape shape, std::uint32_t samples, std::uint32_t block, const float* block_inputs, const float* rz2, const float* dcur, float* dzfc2) {
@@ -283,6 +281,7 @@ __host__ mgt::Status LaunchMlpLossGradKernel(const CudaMlpShape& shape,
     cublasHandle_t blas = nullptr;
     if (cublasCreate(&blas) != CUBLAS_STATUS_SUCCESS) { cudaFree(workspace_base); return mgt::Status::kCudaFailure; }
     if (cublasSetStream(blas, stream) != CUBLAS_STATUS_SUCCESS) { cublasDestroy(blas); cudaFree(workspace_base); return mgt::Status::kCudaFailure; }
+    if (cublasSetMathMode(blas, CUBLAS_TF32_TENSOR_OP_MATH) != CUBLAS_STATUS_SUCCESS) { cublasDestroy(blas); cudaFree(workspace_base); return mgt::Status::kCudaFailure; }
 
     Workspace w = MakeWorkspace(workspace_base, shape, sample_count);
     if (cudaMemsetAsync(device_loss, 0, sizeof(float), stream) != cudaSuccess) { cublasDestroy(blas); cudaFree(workspace_base); return mgt::Status::kCudaFailure; }
@@ -301,14 +300,12 @@ __host__ mgt::Status LaunchMlpLossGradKernel(const CudaMlpShape& shape,
         const std::uint64_t batch_h2 = static_cast<std::uint64_t>(sample_count) * shape.hd2;
         const float* block_in = w.block_inputs + static_cast<std::uint64_t>(block) * batch_h2;
         float* block_rz1 = w.rz1 + static_cast<std::uint64_t>(block) * batch_h2;
-        float* block_ra1 = w.ra1 + static_cast<std::uint64_t>(block) * batch_h2;
         float* block_rz2 = w.rz2 + static_cast<std::uint64_t>(block) * batch_h2;
         float* block_out = w.block_inputs + static_cast<std::uint64_t>(block + 1U) * batch_h2;
         if (GemmRowMajor(blas, block_in, device_weights + ResidualFc1Weight(shape, block), block_rz1, sample_count, shape.hd2, shape.hd2) != mgt::Status::kOk) { cublasDestroy(blas); cudaFree(workspace_base); return mgt::Status::kCudaFailure; }
         AddBiasReluKernel<<<h2_launch.blocks, h2_launch.threads, 0, stream>>>(block_rz1, device_weights + ResidualFc1Bias(shape, block), sample_count, shape.hd2);
         if (!LaunchOk()) { cublasDestroy(blas); cudaFree(workspace_base); return mgt::Status::kCudaFailure; }
-        cudaMemcpyAsync(block_ra1, block_rz1, batch_h2 * sizeof(float), cudaMemcpyDeviceToDevice, stream);
-        if (GemmRowMajor(blas, block_ra1, device_weights + ResidualFc2Weight(shape, block), block_rz2, sample_count, shape.hd2, shape.hd2) != mgt::Status::kOk) { cublasDestroy(blas); cudaFree(workspace_base); return mgt::Status::kCudaFailure; }
+        if (GemmRowMajor(blas, block_rz1, device_weights + ResidualFc2Weight(shape, block), block_rz2, sample_count, shape.hd2, shape.hd2) != mgt::Status::kOk) { cublasDestroy(blas); cudaFree(workspace_base); return mgt::Status::kCudaFailure; }
         AddBiasResidualReluKernel<<<h2_launch.blocks, h2_launch.threads, 0, stream>>>(block_rz2, device_weights + ResidualFc2Bias(shape, block), block_in, sample_count, shape.hd2, block_out);
         if (!LaunchOk()) { cublasDestroy(blas); cudaFree(workspace_base); return mgt::Status::kCudaFailure; }
     }
@@ -320,25 +317,25 @@ __host__ mgt::Status LaunchMlpLossGradKernel(const CudaMlpShape& shape,
     const DeviceLaunchConfig output_grad_launch = Build1DLaunchConfig(shape.hd2 + 1ULL, 128);
     OutputGradKernel<<<output_grad_launch.blocks, output_grad_launch.threads, 0, stream>>>(shape, final_act, w.dy, sample_count, device_grad);
     if (!LaunchOk()) { cublasDestroy(blas); cudaFree(workspace_base); return mgt::Status::kCudaFailure; }
+    FillOnesKernel<<<sample_launch.blocks, sample_launch.threads, 0, stream>>>(w.dy, sample_count);
+    if (!LaunchOk()) { cublasDestroy(blas); cudaFree(workspace_base); return mgt::Status::kCudaFailure; }
 
     for (std::uint32_t rblock = shape.residual_blocks; rblock > 0; --rblock) {
         const std::uint32_t block = rblock - 1U;
         const std::uint64_t batch_h2 = static_cast<std::uint64_t>(sample_count) * shape.hd2;
         const float* block_in = w.block_inputs + static_cast<std::uint64_t>(block) * batch_h2;
-        const float* block_ra1 = w.ra1 + static_cast<std::uint64_t>(block) * batch_h2;
+        const float* block_ra1 = w.rz1 + static_cast<std::uint64_t>(block) * batch_h2;
 
         ResidualDzFc2Kernel<<<h2_launch.blocks, h2_launch.threads, 0, stream>>>(shape, sample_count, block, w.block_inputs, w.rz2, w.dcur, w.dzfc2);
         if (!LaunchOk()) { cublasDestroy(blas); cudaFree(workspace_base); return mgt::Status::kCudaFailure; }
         if (GemmGradWeights(blas, block_ra1, w.dzfc2, device_grad + ResidualFc2Weight(shape, block), sample_count, shape.hd2, shape.hd2) != mgt::Status::kOk) { cublasDestroy(blas); cudaFree(workspace_base); return mgt::Status::kCudaFailure; }
-        BiasGradKernel<<<shape.hd2, 256, 0, stream>>>(w.dzfc2, sample_count, shape.hd2, device_grad + ResidualFc2Bias(shape, block));
-        if (!LaunchOk()) { cublasDestroy(blas); cudaFree(workspace_base); return mgt::Status::kCudaFailure; }
+        if (GemvBiasGrad(blas, w.dzfc2, w.dy, device_grad + ResidualFc2Bias(shape, block), sample_count, shape.hd2) != mgt::Status::kOk) { cublasDestroy(blas); cudaFree(workspace_base); return mgt::Status::kCudaFailure; }
         if (GemmBackpropInput(blas, w.dzfc2, device_weights + ResidualFc2Weight(shape, block), w.dra1, sample_count, shape.hd2, shape.hd2) != mgt::Status::kOk) { cublasDestroy(blas); cudaFree(workspace_base); return mgt::Status::kCudaFailure; }
 
         ResidualDzFc1Kernel<<<h2_launch.blocks, h2_launch.threads, 0, stream>>>(shape, sample_count, block, w.rz1, w.dra1, w.dzfc1);
         if (!LaunchOk()) { cublasDestroy(blas); cudaFree(workspace_base); return mgt::Status::kCudaFailure; }
         if (GemmGradWeights(blas, block_in, w.dzfc1, device_grad + ResidualFc1Weight(shape, block), sample_count, shape.hd2, shape.hd2) != mgt::Status::kOk) { cublasDestroy(blas); cudaFree(workspace_base); return mgt::Status::kCudaFailure; }
-        BiasGradKernel<<<shape.hd2, 256, 0, stream>>>(w.dzfc1, sample_count, shape.hd2, device_grad + ResidualFc1Bias(shape, block));
-        if (!LaunchOk()) { cublasDestroy(blas); cudaFree(workspace_base); return mgt::Status::kCudaFailure; }
+        if (GemvBiasGrad(blas, w.dzfc1, w.dy, device_grad + ResidualFc1Bias(shape, block), sample_count, shape.hd2) != mgt::Status::kOk) { cublasDestroy(blas); cudaFree(workspace_base); return mgt::Status::kCudaFailure; }
         if (GemmBackpropInput(blas, w.dzfc1, device_weights + ResidualFc1Weight(shape, block), w.dprev, sample_count, shape.hd2, shape.hd2) != mgt::Status::kOk) { cublasDestroy(blas); cudaFree(workspace_base); return mgt::Status::kCudaFailure; }
         AddInPlaceKernel<<<h2_launch.blocks, h2_launch.threads, 0, stream>>>(w.dprev, w.dzfc2, batch_h2);
         if (!LaunchOk()) { cublasDestroy(blas); cudaFree(workspace_base); return mgt::Status::kCudaFailure; }
@@ -350,8 +347,7 @@ __host__ mgt::Status LaunchMlpLossGradKernel(const CudaMlpShape& shape,
     HiddenDz2Kernel<<<h2_launch.blocks, h2_launch.threads, 0, stream>>>(shape, w.z2, w.dcur, sample_count, w.dz2);
     if (!LaunchOk()) { cublasDestroy(blas); cudaFree(workspace_base); return mgt::Status::kCudaFailure; }
     if (GemmGradWeights(blas, w.a1, w.dz2, device_grad + HiddenWeight(shape), sample_count, shape.hd1, shape.hd2) != mgt::Status::kOk) { cublasDestroy(blas); cudaFree(workspace_base); return mgt::Status::kCudaFailure; }
-    BiasGradKernel<<<shape.hd2, 256, 0, stream>>>(w.dz2, sample_count, shape.hd2, device_grad + HiddenBias(shape));
-    if (!LaunchOk()) { cublasDestroy(blas); cudaFree(workspace_base); return mgt::Status::kCudaFailure; }
+    if (GemvBiasGrad(blas, w.dz2, w.dy, device_grad + HiddenBias(shape), sample_count, shape.hd2) != mgt::Status::kOk) { cublasDestroy(blas); cudaFree(workspace_base); return mgt::Status::kCudaFailure; }
     if (GemmBackpropInput(blas, w.dz2, device_weights + HiddenWeight(shape), w.da1, sample_count, shape.hd1, shape.hd2) != mgt::Status::kOk) { cublasDestroy(blas); cudaFree(workspace_base); return mgt::Status::kCudaFailure; }
     HiddenDz1Kernel<<<h1_launch.blocks, h1_launch.threads, 0, stream>>>(w.a1, w.da1, sample_count, shape.hd1, w.dz1);
     if (!LaunchOk()) { cublasDestroy(blas); cudaFree(workspace_base); return mgt::Status::kCudaFailure; }

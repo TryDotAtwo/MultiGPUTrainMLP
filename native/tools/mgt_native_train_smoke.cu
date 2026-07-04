@@ -369,8 +369,14 @@ int main(int argc, char** argv) {
     std::ofstream log(args.output_dir / "train.log");
     std::ofstream profile(args.output_dir / "profile.jsonl");
     cudaEvent_t step_start = nullptr;
+    cudaEvent_t walk_stop = nullptr;
+    cudaEvent_t backward_stop = nullptr;
+    cudaEvent_t allreduce_stop = nullptr;
     cudaEvent_t step_stop = nullptr;
     if (Check(cudaEventCreate(&step_start)) != 0) return EXIT_FAILURE;
+    if (Check(cudaEventCreate(&walk_stop)) != 0) return EXIT_FAILURE;
+    if (Check(cudaEventCreate(&backward_stop)) != 0) return EXIT_FAILURE;
+    if (Check(cudaEventCreate(&allreduce_stop)) != 0) return EXIT_FAILURE;
     if (Check(cudaEventCreate(&step_stop)) != 0) return EXIT_FAILURE;
     log << "rank=" << args.global_rank << " local_rank=" << args.local_rank << " device=" << args.device_id
         << " world_size=" << args.world_size << " phase=start batch_states=" << kSamples
@@ -386,13 +392,16 @@ int main(int argc, char** argv) {
         if (Check(cudaEventRecord(step_start, 0)) != 0) return EXIT_FAILURE;
         const mgt_cuda::RandomWalkKernelConfig walks{kSamples, args.k_min, args.k_max};
         if (mgt_cuda::LaunchRandomWalkKernel(walks, 1234, 0, step, args.global_rank, d_moves, d_target, d_states, d_labels, d_meta, 0) != mgt::Status::kOk) return EXIT_FAILURE;
+        if (Check(cudaEventRecord(walk_stop, 0)) != 0) return EXIT_FAILURE;
         if (mgt_cuda::LaunchMlpLossGradKernel(shape, d_weights, d_states, d_labels, kSamples, d_loss, d_grad, 0) != mgt::Status::kOk) return EXIT_FAILURE;
+        if (Check(cudaEventRecord(backward_stop, 0)) != 0) return EXIT_FAILURE;
 #ifdef MGT_HAS_NCCL
         if (nccl_enabled) {
             const mgt::AllreduceConfig allreduce{args.world_size, args.global_rank, step, static_cast<std::size_t>(params)};
             if (mgt_cuda::NcclAllreduceAverageFloat(allreduce, d_grad, nccl_context, 0) != mgt::Status::kOk) return EXIT_FAILURE;
         }
 #endif
+        if (Check(cudaEventRecord(allreduce_stop, 0)) != 0) return EXIT_FAILURE;
         if (mgt_cuda::LaunchAdamWKernel(adam, d_weights, d_grad, d_m, d_v, 0) != mgt::Status::kOk) return EXIT_FAILURE;
         if (Check(cudaEventRecord(step_stop, 0)) != 0) return EXIT_FAILURE;
         if (Check(cudaEventSynchronize(step_stop)) != 0) return EXIT_FAILURE;
@@ -400,15 +409,27 @@ int main(int argc, char** argv) {
         nvtxRangePop();
 #endif
         float step_ms = 0.0f;
+        float walk_ms = 0.0f;
+        float backward_ms = 0.0f;
+        float allreduce_ms = 0.0f;
+        float adam_ms = 0.0f;
         if (Check(cudaEventElapsedTime(&step_ms, step_start, step_stop)) != 0) return EXIT_FAILURE;
+        if (Check(cudaEventElapsedTime(&walk_ms, step_start, walk_stop)) != 0) return EXIT_FAILURE;
+        if (Check(cudaEventElapsedTime(&backward_ms, walk_stop, backward_stop)) != 0) return EXIT_FAILURE;
+        if (Check(cudaEventElapsedTime(&allreduce_ms, backward_stop, allreduce_stop)) != 0) return EXIT_FAILURE;
+        if (Check(cudaEventElapsedTime(&adam_ms, allreduce_stop, step_stop)) != 0) return EXIT_FAILURE;
         if (Check(cudaMemcpy(&last_loss, d_loss, sizeof(float), cudaMemcpyDeviceToHost)) != 0) return EXIT_FAILURE;
         std::size_t free_bytes = 0;
         std::size_t total_bytes = 0;
         if (Check(cudaMemGetInfo(&free_bytes, &total_bytes)) != 0) return EXIT_FAILURE;
         const std::size_t used_bytes = total_bytes - free_bytes;
-        log << "rank=" << args.global_rank << " step=" << step << " phase=train loss=" << last_loss << " step_ms=" << step_ms << " memory_bytes=" << used_bytes << "\n";
+        log << "rank=" << args.global_rank << " step=" << step << " phase=train loss=" << last_loss << " step_ms=" << step_ms
+            << " walk_ms=" << walk_ms << " backward_ms=" << backward_ms << " allreduce_ms=" << allreduce_ms
+            << " adam_ms=" << adam_ms << " memory_bytes=" << used_bytes << "\n";
         profile << "{\"rank\":" << args.global_rank << ",\"device\":" << args.device_id << ",\"step\":" << step
                 << ",\"phase\":\"train\",\"milliseconds\":" << std::fixed << std::setprecision(3) << step_ms
+                << ",\"walk_ms\":" << walk_ms << ",\"backward_ms\":" << backward_ms
+                << ",\"allreduce_ms\":" << allreduce_ms << ",\"adam_ms\":" << adam_ms
                 << ",\"batch_states\":" << kSamples << ",\"loss\":" << std::setprecision(6) << last_loss
                 << ",\"memory_bytes\":" << used_bytes << ",\"status\":\"ok\"}\n";
     }
@@ -434,6 +455,9 @@ int main(int argc, char** argv) {
 #endif
 
     cudaEventDestroy(step_stop);
+    cudaEventDestroy(allreduce_stop);
+    cudaEventDestroy(backward_stop);
+    cudaEventDestroy(walk_stop);
     cudaEventDestroy(step_start);
     cudaFree(d_target);
     cudaFree(d_moves);
