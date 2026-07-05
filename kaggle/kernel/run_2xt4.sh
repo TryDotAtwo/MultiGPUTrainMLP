@@ -2,6 +2,9 @@
 set -euo pipefail
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1}
 export MGT_CUDA_ARCH=${MGT_CUDA_ARCH:-75}
+if [ "${MGT_PERF_RUN:-0}" = "1" ]; then
+  export MGT_CLEAN_BUILD_OUTPUT="${MGT_CLEAN_BUILD_OUTPUT:-1}"
+fi
 if [ -f scripts/ensure_cutlass.sh ]; then
   source scripts/ensure_cutlass.sh
 fi

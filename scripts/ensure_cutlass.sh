@@ -16,7 +16,13 @@ for candidate in "${MGT_CUTLASS_ROOT:-}" /opt/cutlass /usr/local/cutlass; do
   fi
 done
 
-deps_dir="${MGT_DEPS_DIR:-${repo_root}/.deps}"
+if [ "${MGT_DEPS_DIR:-}" != "" ]; then
+  deps_dir="$MGT_DEPS_DIR"
+elif [ -d /kaggle/working ]; then
+  deps_dir="/tmp/mgt_deps"
+else
+  deps_dir="${repo_root}/.deps"
+fi
 cutlass_root="${MGT_CUTLASS_ROOT:-${deps_dir}/cutlass}"
 cutlass_ref="${MGT_CUTLASS_REF:-main}"
 
