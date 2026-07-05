@@ -16,8 +16,13 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     PrintDefaultConfig,
-    ValidateConfig { path: PathBuf },
-    Train { config: PathBuf, output_dir: PathBuf },
+    ValidateConfig {
+        path: PathBuf,
+    },
+    Train {
+        config: PathBuf,
+        output_dir: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {

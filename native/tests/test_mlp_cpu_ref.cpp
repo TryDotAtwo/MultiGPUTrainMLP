@@ -13,7 +13,7 @@ int main() {
         weights[i] = static_cast<float>((static_cast<int>(i % 11) - 5) * 0.01);
     }
 
-    mgt::TrainState80 states[2]{};
+    mgt::TrainStateStorage states[2]{};
     for (std::uint32_t sample = 0; sample < 2; ++sample) {
         for (std::uint32_t i = 0; i < shape.state_len; ++i) {
             states[sample].v[i] = static_cast<mgt::StateValue>((i + sample) % shape.state_value_pad);

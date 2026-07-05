@@ -8,7 +8,7 @@ namespace mgt {
 
 using StateValue = std::uint8_t;
 
-struct alignas(16) TrainState80 {
+struct alignas(16) TrainStateStorage {
     StateValue v[kStateStorageLen];
 };
 

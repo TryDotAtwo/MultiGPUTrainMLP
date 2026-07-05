@@ -12,13 +12,14 @@ struct CudaMlpShape {
     std::uint32_t hd1;
     std::uint32_t hd2;
     std::uint32_t residual_blocks;
+    std::uint32_t output_dim = 1;
 };
 
 __host__ mgt::Status ValidateCudaMlpShape(const CudaMlpShape& shape);
 
 __host__ mgt::Status LaunchMlpForwardKernel(const CudaMlpShape& shape,
                                             const float* device_weights,
-                                            const mgt::TrainState80* device_states,
+                                            const mgt::TrainStateStorage* device_states,
                                             std::uint32_t sample_count,
                                             float* device_outputs,
                                             cudaStream_t stream);

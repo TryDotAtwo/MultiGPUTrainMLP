@@ -19,8 +19,8 @@ int main() {
     }
 
     constexpr std::uint32_t kSamples = 64;
-    mgt::TrainState80 states_a[kSamples]{};
-    mgt::TrainState80 states_b[kSamples]{};
+    mgt::TrainStateStorage states_a[kSamples]{};
+    mgt::TrainStateStorage states_b[kSamples]{};
     float labels_a[kSamples]{};
     float labels_b[kSamples]{};
     mgt::WalkMeta meta_a[kSamples]{};
@@ -52,7 +52,7 @@ int main() {
     }
     if (!saw_non_target) return EXIT_FAILURE;
 
-    mgt::TrainState80 states_rank3[kSamples]{};
+    mgt::TrainStateStorage states_rank3[kSamples]{};
     float labels_rank3[kSamples]{};
     mgt::WalkMeta meta_rank3[kSamples]{};
     const mgt::WalkRequest rank3_request{1234, 5, 7, 3, 1, 9, kSamples};

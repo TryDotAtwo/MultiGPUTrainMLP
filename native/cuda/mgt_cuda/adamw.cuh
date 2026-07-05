@@ -2,6 +2,7 @@
 
 #include "mgt/status.hpp"
 #include <cstdint>
+#include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
 namespace mgt_cuda {
@@ -24,4 +25,11 @@ __host__ mgt::Status LaunchAdamWKernel(const AdamWKernelConfig& config,
                                        float* device_v,
                                        cudaStream_t stream);
 
+__host__ mgt::Status LaunchAdamWKernelWithHalfMirror(const AdamWKernelConfig& config,
+                                                     float* device_weights,
+                                                     __half* device_weights_half,
+                                                     const float* device_grad,
+                                                     float* device_m,
+                                                     float* device_v,
+                                                     cudaStream_t stream);
 }  // namespace mgt_cuda

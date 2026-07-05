@@ -5,6 +5,23 @@
 namespace mgt_cuda {
 namespace {
 
+__device__ float AdamWUpdateOne(AdamWKernelConfig config,
+                               float weight,
+                               float grad_value,
+                               float* m_value,
+                               float* v_value) {
+    const float decayed_grad = grad_value + config.weight_decay * weight;
+    const float next_m = config.beta1 * *m_value + (1.0f - config.beta1) * decayed_grad;
+    const float next_v = config.beta2 * *v_value + (1.0f - config.beta2) * decayed_grad * decayed_grad;
+    *m_value = next_m;
+    *v_value = next_v;
+    const float bias1 = 1.0f - powf(config.beta1, static_cast<float>(config.step));
+    const float bias2 = 1.0f - powf(config.beta2, static_cast<float>(config.step));
+    const float m_hat = next_m / bias1;
+    const float v_hat = next_v / bias2;
+    return weight - config.learning_rate * m_hat / (sqrtf(v_hat) + config.eps);
+}
+
 __global__ void AdamWKernel(AdamWKernelConfig config,
                             float* weights,
                             const float* grad,
@@ -12,15 +29,20 @@ __global__ void AdamWKernel(AdamWKernelConfig config,
                             float* v) {
     const std::uint64_t i = static_cast<std::uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i >= config.param_count) return;
+    weights[i] = AdamWUpdateOne(config, weights[i], grad[i], m + i, v + i);
+}
 
-    const float decayed_grad = grad[i] + config.weight_decay * weights[i];
-    m[i] = config.beta1 * m[i] + (1.0f - config.beta1) * decayed_grad;
-    v[i] = config.beta2 * v[i] + (1.0f - config.beta2) * decayed_grad * decayed_grad;
-    const float bias1 = 1.0f - powf(config.beta1, static_cast<float>(config.step));
-    const float bias2 = 1.0f - powf(config.beta2, static_cast<float>(config.step));
-    const float m_hat = m[i] / bias1;
-    const float v_hat = v[i] / bias2;
-    weights[i] -= config.learning_rate * m_hat / (sqrtf(v_hat) + config.eps);
+__global__ void AdamWWithHalfMirrorKernel(AdamWKernelConfig config,
+                                          float* weights,
+                                          __half* weights_half,
+                                          const float* grad,
+                                          float* m,
+                                          float* v) {
+    const std::uint64_t i = static_cast<std::uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i >= config.param_count) return;
+    const float next_weight = AdamWUpdateOne(config, weights[i], grad[i], m + i, v + i);
+    weights[i] = next_weight;
+    weights_half[i] = __float2half_rn(next_weight);
 }
 
 }  // namespace
@@ -50,4 +72,20 @@ __host__ mgt::Status LaunchAdamWKernel(const AdamWKernelConfig& config,
     return cudaGetLastError() == cudaSuccess ? mgt::Status::kOk : mgt::Status::kCudaFailure;
 }
 
+
+__host__ mgt::Status LaunchAdamWKernelWithHalfMirror(const AdamWKernelConfig& config,
+                                                     float* device_weights,
+                                                     __half* device_weights_half,
+                                                     const float* device_grad,
+                                                     float* device_m,
+                                                     float* device_v,
+                                                     cudaStream_t stream) {
+    if (ValidateAdamWKernelConfig(config) != mgt::Status::kOk ||
+        device_weights == nullptr || device_weights_half == nullptr || device_grad == nullptr || device_m == nullptr || device_v == nullptr) {
+        return mgt::Status::kInvalidConfig;
+    }
+    const DeviceLaunchConfig launch = Build1DLaunchConfig(config.param_count, 256);
+    AdamWWithHalfMirrorKernel<<<launch.blocks, launch.threads, 0, stream>>>(config, device_weights, device_weights_half, device_grad, device_m, device_v);
+    return cudaGetLastError() == cudaSuccess ? mgt::Status::kOk : mgt::Status::kCudaFailure;
+}
 }  // namespace mgt_cuda

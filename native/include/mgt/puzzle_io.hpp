@@ -7,8 +7,8 @@
 namespace mgt {
 
 struct PuzzleDefinition {
-    std::array<TrainState80, kMoveCount> moves;
-    TrainState80 target;
+    std::array<TrainStateStorage, kMoveCount> moves;
+    TrainStateStorage target;
 };
 
 Status LoadPuzzleDefinition(const std::filesystem::path& group_json,

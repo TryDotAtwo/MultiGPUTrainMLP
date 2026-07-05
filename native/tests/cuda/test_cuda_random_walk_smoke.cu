@@ -34,18 +34,18 @@ int main() {
     }
 
     constexpr std::uint32_t kSamples = 256;
-    mgt::TrainState80* d_states = nullptr;
+    mgt::TrainStateStorage* d_states = nullptr;
     float* d_labels = nullptr;
     mgt::WalkMeta* d_meta = nullptr;
-    mgt::TrainState80* d_moves = nullptr;
-    mgt::TrainState80* d_target = nullptr;
-    if (Check(cudaMalloc(&d_states, kSamples * sizeof(mgt::TrainState80))) != 0) return EXIT_FAILURE;
+    mgt::TrainStateStorage* d_moves = nullptr;
+    mgt::TrainStateStorage* d_target = nullptr;
+    if (Check(cudaMalloc(&d_states, kSamples * sizeof(mgt::TrainStateStorage))) != 0) return EXIT_FAILURE;
     if (Check(cudaMalloc(&d_labels, kSamples * sizeof(float))) != 0) return EXIT_FAILURE;
     if (Check(cudaMalloc(&d_meta, kSamples * sizeof(mgt::WalkMeta))) != 0) return EXIT_FAILURE;
-    if (Check(cudaMalloc(&d_moves, mgt::kMoveCount * sizeof(mgt::TrainState80))) != 0) return EXIT_FAILURE;
-    if (Check(cudaMalloc(&d_target, sizeof(mgt::TrainState80))) != 0) return EXIT_FAILURE;
-    if (Check(cudaMemcpy(d_moves, puzzle.moves.data(), mgt::kMoveCount * sizeof(mgt::TrainState80), cudaMemcpyHostToDevice)) != 0) return EXIT_FAILURE;
-    if (Check(cudaMemcpy(d_target, &puzzle.target, sizeof(mgt::TrainState80), cudaMemcpyHostToDevice)) != 0) return EXIT_FAILURE;
+    if (Check(cudaMalloc(&d_moves, mgt::kMoveCount * sizeof(mgt::TrainStateStorage))) != 0) return EXIT_FAILURE;
+    if (Check(cudaMalloc(&d_target, sizeof(mgt::TrainStateStorage))) != 0) return EXIT_FAILURE;
+    if (Check(cudaMemcpy(d_moves, puzzle.moves.data(), mgt::kMoveCount * sizeof(mgt::TrainStateStorage), cudaMemcpyHostToDevice)) != 0) return EXIT_FAILURE;
+    if (Check(cudaMemcpy(d_target, &puzzle.target, sizeof(mgt::TrainStateStorage), cudaMemcpyHostToDevice)) != 0) return EXIT_FAILURE;
 
     const mgt_cuda::RandomWalkKernelConfig config{kSamples, 1, 9};
     const auto launch_status = mgt_cuda::LaunchRandomWalkKernel(
@@ -53,10 +53,10 @@ int main() {
     if (launch_status != mgt::Status::kOk) return EXIT_FAILURE;
     if (Check(cudaDeviceSynchronize()) != 0) return EXIT_FAILURE;
 
-    std::vector<mgt::TrainState80> states(kSamples);
+    std::vector<mgt::TrainStateStorage> states(kSamples);
     std::vector<float> labels(kSamples);
     std::vector<mgt::WalkMeta> meta(kSamples);
-    if (Check(cudaMemcpy(states.data(), d_states, kSamples * sizeof(mgt::TrainState80), cudaMemcpyDeviceToHost)) != 0) return EXIT_FAILURE;
+    if (Check(cudaMemcpy(states.data(), d_states, kSamples * sizeof(mgt::TrainStateStorage), cudaMemcpyDeviceToHost)) != 0) return EXIT_FAILURE;
     if (Check(cudaMemcpy(labels.data(), d_labels, kSamples * sizeof(float), cudaMemcpyDeviceToHost)) != 0) return EXIT_FAILURE;
     if (Check(cudaMemcpy(meta.data(), d_meta, kSamples * sizeof(mgt::WalkMeta), cudaMemcpyDeviceToHost)) != 0) return EXIT_FAILURE;
 

@@ -22,7 +22,7 @@ __device__ std::uint64_t HiddenWeight(CudaMlpShape shape) { return InputBias(sha
 __device__ std::uint64_t HiddenBias(CudaMlpShape shape) { return HiddenWeight(shape) + static_cast<std::uint64_t>(shape.hd1) * shape.hd2; }
 __device__ std::uint64_t ResidualBase(CudaMlpShape shape) { return HiddenBias(shape) + shape.hd2; }
 __device__ std::uint64_t OutputWeight(CudaMlpShape shape) { return ResidualBase(shape) + static_cast<std::uint64_t>(shape.residual_blocks) * ResidualBlockParams(shape); }
-__device__ std::uint64_t OutputBias(CudaMlpShape shape) { return OutputWeight(shape) + shape.hd2; }
+__device__ std::uint64_t OutputBias(CudaMlpShape shape) { return OutputWeight(shape) + static_cast<std::uint64_t>(shape.hd2) * shape.output_dim; }
 __device__ std::uint64_t ResidualFc1Weight(CudaMlpShape shape, std::uint32_t block) { return ResidualBase(shape) + static_cast<std::uint64_t>(block) * ResidualBlockParams(shape); }
 __device__ std::uint64_t ResidualFc1Bias(CudaMlpShape shape, std::uint32_t block) { return ResidualFc1Weight(shape, block) + static_cast<std::uint64_t>(shape.hd2) * shape.hd2; }
 __device__ std::uint64_t ResidualFc2Weight(CudaMlpShape shape, std::uint32_t block) { return ResidualFc1Bias(shape, block) + shape.hd2; }
@@ -30,7 +30,7 @@ __device__ std::uint64_t ResidualFc2Bias(CudaMlpShape shape, std::uint32_t block
 
 __global__ void MlpForwardKernel(CudaMlpShape shape,
                                  const float* weights,
-                                 const mgt::TrainState80* states,
+                                 const mgt::TrainStateStorage* states,
                                  std::uint32_t sample_count,
                                  float* outputs) {
     const std::uint32_t sample = blockIdx.x * blockDim.x + threadIdx.x;
@@ -40,7 +40,7 @@ __global__ void MlpForwardKernel(CudaMlpShape shape,
     float a1[kMaxHd1];
     float cur[kMaxHd2];
     float tmp[kMaxHd2];
-    const mgt::TrainState80 state = states[sample];
+    const mgt::TrainStateStorage state = states[sample];
     const std::uint64_t input_bias = InputBias(shape);
     const std::uint64_t hidden_weight = HiddenWeight(shape);
     const std::uint64_t hidden_bias = HiddenBias(shape);
@@ -75,10 +75,13 @@ __global__ void MlpForwardKernel(CudaMlpShape shape,
             cur[j] = Relu(cur[j] + sum);
         }
     }
-    float y = weights[OutputBias(shape)];
     const std::uint64_t output_weight = OutputWeight(shape);
-    for (std::uint32_t j = 0; j < shape.hd2; ++j) y += cur[j] * weights[output_weight + j];
-    outputs[sample] = y;
+    const std::uint64_t output_bias = OutputBias(shape);
+    for (std::uint32_t out = 0; out < shape.output_dim; ++out) {
+        float y = weights[output_bias + out];
+        for (std::uint32_t j = 0; j < shape.hd2; ++j) y += cur[j] * weights[output_weight + static_cast<std::uint64_t>(j) * shape.output_dim + out];
+        outputs[static_cast<std::uint64_t>(sample) * shape.output_dim + out] = y;
+    }
 }
 
 }  // namespace
@@ -87,7 +90,7 @@ __host__ mgt::Status ValidateCudaMlpShape(const CudaMlpShape& shape) {
     if (shape.state_len == 0 || shape.state_len > mgt::kStateLen ||
         shape.state_value_pad == 0 || shape.state_value_pad > mgt::kStateValuePad ||
         shape.hd1 == 0 || shape.hd1 > kMaxHd1 || shape.hd2 == 0 || shape.hd2 > kMaxHd2 ||
-        shape.residual_blocks > kMaxResidualBlocks) {
+        shape.residual_blocks > kMaxResidualBlocks || shape.output_dim == 0) {
         return mgt::Status::kInvalidConfig;
     }
     return mgt::Status::kOk;
@@ -95,7 +98,7 @@ __host__ mgt::Status ValidateCudaMlpShape(const CudaMlpShape& shape) {
 
 __host__ mgt::Status LaunchMlpForwardKernel(const CudaMlpShape& shape,
                                             const float* device_weights,
-                                            const mgt::TrainState80* device_states,
+                                            const mgt::TrainStateStorage* device_states,
                                             std::uint32_t sample_count,
                                             float* device_outputs,
                                             cudaStream_t stream) {

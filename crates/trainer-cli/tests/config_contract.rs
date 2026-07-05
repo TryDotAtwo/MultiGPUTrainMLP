@@ -14,7 +14,32 @@ fn p888_default_matches_static_contract() {
     assert_eq!(cfg.state_value_pad, 72);
     assert_eq!(cfg.move_count, 18);
     assert_eq!(cfg.output_dim, 1);
-    assert_eq!(cfg.batch_states_per_rank(), 100_021);
+    assert_eq!(cfg.hd1, 2556);
+    assert_eq!(cfg.hd2, 218);
+    assert_eq!(cfg.hidden_alignment, 8);
+    assert_eq!(cfg.batch_states_per_rank(), 100_000);
+    assert_eq!(cfg.walkers, 34_482);
+    assert_eq!(cfg.gradient_carousel_slots, 3);
+    assert_eq!(cfg.input_grad_partial_chunks, 1);
+    assert_eq!(cfg.input_grad_positions_per_block, 1);
+    assert!(!cfg.input_grad_fp16);
+    assert!(!cfg.linear_fp16);
+    assert_eq!(cfg.allreduce_bucket_bytes, 4 * 1024 * 1024);
+    assert!(cfg.validate().is_ok());
+}
+
+#[test]
+fn state_padding_is_nearest_alignment() {
+    let mut cfg = TrainerConfig::p888_default();
+    cfg.group_id = 123;
+    cfg.target_id = 7;
+    cfg.state_len = 31;
+    cfg.state_alignment = 16;
+    cfg.state_value_pad = 11;
+    cfg.move_count = 5;
+    cfg.hd1 = 33;
+    cfg.hd2 = 37;
+    assert_eq!(cfg.state_storage_len(), 32);
     assert!(cfg.validate().is_ok());
 }
 
@@ -24,6 +49,14 @@ fn rejects_wrong_output_dim() {
     cfg.output_dim = 2;
     let err = cfg.validate().unwrap_err().to_string();
     assert!(err.contains("output_dim"));
+}
+
+#[test]
+fn rejects_bad_alignment() {
+    let mut cfg = TrainerConfig::p888_default();
+    cfg.state_alignment = 10;
+    let err = cfg.validate().unwrap_err().to_string();
+    assert!(err.contains("state_alignment"));
 }
 
 #[test]

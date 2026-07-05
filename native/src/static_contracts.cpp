@@ -2,8 +2,8 @@
 
 namespace mgt {
 
-static_assert(sizeof(TrainState80) == 80);
-static_assert(alignof(TrainState80) == 16);
+static_assert(sizeof(TrainStateStorage) == kStateStorageLen);
+static_assert(alignof(TrainStateStorage) == 16);
 static_assert(sizeof(WalkMeta) == 16);
 static_assert(alignof(WalkMeta) == 16);
 static_assert(sizeof(LossStats) == 16);
@@ -12,7 +12,7 @@ static_assert(sizeof(TensorBlockHeader) == 32);
 static_assert(alignof(TensorBlockHeader) == 32);
 
 Status ValidateStaticContracts() {
-    if (sizeof(TrainState80) != 80 || alignof(TrainState80) != 16) {
+    if (sizeof(TrainStateStorage) != kStateStorageLen || alignof(TrainStateStorage) != 16) {
         return Status::kInvalidConfig;
     }
     if (sizeof(WalkMeta) != 16 || alignof(WalkMeta) != 16) {

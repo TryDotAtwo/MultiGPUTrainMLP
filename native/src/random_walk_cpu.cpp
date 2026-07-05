@@ -16,8 +16,8 @@ std::uint32_t NextBounded(std::uint64_t* state, std::uint32_t bound) {
     return static_cast<std::uint32_t>(*state % bound);
 }
 
-TrainState80 ApplyMove(const TrainState80& current, const TrainState80& move) {
-    TrainState80 next{};
+TrainStateStorage ApplyMove(const TrainStateStorage& current, const TrainStateStorage& move) {
+    TrainStateStorage next{};
     for (std::uint32_t i = 0; i < kStateLen; ++i) {
         next.v[i] = current.v[move.v[i]];
     }
@@ -31,7 +31,7 @@ TrainState80 ApplyMove(const TrainState80& current, const TrainState80& move) {
 
 Status GenerateRandomWalksCpu(const PuzzleDefinition& puzzle,
                               const WalkRequest& request,
-                              TrainState80* states,
+                              TrainStateStorage* states,
                               float* labels,
                               WalkMeta* meta) {
     if (states == nullptr || labels == nullptr || meta == nullptr) return Status::kInvalidConfig;
@@ -47,7 +47,7 @@ Status GenerateRandomWalksCpu(const PuzzleDefinition& puzzle,
         rng ^= Mix64(sample);
 
         const std::uint32_t depth = request.k_min + NextBounded(&rng, depth_span);
-        TrainState80 state = puzzle.target;
+        TrainStateStorage state = puzzle.target;
         std::uint32_t last_move = kMoveCount;
         for (std::uint32_t d = 0; d < depth; ++d) {
             std::uint32_t move = NextBounded(&rng, kMoveCount);

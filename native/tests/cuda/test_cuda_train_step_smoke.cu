@@ -19,7 +19,7 @@ std::uint64_t ResidualBlockParams(const mgt_cuda::CudaMlpShape& shape) {
 std::uint64_t ParamCount(const mgt_cuda::CudaMlpShape& shape) {
     return static_cast<std::uint64_t>(shape.state_len) * shape.state_value_pad * shape.hd1 + shape.hd1 +
            static_cast<std::uint64_t>(shape.hd1) * shape.hd2 + shape.hd2 +
-           static_cast<std::uint64_t>(shape.residual_blocks) * ResidualBlockParams(shape) + shape.hd2 + 1ULL;
+           static_cast<std::uint64_t>(shape.residual_blocks) * ResidualBlockParams(shape) + static_cast<std::uint64_t>(shape.hd2) * shape.output_dim + shape.output_dim;
 }
 
 mgt::PuzzleDefinition BuildPuzzle() {
@@ -63,23 +63,23 @@ int main() {
     float* d_grad = nullptr;
     float* d_m = nullptr;
     float* d_v = nullptr;
-    mgt::TrainState80* d_states = nullptr;
+    mgt::TrainStateStorage* d_states = nullptr;
     mgt::WalkMeta* d_meta = nullptr;
-    mgt::TrainState80* d_moves = nullptr;
-    mgt::TrainState80* d_target = nullptr;
+    mgt::TrainStateStorage* d_moves = nullptr;
+    mgt::TrainStateStorage* d_target = nullptr;
     if (Check(cudaMalloc(&d_weights, params * sizeof(float))) != 0) return EXIT_FAILURE;
     if (Check(cudaMalloc(&d_labels, kSamples * sizeof(float))) != 0) return EXIT_FAILURE;
     if (Check(cudaMalloc(&d_loss, sizeof(float))) != 0) return EXIT_FAILURE;
     if (Check(cudaMalloc(&d_grad, params * sizeof(float))) != 0) return EXIT_FAILURE;
     if (Check(cudaMalloc(&d_m, params * sizeof(float))) != 0) return EXIT_FAILURE;
     if (Check(cudaMalloc(&d_v, params * sizeof(float))) != 0) return EXIT_FAILURE;
-    if (Check(cudaMalloc(&d_states, kSamples * sizeof(mgt::TrainState80))) != 0) return EXIT_FAILURE;
+    if (Check(cudaMalloc(&d_states, kSamples * sizeof(mgt::TrainStateStorage))) != 0) return EXIT_FAILURE;
     if (Check(cudaMalloc(&d_meta, kSamples * sizeof(mgt::WalkMeta))) != 0) return EXIT_FAILURE;
-    if (Check(cudaMalloc(&d_moves, mgt::kMoveCount * sizeof(mgt::TrainState80))) != 0) return EXIT_FAILURE;
-    if (Check(cudaMalloc(&d_target, sizeof(mgt::TrainState80))) != 0) return EXIT_FAILURE;
+    if (Check(cudaMalloc(&d_moves, mgt::kMoveCount * sizeof(mgt::TrainStateStorage))) != 0) return EXIT_FAILURE;
+    if (Check(cudaMalloc(&d_target, sizeof(mgt::TrainStateStorage))) != 0) return EXIT_FAILURE;
     if (Check(cudaMemcpy(d_weights, weights.data(), params * sizeof(float), cudaMemcpyHostToDevice)) != 0) return EXIT_FAILURE;
-    if (Check(cudaMemcpy(d_moves, puzzle.moves.data(), mgt::kMoveCount * sizeof(mgt::TrainState80), cudaMemcpyHostToDevice)) != 0) return EXIT_FAILURE;
-    if (Check(cudaMemcpy(d_target, &puzzle.target, sizeof(mgt::TrainState80), cudaMemcpyHostToDevice)) != 0) return EXIT_FAILURE;
+    if (Check(cudaMemcpy(d_moves, puzzle.moves.data(), mgt::kMoveCount * sizeof(mgt::TrainStateStorage), cudaMemcpyHostToDevice)) != 0) return EXIT_FAILURE;
+    if (Check(cudaMemcpy(d_target, &puzzle.target, sizeof(mgt::TrainStateStorage), cudaMemcpyHostToDevice)) != 0) return EXIT_FAILURE;
     if (Check(cudaMemset(d_m, 0, params * sizeof(float))) != 0) return EXIT_FAILURE;
     if (Check(cudaMemset(d_v, 0, params * sizeof(float))) != 0) return EXIT_FAILURE;
 

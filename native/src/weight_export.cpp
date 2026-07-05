@@ -5,6 +5,7 @@
 namespace mgt {
 
 Status ExportInferenceWeights(const std::filesystem::path& output_dir,
+                              const PuzzleSpec& puzzle,
                               const ModelLayout& layout,
                               std::span<const float> weights) {
     if (weights.size() != layout.total_params) return Status::kInvalidConfig;
@@ -25,21 +26,29 @@ Status ExportInferenceWeights(const std::filesystem::path& output_dir,
         << "{\n"
         << "  \"format\": \"stream1_weights\",\n"
         << "  \"version\": 1,\n"
-        << "  \"group_id\": 888,\n"
-        << "  \"target_id\": 0,\n"
-        << "  \"state_len\": " << kStateLen << ",\n"
-        << "  \"state_storage_len\": " << kStateStorageLen << ",\n"
-        << "  \"state_value_pad\": " << kStateValuePad << ",\n"
-        << "  \"move_count\": " << kMoveCount << ",\n"
-        << "  \"output_dim\": " << kOutputDim << ",\n"
-        << "  \"hd1\": " << kHd1 << ",\n"
-        << "  \"hd2\": " << kHd2 << ",\n"
-        << "  \"residual_blocks\": " << kResidualBlocks << ",\n"
+        << "  \"group_id\": " << puzzle.group_id << ",\n"
+        << "  \"target_id\": " << puzzle.target_id << ",\n"
+        << "  \"state_len\": " << layout.state_dim << ",\n"
+        << "  \"state_storage_len\": " << layout.padded_state_dim << ",\n"
+        << "  \"state_value_pad\": " << layout.state_value_count << ",\n"
+        << "  \"move_count\": " << puzzle.move_count << ",\n"
+        << "  \"output_dim\": " << layout.output_dim << ",\n"
+        << "  \"hd1\": " << layout.logical_hd1 << ",\n"
+        << "  \"physical_hd1\": " << layout.physical_hd1 << ",\n"
+        << "  \"hd2\": " << layout.logical_hd2 << ",\n"
+        << "  \"physical_hd2\": " << layout.physical_hd2 << ",\n"
+        << "  \"residual_blocks\": " << layout.residual_blocks << ",\n"
         << "  \"dtype\": \"float32\",\n"
         << "  \"data\": \"weights.f32.bin\",\n"
         << "  \"total_params\": " << layout.total_params << "\n"
         << "}\n";
     return manifest ? Status::kOk : Status::kIoFailure;
+}
+
+Status ExportInferenceWeights(const std::filesystem::path& output_dir,
+                              const ModelLayout& layout,
+                              std::span<const float> weights) {
+    return ExportInferenceWeights(output_dir, PuzzleSpec{}, layout, weights);
 }
 
 }  // namespace mgt

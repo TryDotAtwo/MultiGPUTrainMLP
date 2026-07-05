@@ -3,12 +3,17 @@
 
 int main() {
     const auto layout = mgt::BuildModelLayout();
+    if (layout.blocks.size() != mgt::kParamBlockCount) return EXIT_FAILURE;
     if (layout.blocks[0].rows != mgt::kStateLen * mgt::kStateValuePad) return EXIT_FAILURE;
-    if (layout.blocks[0].cols != mgt::kHd1) return EXIT_FAILURE;
-    if (layout.blocks[mgt::kParamBlockCount - 2].cols != mgt::kOutputDim) return EXIT_FAILURE;
+    if (layout.blocks[0].cols != layout.physical_hd1) return EXIT_FAILURE;
+    if (layout.logical_hd1 != mgt::kHd1) return EXIT_FAILURE;
+    if (layout.physical_hd1 != mgt::RoundUp(mgt::kHd1, mgt::kHiddenAlignment)) return EXIT_FAILURE;
+    if (layout.logical_hd2 != mgt::kHd2) return EXIT_FAILURE;
+    if (layout.physical_hd2 != mgt::RoundUp(mgt::kHd2, mgt::kHiddenAlignment)) return EXIT_FAILURE;
+    if (layout.blocks[layout.blocks.size() - 2].cols != mgt::kOutputDim) return EXIT_FAILURE;
     if (layout.total_params == 0) return EXIT_FAILURE;
     if (layout.total_bytes % 64 != 0) return EXIT_FAILURE;
-    for (std::uint32_t i = 1; i < mgt::kParamBlockCount; ++i) {
+    for (std::uint32_t i = 1; i < layout.blocks.size(); ++i) {
         if (layout.blocks[i].offset_bytes <= layout.blocks[i - 1].offset_bytes) return EXIT_FAILURE;
     }
     return EXIT_SUCCESS;

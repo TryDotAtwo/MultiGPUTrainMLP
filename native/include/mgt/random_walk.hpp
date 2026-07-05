@@ -17,7 +17,7 @@ struct WalkRequest {
 
 Status GenerateRandomWalksCpu(const PuzzleDefinition& puzzle,
                               const WalkRequest& request,
-                              TrainState80* states,
+                              TrainStateStorage* states,
                               float* labels,
                               WalkMeta* meta);
 

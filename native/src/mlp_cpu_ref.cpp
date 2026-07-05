@@ -53,7 +53,7 @@ Offsets BuildOffsets(const CpuMlpShape& shape) {
 bool ValidShape(const CpuMlpShape& shape) {
     return shape.state_len > 0 && shape.state_len <= kStateLen &&
            shape.state_value_pad > 0 && shape.state_value_pad <= kStateValuePad &&
-           shape.hd1 > 0 && shape.hd2 > 0 && shape.residual_blocks <= 64 && shape.output_dim == 1;
+           shape.hd1 > 0 && shape.hd2 > 0 && shape.residual_blocks <= 64 && shape.output_dim > 0;
 }
 
 float Relu(float x) { return x > 0.0f ? x : 0.0f; }
@@ -62,7 +62,7 @@ float ReluGrad(float x) { return x > 0.0f ? 1.0f : 0.0f; }
 Status ForwardOne(const CpuMlpShape& shape,
                   const Offsets& offsets,
                   std::span<const float> weights,
-                  const TrainState80& state,
+                  const TrainStateStorage& state,
                   std::vector<float>* z1,
                   std::vector<float>* a1,
                   std::vector<float>* z2,
@@ -111,9 +111,11 @@ Status ForwardOne(const CpuMlpShape& shape,
         }
     }
 
-    float y = weights[offsets.output_bias];
-    for (std::uint32_t j = 0; j < shape.hd2; ++j) y += (*residual_out)[j] * weights[offsets.output_weight + j];
-    *output = y;
+    for (std::uint32_t out = 0; out < shape.output_dim; ++out) {
+        float y = weights[offsets.output_bias + out];
+        for (std::uint32_t j = 0; j < shape.hd2; ++j) y += (*residual_out)[j] * weights[offsets.output_weight + static_cast<std::uint64_t>(j) * shape.output_dim + out];
+        output[out] = y;
+    }
     return Status::kOk;
 }
 
@@ -126,7 +128,7 @@ std::uint64_t CpuMlpParamCount(const CpuMlpShape& shape) {
 
 Status CpuMlpForward(const CpuMlpShape& shape,
                      std::span<const float> weights,
-                     const TrainState80* states,
+                     const TrainStateStorage* states,
                      std::uint32_t sample_count,
                      float* outputs) {
     if (!ValidShape(shape) || states == nullptr || outputs == nullptr || sample_count == 0) return Status::kInvalidConfig;
@@ -138,7 +140,7 @@ Status CpuMlpForward(const CpuMlpShape& shape,
     std::vector<float> rz2(static_cast<std::uint64_t>(shape.residual_blocks) * shape.hd2);
     std::vector<float> rout(shape.hd2);
     for (std::uint32_t sample = 0; sample < sample_count; ++sample) {
-        const Status status = ForwardOne(shape, offsets, weights, states[sample], &z1, &a1, &z2, &a2, &rz1, &ra1, &rz2, &rout, &outputs[sample]);
+        const Status status = ForwardOne(shape, offsets, weights, states[sample], &z1, &a1, &z2, &a2, &rz1, &ra1, &rz2, &rout, outputs + static_cast<std::uint64_t>(sample) * shape.output_dim);
         if (status != Status::kOk) return status;
     }
     return Status::kOk;
@@ -146,7 +148,7 @@ Status CpuMlpForward(const CpuMlpShape& shape,
 
 Status CpuMlpLossAndGrad(const CpuMlpShape& shape,
                          std::span<const float> weights,
-                         const TrainState80* states,
+                         const TrainStateStorage* states,
                          const float* labels,
                          std::uint32_t sample_count,
                          float* loss,
@@ -162,13 +164,13 @@ Status CpuMlpLossAndGrad(const CpuMlpShape& shape,
     std::vector<float> ra1(static_cast<std::uint64_t>(shape.residual_blocks) * shape.hd2);
     std::vector<float> rz2(static_cast<std::uint64_t>(shape.residual_blocks) * shape.hd2);
     std::vector<float> block_inputs(static_cast<std::uint64_t>(shape.residual_blocks + 1U) * shape.hd2);
-    std::vector<float> rout(shape.hd2), dcur(shape.hd2), dprev(shape.hd2), dfc1(shape.hd2), dzfc2(shape.hd2), dzfc1(shape.hd2);
+    std::vector<float> rout(shape.hd2), output(shape.output_dim), dcur(shape.hd2), dprev(shape.hd2), dfc1(shape.hd2), dzfc2(shape.hd2), dzfc1(shape.hd2);
     std::vector<float> dz1(shape.hd1), da1(shape.hd1), dz2(shape.hd2), da2(shape.hd2);
-    const float inv_n = 1.0f / static_cast<float>(sample_count);
+    const float inv_n = 1.0f / static_cast<float>(static_cast<std::uint64_t>(sample_count) * shape.output_dim);
 
     for (std::uint32_t sample = 0; sample < sample_count; ++sample) {
-        float output = 0.0f;
-        const Status status = ForwardOne(shape, offsets, weights, states[sample], &z1, &a1, &z2, &a2, &rz1, &ra1, &rz2, &rout, &output);
+        std::fill(output.begin(), output.end(), 0.0f);
+        const Status status = ForwardOne(shape, offsets, weights, states[sample], &z1, &a1, &z2, &a2, &rz1, &ra1, &rz2, &rout, output.data());
         if (status != Status::kOk) return status;
         std::copy(a2.begin(), a2.end(), block_inputs.begin());
         std::vector<float> replay = a2;
@@ -179,13 +181,17 @@ Status CpuMlpLossAndGrad(const CpuMlpShape& shape,
             std::copy(replay.begin(), replay.end(), block_inputs.begin() + next);
         }
 
-        const float diff = output - labels[sample];
-        *loss += diff * diff * inv_n;
-        const float dy = 2.0f * diff * inv_n;
-        grad[offsets.output_bias] += dy;
-        for (std::uint32_t j = 0; j < shape.hd2; ++j) {
-            grad[offsets.output_weight + j] += rout[j] * dy;
-            dcur[j] = weights[offsets.output_weight + j] * dy;
+        std::fill(dcur.begin(), dcur.end(), 0.0f);
+        for (std::uint32_t out = 0; out < shape.output_dim; ++out) {
+            const float diff = output[out] - labels[static_cast<std::uint64_t>(sample) * shape.output_dim + out];
+            *loss += diff * diff * inv_n;
+            const float dy = 2.0f * diff * inv_n;
+            grad[offsets.output_bias + out] += dy;
+            for (std::uint32_t j = 0; j < shape.hd2; ++j) {
+                const std::uint64_t weight_idx = offsets.output_weight + static_cast<std::uint64_t>(j) * shape.output_dim + out;
+                grad[weight_idx] += rout[j] * dy;
+                dcur[j] += weights[weight_idx] * dy;
+            }
         }
 
         for (std::uint32_t rblock = shape.residual_blocks; rblock > 0; --rblock) {

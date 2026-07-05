@@ -7,6 +7,11 @@
 namespace mgt {
 
 Status ExportInferenceWeights(const std::filesystem::path& output_dir,
+                              const PuzzleSpec& puzzle,
+                              const ModelLayout& layout,
+                              std::span<const float> weights);
+
+Status ExportInferenceWeights(const std::filesystem::path& output_dir,
                               const ModelLayout& layout,
                               std::span<const float> weights);
 

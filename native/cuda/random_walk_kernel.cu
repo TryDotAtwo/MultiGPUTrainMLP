@@ -21,9 +21,9 @@ __global__ void RandomWalkKernel(RandomWalkKernelConfig config,
                                  std::uint64_t epoch,
                                  std::uint64_t step,
                                  std::uint32_t global_rank,
-                                 const mgt::TrainState80* moves,
-                                 const mgt::TrainState80* target,
-                                 mgt::TrainState80* states,
+                                 const mgt::TrainStateStorage* moves,
+                                 const mgt::TrainStateStorage* target,
+                                 mgt::TrainStateStorage* states,
                                  float* labels,
                                  mgt::WalkMeta* meta) {
     const std::uint32_t sample = blockIdx.x * blockDim.x + threadIdx.x;
@@ -38,20 +38,20 @@ __global__ void RandomWalkKernel(RandomWalkKernelConfig config,
     const std::uint32_t depth_span = config.k_max - config.k_min + 1U;
     const std::uint32_t depth = config.k_min + NextBounded(&rng, depth_span);
 
-    mgt::TrainState80 current = *target;
-    std::uint32_t last_move = mgt::kMoveCount;
+    mgt::TrainStateStorage current = *target;
+    std::uint32_t last_move = config.move_count;
     for (std::uint32_t d = 0; d < depth; ++d) {
-        std::uint32_t move = NextBounded(&rng, mgt::kMoveCount);
-        if (last_move != mgt::kMoveCount && move == last_move) {
-            move = (move + 1U + NextBounded(&rng, mgt::kMoveCount - 1U)) % mgt::kMoveCount;
+        std::uint32_t move = NextBounded(&rng, config.move_count);
+        if (last_move != config.move_count && move == last_move) {
+            move = (move + 1U + NextBounded(&rng, config.move_count - 1U)) % config.move_count;
         }
 
-        mgt::TrainState80 next{};
-        const mgt::TrainState80 move_def = moves[move];
-        for (std::uint32_t i = 0; i < mgt::kStateLen; ++i) {
+        mgt::TrainStateStorage next{};
+        const mgt::TrainStateStorage move_def = moves[move];
+        for (std::uint32_t i = 0; i < config.state_len; ++i) {
             next.v[i] = current.v[move_def.v[i]];
         }
-        for (std::uint32_t i = mgt::kStateLen; i < mgt::kStateStorageLen; ++i) {
+        for (std::uint32_t i = config.state_len; i < config.state_storage_len; ++i) {
             next.v[i] = 0;
         }
         current = next;
@@ -66,7 +66,10 @@ __global__ void RandomWalkKernel(RandomWalkKernelConfig config,
 }  // namespace
 
 __host__ mgt::Status ValidateRandomWalkKernelConfig(const RandomWalkKernelConfig& config) {
-    if (config.sample_count == 0 || config.k_min == 0 || config.k_min > config.k_max) {
+    if (config.sample_count == 0 || config.k_min == 0 || config.k_min > config.k_max ||
+        config.move_count == 0 || config.move_count > mgt::kMoveCount ||
+        config.state_len == 0 || config.state_len > mgt::kStateLen ||
+        config.state_storage_len < config.state_len || config.state_storage_len > mgt::kStateStorageLen) {
         return mgt::Status::kInvalidConfig;
     }
     return mgt::Status::kOk;
@@ -77,9 +80,9 @@ __host__ mgt::Status LaunchRandomWalkKernel(const RandomWalkKernelConfig& config
                                             std::uint64_t epoch,
                                             std::uint64_t step,
                                             std::uint32_t global_rank,
-                                            const mgt::TrainState80* device_moves,
-                                            const mgt::TrainState80* device_target,
-                                            mgt::TrainState80* device_states,
+                                            const mgt::TrainStateStorage* device_moves,
+                                            const mgt::TrainStateStorage* device_target,
+                                            mgt::TrainStateStorage* device_states,
                                             float* device_labels,
                                             mgt::WalkMeta* device_meta,
                                             cudaStream_t stream) {

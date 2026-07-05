@@ -19,13 +19,13 @@ std::uint64_t CpuMlpParamCount(const CpuMlpShape& shape);
 
 Status CpuMlpForward(const CpuMlpShape& shape,
                      std::span<const float> weights,
-                     const TrainState80* states,
+                     const TrainStateStorage* states,
                      std::uint32_t sample_count,
                      float* outputs);
 
 Status CpuMlpLossAndGrad(const CpuMlpShape& shape,
                          std::span<const float> weights,
-                         const TrainState80* states,
+                         const TrainStateStorage* states,
                          const float* labels,
                          std::uint32_t sample_count,
                          float* loss,
