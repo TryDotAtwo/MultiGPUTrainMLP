@@ -10,9 +10,11 @@ timestamp=$(date +%Y%m%d_%H%M%S)
 sweep_root="${MGT_SWEEP_ROOT:-runs/kaggle-2xt4-sweep-${timestamp}}"
 mkdir -p "$sweep_root"
 cmake -S native -B "$build_dir" -DMGT_ENABLE_CUDA=ON -DMGT_ENABLE_NCCL=ON -DCMAKE_CUDA_ARCHITECTURES=${MGT_CUDA_ARCH} -DMGT_CUTLASS_ROOT="${CUTLASS_ROOT:-/opt/cutlass}" -DMGT_AUTO_CUTLASS_HALF_GEMM=${MGT_AUTO_CUTLASS_HALF_GEMM:-ON}
-cmake --build "$build_dir" --config Release --target mgt_native_train
 if [ "${MGT_SWEEP_RUN_CTEST:-1}" = "1" ]; then
+  cmake --build "$build_dir" --config Release
   ctest --test-dir "$build_dir" -R 'cuda_compile|cuda_random_walk_smoke|cuda_adamw_smoke|cuda_mlp_forward_smoke|cuda_mlp_backward_smoke|cuda_train_step_smoke|nccl_single_rank_smoke|nccl_two_device_smoke|native_train_smoke|native_train_profile_smoke|native_train_resume_smoke|native_train_artifacts' --output-on-failure -C Release
+else
+  cmake --build "$build_dir" --config Release --target mgt_native_train
 fi
 cat > "$sweep_root/sweep_manifest.tsv" <<'EOF'
 config_id	batch_size	input_grad_position_tile	lt_workspace_bytes	allreduce_bucket_bytes	backward_profile	overlap_allreduce
