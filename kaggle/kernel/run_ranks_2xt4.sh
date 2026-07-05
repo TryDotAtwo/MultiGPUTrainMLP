@@ -5,8 +5,12 @@ export MGT_CUDA_ARCH=${MGT_CUDA_ARCH:-75}
 if [ -f scripts/ensure_cutlass.sh ]; then
   source scripts/ensure_cutlass.sh
 fi
-cmake -S native -B build-kaggle-2xt4 -DMGT_ENABLE_CUDA=ON -DMGT_ENABLE_NCCL=ON -DCMAKE_CUDA_ARCHITECTURES=${MGT_CUDA_ARCH} -DMGT_CUTLASS_ROOT="${CUTLASS_ROOT:-/opt/cutlass}" -DMGT_AUTO_CUTLASS_HALF_GEMM=${MGT_AUTO_CUTLASS_HALF_GEMM:-ON}
-cmake --build build-kaggle-2xt4 --config Release --target mgt_native_train
+build_dir="${MGT_BUILD_DIR:-build-kaggle-2xt4}"
+run_root="${MGT_RUN_ROOT:-runs/kaggle-2xt4}"
+if [ "${MGT_SKIP_BUILD:-0}" != "1" ]; then
+  cmake -S native -B "$build_dir" -DMGT_ENABLE_CUDA=ON -DMGT_ENABLE_NCCL=ON -DCMAKE_CUDA_ARCHITECTURES=${MGT_CUDA_ARCH} -DMGT_CUTLASS_ROOT="${CUTLASS_ROOT:-/opt/cutlass}" -DMGT_AUTO_CUTLASS_HALF_GEMM=${MGT_AUTO_CUTLASS_HALF_GEMM:-ON}
+  cmake --build "$build_dir" --config Release --target mgt_native_train
+fi
 if command -v nvidia-smi >/dev/null 2>&1; then
   visible_count=$(nvidia-smi -L | wc -l)
 else
@@ -24,10 +28,10 @@ elif [ "$visible_count" -ge 2 ]; then
 else
   world_size=1
 fi
-mkdir -p runs/kaggle-2xt4
-rm -f runs/kaggle-2xt4/nccl.id
+mkdir -p "$run_root"
+rm -f "$run_root/nccl.id"
 if [ "${MGT_PERF_RUN:-0}" = "1" ]; then
-  export MGT_FULL_MODEL=1
+  export MGT_FULL_MODEL="${MGT_FULL_MODEL:-1}"
   export MGT_STEPS="${MGT_STEPS:-8}"
   export MGT_BATCH_SIZE="${MGT_BATCH_SIZE:-53248}"
   export MGT_WRITE_ARTIFACTS="${MGT_WRITE_ARTIFACTS:-0}"
@@ -49,8 +53,8 @@ if [ "${MGT_FULL_MODEL:-0}" = "1" ]; then
 fi
 pids=()
 for rank in $(seq 0 $((world_size - 1))); do
-  ./build-kaggle-2xt4/mgt_native_train \
-    --output-dir "runs/kaggle-2xt4/rank${rank}" \
+  "$build_dir/mgt_native_train" \
+    --output-dir "$run_root/rank${rank}" \
     --steps "${MGT_STEPS:-3}" \
     --device-id "$rank" \
     --world-size "$world_size" \
@@ -62,30 +66,51 @@ for rank in $(seq 0 $((world_size - 1))); do
     --hd1 "${MGT_HD1:-5}" \
     --hd2 "${MGT_HD2:-3}" \
     --nrd "${MGT_NRD:-1}" \
+    --output-dim "${MGT_OUTPUT_DIM:-1}" \
     --write-artifacts "${MGT_WRITE_ARTIFACTS:-1}" \
     --backward-profile "${MGT_BACKWARD_PROFILE:-0}" \
     --input-grad-fp16 "${MGT_INPUT_GRAD_FP16:-0}" \
     --input-grad-position-tile "${MGT_INPUT_GRAD_POSITION_TILE:-0}" \
     --linear-fp16 "${MGT_LINEAR_FP16:-0}" \
+    --lt-workspace-bytes "${MGT_LT_WORKSPACE_BYTES:-0}" \
     --overlap-allreduce "${MGT_OVERLAP_ALLREDUCE:-1}" \
     --allreduce-bucket-bytes "${MGT_ALLREDUCE_BUCKET_BYTES:-4194304}" \
-    --nccl-id-file "runs/kaggle-2xt4/nccl.id" > "runs/kaggle-2xt4/rank${rank}.stdout" 2>&1 &
+    --nccl-id-file "$run_root/nccl.id" > "$run_root/rank${rank}.stdout" 2>&1 &
   pids+=("$!")
 done
 for pid in "${pids[@]}"; do
   wait "$pid"
 done
-bash kaggle/kernel/check_rank_outputs.sh runs/kaggle-2xt4 "$world_size"
+bash kaggle/kernel/check_rank_outputs.sh "$run_root" "$world_size"
 echo "rank_launch_ok world_size=${world_size}"
-python3 - <<'PY'
+MGT_SUMMARY_ROOT="$run_root" MGT_CONFIG_ID="${MGT_CONFIG_ID:-$(basename "$run_root")}" python3 - <<'PY'
 import json
+import os
+import statistics
 from pathlib import Path
-root = Path("runs/kaggle-2xt4")
+root = Path(os.environ["MGT_SUMMARY_ROOT"])
 rank_rows = []
 for path in sorted(root.glob("rank*/profile.jsonl")):
     rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
     rank_rows.append((path.parent.name, rows))
-summary = {"world_size": len(rank_rows), "steady_steps": [], "status": "ok"}
+summary = {
+    "config_id": os.environ.get("MGT_CONFIG_ID", root.name),
+    "world_size": len(rank_rows),
+    "steady_steps": [],
+    "status": "ok",
+    "config": {
+        "batch_size": int(os.environ.get("MGT_BATCH_SIZE", "64")),
+        "steps": int(os.environ.get("MGT_STEPS", "3")),
+        "output_dim": int(os.environ.get("MGT_OUTPUT_DIM", "1")),
+        "input_grad_position_tile": int(os.environ.get("MGT_INPUT_GRAD_POSITION_TILE", "0")),
+        "input_grad_fp16": int(os.environ.get("MGT_INPUT_GRAD_FP16", "0")),
+        "linear_fp16": int(os.environ.get("MGT_LINEAR_FP16", "0")),
+        "overlap_allreduce": int(os.environ.get("MGT_OVERLAP_ALLREDUCE", "1")),
+        "allreduce_bucket_bytes": int(os.environ.get("MGT_ALLREDUCE_BUCKET_BYTES", "4194304")),
+        "lt_workspace_bytes": int(os.environ.get("MGT_LT_WORKSPACE_BYTES", "0")),
+        "backward_profile": int(os.environ.get("MGT_BACKWARD_PROFILE", "0")),
+    },
+}
 if rank_rows and rank_rows[0][1]:
     first = rank_rows[0][1][0]
     summary["input_grad_backend"] = first.get("input_grad_backend")
@@ -93,13 +118,26 @@ if rank_rows and rank_rows[0][1]:
     summary["batch_states_per_rank"] = first.get("batch_states")
 if rank_rows:
     common_steps = sorted(set.intersection(*(set(row["step"] for row in rows) for _, rows in rank_rows)))
+    stage_keys = [
+        "walk_ms",
+        "backward_ms",
+        "allreduce_ms",
+        "adam_ms",
+        "bw_input_forward_ms",
+        "bw_hidden_forward_ms",
+        "bw_residual_forward_ms",
+        "bw_output_ms",
+        "bw_residual_backward_ms",
+        "bw_hidden_backward_ms",
+        "bw_input_grad_ms",
+    ]
     for step in common_steps:
         if step == 0:
             continue
         per_rank = [next(row for row in rows if row["step"] == step) for _, rows in rank_rows]
         batch_states = sum(int(row["batch_states"]) for row in per_rank)
         step_ms = max(float(row["milliseconds"]) for row in per_rank)
-        summary["steady_steps"].append({
+        step_row = {
             "step": step,
             "global_batch_states": batch_states,
             "max_rank_ms": step_ms,
@@ -107,12 +145,31 @@ if rank_rows:
             "rank_ms": [float(row["milliseconds"]) for row in per_rank],
             "rank_losses": [float(row["loss"]) for row in per_rank],
             "overlap_chunks": [int(row.get("overlap_chunks", 0)) for row in per_rank],
-        })
+        }
+        for key in stage_keys:
+            values = [float(row.get(key, 0.0)) for row in per_rank]
+            step_row[f"max_{key}"] = max(values)
+        summary["steady_steps"].append(step_row)
 if summary["steady_steps"]:
     values = [row["throughput_states_s"] for row in summary["steady_steps"]]
     summary["avg_throughput_states_s"] = sum(values) / len(values)
     summary["min_throughput_states_s"] = min(values)
     summary["max_throughput_states_s"] = max(values)
+    summary["avg_step_ms"] = statistics.mean(row["max_rank_ms"] for row in summary["steady_steps"])
+    for key in [
+        "walk_ms",
+        "backward_ms",
+        "allreduce_ms",
+        "adam_ms",
+        "bw_input_forward_ms",
+        "bw_hidden_forward_ms",
+        "bw_residual_forward_ms",
+        "bw_output_ms",
+        "bw_residual_backward_ms",
+        "bw_hidden_backward_ms",
+        "bw_input_grad_ms",
+    ]:
+        summary[f"avg_{key}"] = statistics.mean(row[f"max_{key}"] for row in summary["steady_steps"])
 else:
     summary["status"] = "no_steady_steps"
 (root / "throughput_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
