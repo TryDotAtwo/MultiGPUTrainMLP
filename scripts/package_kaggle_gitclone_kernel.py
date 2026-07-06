@@ -84,7 +84,7 @@ sys.exit(result.returncode)
 '''
 
 
-def write_metadata(output_dir: Path, kernel_id: str, title: str, code_file: str) -> None:
+def write_metadata(output_dir: Path, kernel_id: str, title: str, code_file: str, machine_shape: str) -> None:
     metadata = {
         "id": kernel_id,
         "title": title,
@@ -95,6 +95,7 @@ def write_metadata(output_dir: Path, kernel_id: str, title: str, code_file: str)
         "enable_gpu": True,
         "enable_tpu": False,
         "enable_internet": True,
+        "machine_shape": machine_shape,
         "dataset_sources": [],
         "competition_sources": [],
         "kernel_sources": [],
@@ -112,6 +113,7 @@ def main() -> None:
     parser.add_argument("--ref", default="main")
     parser.add_argument("--entry", default="kaggle/kernel/run_sweep_2xt4.sh")
     parser.add_argument("--output-subdir", default="mgt_results")
+    parser.add_argument("--machine-shape", default="NvidiaTeslaT4")
     args = parser.parse_args()
 
     root = Path(__file__).resolve().parents[1]
@@ -125,7 +127,7 @@ def main() -> None:
         output_subdir=args.output_subdir,
     )
     (output_dir / code_file).write_text(runner, encoding="utf-8")
-    write_metadata(output_dir, args.kernel_id, args.title, code_file)
+    write_metadata(output_dir, args.kernel_id, args.title, code_file, args.machine_shape)
     print(output_dir)
 
 
