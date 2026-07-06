@@ -48,6 +48,9 @@ env.setdefault("MGT_INPUT_GRAD_FP16", "1")
 env.setdefault("MGT_INPUT_GRAD_SPARSE", "0")
 env.setdefault("MGT_LINEAR_FP16", "1")
 env.setdefault("MGT_OUTPUT_DIM", "1")
+extra_env_defaults = {extra_env_defaults}
+for key, value in extra_env_defaults.items():
+    env.setdefault(key, value)
 if entry.endswith("run_sweep_2xt4.sh"):
     env.setdefault("MGT_SWEEP_ROOT", "/tmp/mgt_2xt4_sweep")
     env.setdefault("MGT_SWEEP_STEPS", "8")
@@ -115,7 +118,17 @@ def main() -> None:
     parser.add_argument("--entry", default="kaggle/kernel/run_sweep_2xt4.sh")
     parser.add_argument("--output-subdir", default="mgt_results")
     parser.add_argument("--machine-shape", default="NvidiaTeslaT4")
+    parser.add_argument("--set-env", action="append", default=[], metavar="KEY=VALUE", help="Embed an environment default in the generated Kaggle runner. Use \\n for multiline values.")
     args = parser.parse_args()
+
+    extra_env_defaults: dict[str, str] = {}
+    for item in args.set_env:
+        if "=" not in item:
+            raise SystemExit(f"--set-env expects KEY=VALUE, got {item!r}")
+        key, value = item.split("=", 1)
+        if not key:
+            raise SystemExit("--set-env key must not be empty")
+        extra_env_defaults[key] = value.replace("\\n", "\n")
 
     root = Path(__file__).resolve().parents[1]
     output_dir = (root / args.output_dir).resolve()
@@ -126,6 +139,7 @@ def main() -> None:
         ref=args.ref,
         entry=args.entry,
         output_subdir=args.output_subdir,
+        extra_env_defaults=json.dumps(extra_env_defaults, sort_keys=True),
     )
     (output_dir / code_file).write_text(runner, encoding="utf-8")
     write_metadata(output_dir, args.kernel_id, args.title, code_file, args.machine_shape)
