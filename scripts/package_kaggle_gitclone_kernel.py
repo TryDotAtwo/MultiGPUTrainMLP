@@ -60,6 +60,7 @@ else:
     env.setdefault("MGT_INPUT_GRAD_POSITION_TILE", "36")
     env.setdefault("MGT_OVERLAP_ALLREDUCE", "1")
     env.setdefault("MGT_BACKWARD_PROFILE", "0")
+    env.setdefault("MGT_LT_WORKSPACE_BYTES", "16777216")
     env.setdefault("MGT_CLEAN_BUILD_OUTPUT", "1")
 
 runner = work / entry
