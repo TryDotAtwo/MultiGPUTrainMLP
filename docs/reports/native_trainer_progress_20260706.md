@@ -35,6 +35,15 @@ Kaggle v10 checks:
 - Sweep rows: 27 ok, 0 failed.
 - Loss log scan: 432 finite loss records, no non-finite values, observed range 292.668 to 297.923.
 
+Kaggle v11 autotune checks:
+
+- Kernel status: complete.
+- Git revision: `9c1f6d6649aa2eb005925476d85f0e8737a11205`.
+- GPU preflight: 2 x Tesla T4.
+- CTest: 17/17 tests passed.
+- Sweep rows: 4 ok, 0 failed.
+- Loss log scan: 64 finite loss records, no non-finite values, observed range 293.116 to 297.344.
+
 ## Performance
 
 Local one-GPU run after the safe cuBLASLt fallback:
@@ -49,6 +58,7 @@ Kaggle two-T4 runs:
 | --- | --- | --- | ---: | ---: | ---: | ---: | --- |
 | v9 tile48 profile | `55a60e6` | `b53248_t48_ws16m_bucket4m` | 457828.31 | 232.65 | 213.89 | 28.16 | Noisy allreduce tail; useful profile row. |
 | v10 safe cuBLASLt cache | `9aff99e` | `b53248_t56_ws16m_bucket4m` | 513110.86 | 207.55 | 188.65 | 15.17 | Best observed 2xT4 result so far, but treat as no-regression plus slight observed improvement because Kaggle run-to-run noise is material. |
+| v11 cuBLASLt autotune | `9c1f6d6` | `b53248_t56_auto` | 518031.40 | 205.58 | 187.01 | 15.97 | New best observed 2xT4 result; +0.96% over v10 best, still small enough to treat as measured improvement rather than a guaranteed universal gain. |
 
 Kaggle v10 top configs:
 
@@ -61,6 +71,15 @@ Kaggle v10 top configs:
 | `b53248_t72_ws16m_bucket4m` | 506326.15 | 210.33 | n/a | n/a |
 
 Do not switch the default tile only from this evidence. Across v8 and v10, tile 56 is slightly ahead on average, but the margin is small enough that a repeated focused sweep is needed.
+
+Kaggle v11 autotune configs:
+
+| Config | Throughput, states/s | Step ms | Backward ms | Allreduce ms |
+| --- | ---: | ---: | ---: | ---: |
+| `b53248_t56_auto` | 518031.40 | 205.58 | 187.01 | 15.97 |
+| `b53248_t48_auto` | 516508.34 | 206.19 | 187.13 | 15.25 |
+| `b53248_t48_auto_profile` | 513811.17 | 207.27 | 188.57 | 14.71 |
+| `b53248_t64_auto` | 510361.21 | 208.68 | 189.53 | 16.91 |
 
 ## Stage profile
 
@@ -80,13 +99,30 @@ Kaggle v10 profile row `b53248_t48_ws16m_profile`:
 
 Main compute bottlenecks are now residual backward, input-gradient GEMM, residual forward, and input forward. The communication tail is visible but smaller in the v10 best run than in v9.
 
+Kaggle v11 profile row `b53248_t48_auto_profile`:
+
+| Stage | Avg ms |
+| --- | ---: |
+| Input forward | 27.30 |
+| Hidden forward | 2.96 |
+| Residual forward | 36.89 |
+| Output | 4.38 |
+| Residual backward | 61.03 |
+| Hidden backward | 14.23 |
+| Input gradient | 42.99 |
+| Allreduce | 14.71 |
+| Adam | 1.89 |
+
+Compared with the v10 tile48 profile, autotune mainly improved input gradient from 45.36 ms to 42.99 ms and output from 4.67 ms to 4.38 ms. Residual backward stayed the dominant compute stage at about 61 ms.
+
 ## Next work
 
-1. Run a focused repeated 2xT4 sweep for tile 48, 56, and 64 with the same commit to choose the default input-gradient tile with noise margin.
-2. Continue the cuBLASLt/CUTLASS work as a real per-shape autotune path, not a one-off shape hack.
-3. Attack residual backward first, because it is the largest profiled compute stage.
-4. Keep input-gradient GEMM as the second target; the current sparse custom route is much slower and should stay disabled until redesigned.
-5. Keep correctness checks tied to every speed step: CTest, finite-loss scan, and at least one profile row.
+1. Repeat the v11 autotune 2xT4 sweep once more if choosing a permanent default tile; tile 56 is ahead in v10 and v11, but by a small margin.
+2. Attack residual backward first, because it remains the largest profiled compute stage.
+3. Keep input-gradient GEMM as the second target; autotune helped, but this stage still costs about 43 ms in the profile row.
+4. Move more repeated launch structure toward CUDA Graph capture after the residual backward path is stable.
+5. Continue the CUTLASS path only where it gives more control than cuBLASLt autotune for a shape family, not as a blind replacement.
+6. Keep correctness checks tied to every speed step: CTest, finite-loss scan, and at least one profile row.
 
 ## cuBLASLt autotune slice
 
@@ -113,4 +149,4 @@ Local one-GPU comparison, same build and workload: world_size=1, batch=24576, ti
 | `local_lt_autotune_off_b24576_t48_repeat_20260706` | 0 | 174689.28 | 142.75 | 139.56 | Repeated off run confirms bad first heuristic locally. |
 | `local_lt_autotune_on_b24576_t48_20260706` | 1 | 278586.46 | 88.82 | 86.65 | Same workload with per-shape timing selection. |
 
-Interpretation: local autotune is materially better than the first cuBLASLt heuristic for this machine and this shape family. This is not yet a 2xT4 claim; next step is a focused Kaggle run with `MGT_LT_AUTOTUNE=1` for tile 48/56/64 and the same correctness scan.
+Interpretation: local autotune is materially better than the first cuBLASLt heuristic for this machine and this shape family. Kaggle v11 confirms the same direction on 2xT4, but with a smaller observed gain: 518031 states/s for the v11 best row versus 513111 states/s for the v10 best row.
