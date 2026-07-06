@@ -900,6 +900,15 @@ int main(int argc, char** argv) {
                 << ",\"bw_residual_forward_ms\":" << backward_profile.residual_forward_ms
                 << ",\"bw_output_ms\":" << backward_profile.output_ms
                 << ",\"bw_residual_backward_ms\":" << backward_profile.residual_backward_ms
+                << ",\"bw_residual_fc2_dz_ms\":" << backward_profile.residual_fc2_dz_ms
+                << ",\"bw_residual_fc2_grad_weight_ms\":" << backward_profile.residual_fc2_grad_weight_ms
+                << ",\"bw_residual_fc2_bias_ms\":" << backward_profile.residual_fc2_bias_ms
+                << ",\"bw_residual_fc2_backprop_ms\":" << backward_profile.residual_fc2_backprop_ms
+                << ",\"bw_residual_fc1_dz_ms\":" << backward_profile.residual_fc1_dz_ms
+                << ",\"bw_residual_fc1_grad_weight_ms\":" << backward_profile.residual_fc1_grad_weight_ms
+                << ",\"bw_residual_fc1_bias_ms\":" << backward_profile.residual_fc1_bias_ms
+                << ",\"bw_residual_fc1_backprop_ms\":" << backward_profile.residual_fc1_backprop_ms
+                << ",\"bw_residual_skip_add_ms\":" << backward_profile.residual_skip_add_ms
                 << ",\"bw_hidden_backward_ms\":" << backward_profile.hidden_backward_ms
                 << ",\"bw_input_grad_ms\":" << backward_profile.input_grad_ms << ",\"status\":\"ok\"}\n";
     }

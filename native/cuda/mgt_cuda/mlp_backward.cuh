@@ -14,6 +14,15 @@ struct MlpBackwardProfile {
     float residual_forward_ms = 0.0f;
     float output_ms = 0.0f;
     float residual_backward_ms = 0.0f;
+    float residual_fc2_dz_ms = 0.0f;
+    float residual_fc2_grad_weight_ms = 0.0f;
+    float residual_fc2_bias_ms = 0.0f;
+    float residual_fc2_backprop_ms = 0.0f;
+    float residual_fc1_dz_ms = 0.0f;
+    float residual_fc1_grad_weight_ms = 0.0f;
+    float residual_fc1_bias_ms = 0.0f;
+    float residual_fc1_backprop_ms = 0.0f;
+    float residual_skip_add_ms = 0.0f;
     float hidden_backward_ms = 0.0f;
     float input_grad_ms = 0.0f;
 };

@@ -150,3 +150,44 @@ Local one-GPU comparison, same build and workload: world_size=1, batch=24576, ti
 | `local_lt_autotune_on_b24576_t48_20260706` | 1 | 278586.46 | 88.82 | 86.65 | Same workload with per-shape timing selection. |
 
 Interpretation: local autotune is materially better than the first cuBLASLt heuristic for this machine and this shape family. Kaggle v11 confirms the same direction on 2xT4, but with a smaller observed gain: 518031 states/s for the v11 best row versus 513111 states/s for the v10 best row.
+
+## Residual backward subprofile slice, 2026-07-07
+
+Implemented after the v11 autotune slice:
+
+- Added residual-backward substage timers to `MlpBackwardProfile` without changing the non-profiled training path.
+- Exported these fields to `profile.jsonl` and to the rank-wrapper `throughput_summary.json` aggregation.
+- The profiled residual-backward total is now the sum of its measured substages, which makes the next optimization target visible.
+
+Fresh local verification:
+
+- Docker build target: `test_cuda_train_step_smoke`, `test_cuda_mlp_backward_cpu_compare`, `test_cuda_mlp_backward_mixed_precision_error`, `mgt_native_train` passed.
+- CTest filter `cuda_mlp_backward_cpu_compare|cuda_mlp_backward_mixed_precision_error|cuda_train_step_smoke`: 3/3 passed.
+- `bash -n` for `kaggle/kernel/run_ranks_2xt4.sh` and `kaggle/kernel/run_sweep_2xt4.sh`: passed.
+- `git diff --check`: passed.
+
+Local one-GPU no-profile check, same p888 workload as before: world_size=1, batch=24576, tile=48, workspace=16 MiB, cuBLASLt autotune enabled.
+
+| Run | Steps | Throughput, states/s | Step ms | Backward ms | Notes |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `local_residual_subprofile_wrapper_b24576_t48_20steps_20260707` | 20 | 309296.17 | 79.60 | 77.37 | Average over steps 1..19. |
+| same run, last 10 steady steps | 10 | 317724.91 | 77.43 | 75.13 | Better warm-state estimate on the laptop GPU. |
+
+The earlier 8-step checks in this session were much noisier because the local laptop GPU started from low clocks; the 20-step wrapper run is the more useful local no-regression check. Loss stayed finite: 19 steady records, observed range 291.078827 to 296.950378, non-finite count 0.
+
+Local one-GPU profile wrapper row: `local_residual_subprofile_wrapper_profile_b24576_t48_20260707`, batch=24576, tile=48, profile enabled. Profile mode adds synchronization and is for attribution, not headline throughput.
+
+| Residual backward substage | Avg ms |
+| --- | ---: |
+| FC2 dZ | 5.23 |
+| FC2 grad weight | 3.95 |
+| FC2 bias | 2.10 |
+| FC2 backprop | 3.38 |
+| FC1 dZ | 4.14 |
+| FC1 grad weight | 3.51 |
+| FC1 bias | 1.91 |
+| FC1 backprop | 3.13 |
+| Skip add | 3.63 |
+| Residual backward total | 30.97 |
+
+This points to the next real optimization slice: reduce residual-backward launch count and memory traffic first. The largest individual buckets are the two activation-gradient kernels, then weight-gradient GEMMs, then skip add. The previous bias-gradient and beta=1 skip-add attempts were measured and rejected because they slowed the non-profiled path.

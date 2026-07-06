@@ -221,6 +221,16 @@ struct BackwardStageTimer {
         now = tmp;
         return mgt::Status::kOk;
     }
+
+    mgt::Status MarkAdd(float* dst, float* total) {
+        if (profile == nullptr) return mgt::Status::kOk;
+        float elapsed = 0.0f;
+        const mgt::Status status = Mark(&elapsed);
+        if (status != mgt::Status::kOk) return status;
+        if (dst != nullptr) *dst += elapsed;
+        if (total != nullptr) *total += elapsed;
+        return mgt::Status::kOk;
+    }
 };
 mgt::Status GemmRowMajor(cublasHandle_t handle, const float* a, const float* b, float* c, std::uint32_t m, std::uint32_t n, std::uint32_t k, float beta = 0.0f) {
     const float alpha = 1.0f;
@@ -1531,44 +1541,53 @@ mgt::Status LaunchMlpLossGradKernelWithWorkspaceInternal(const CudaMlpShape& sha
         if (use_half_linear) {
             ResidualDzFc2HalfKernel<<<h2_launch.blocks, h2_launch.threads, 0, stream>>>(shape, sample_count, block, w.block_inputs, w.rz2, w.dcur, w.dzfc2, w.h2_right_half);
             if (!LaunchOk()) return mgt::Status::kCudaFailure;
+            if (profile != nullptr && stage_timer.MarkAdd(&profile->residual_fc2_dz_ms, &profile->residual_backward_ms) != mgt::Status::kOk) return mgt::Status::kCudaFailure;
             if (GemmGradWeightsHalf(blas_lt, stream, lt_workspace_base, lt_workspace_bytes, block_ra1_half, w.h2_right_half, device_grad + ResidualFc2Weight(shape, block), sample_count, shape.hd2, shape.hd2) != mgt::Status::kOk) return mgt::Status::kCudaFailure;
         } else {
             ResidualDzFc2Kernel<<<h2_launch.blocks, h2_launch.threads, 0, stream>>>(shape, sample_count, block, w.block_inputs, w.rz2, w.dcur, w.dzfc2);
             if (!LaunchOk()) return mgt::Status::kCudaFailure;
+            if (profile != nullptr && stage_timer.MarkAdd(&profile->residual_fc2_dz_ms, &profile->residual_backward_ms) != mgt::Status::kOk) return mgt::Status::kCudaFailure;
             if (GemmGradWeights(blas, block_ra1, w.dzfc2, device_grad + ResidualFc2Weight(shape, block), sample_count, shape.hd2, shape.hd2) != mgt::Status::kOk) return mgt::Status::kCudaFailure;
         }
+        if (profile != nullptr && stage_timer.MarkAdd(&profile->residual_fc2_grad_weight_ms, &profile->residual_backward_ms) != mgt::Status::kOk) return mgt::Status::kCudaFailure;
         if (GemvBiasGrad(blas, w.dzfc2, w.ones, device_grad + ResidualFc2Bias(shape, block), sample_count, shape.hd2) != mgt::Status::kOk) return mgt::Status::kCudaFailure;
+        if (profile != nullptr && stage_timer.MarkAdd(&profile->residual_fc2_bias_ms, &profile->residual_backward_ms) != mgt::Status::kOk) return mgt::Status::kCudaFailure;
         if (NotifyGradientReady(gradient_ready, gradient_ready_user, &gradient_ready_id, ResidualFc2Weight(shape, block), static_cast<std::uint64_t>(shape.hd2) * shape.hd2 + shape.hd2, stream) != mgt::Status::kOk) return mgt::Status::kCudaFailure;
         if (use_half_linear) {
             if (GemmBackpropInputHalf(blas_lt, stream, lt_workspace_base, lt_workspace_bytes, w.h2_right_half, w.weights_half + ResidualFc2Weight(shape, block), w.dra1, sample_count, shape.hd2, shape.hd2) != mgt::Status::kOk) return mgt::Status::kCudaFailure;
         } else {
             if (GemmBackpropInput(blas, w.dzfc2, device_weights + ResidualFc2Weight(shape, block), w.dra1, sample_count, shape.hd2, shape.hd2) != mgt::Status::kOk) return mgt::Status::kCudaFailure;
         }
+        if (profile != nullptr && stage_timer.MarkAdd(&profile->residual_fc2_backprop_ms, &profile->residual_backward_ms) != mgt::Status::kOk) return mgt::Status::kCudaFailure;
 
         if (use_half_linear) {
             ResidualDzFc1HalfKernel<<<h2_launch.blocks, h2_launch.threads, 0, stream>>>(shape, sample_count, block, w.rz1, w.dra1, w.dzfc1, w.h2_right_half);
             if (!LaunchOk()) return mgt::Status::kCudaFailure;
+            if (profile != nullptr && stage_timer.MarkAdd(&profile->residual_fc1_dz_ms, &profile->residual_backward_ms) != mgt::Status::kOk) return mgt::Status::kCudaFailure;
             if (GemmGradWeightsHalf(blas_lt, stream, lt_workspace_base, lt_workspace_bytes, block_in_half, w.h2_right_half, device_grad + ResidualFc1Weight(shape, block), sample_count, shape.hd2, shape.hd2) != mgt::Status::kOk) return mgt::Status::kCudaFailure;
         } else {
             ResidualDzFc1Kernel<<<h2_launch.blocks, h2_launch.threads, 0, stream>>>(shape, sample_count, block, w.rz1, w.dra1, w.dzfc1);
             if (!LaunchOk()) return mgt::Status::kCudaFailure;
+            if (profile != nullptr && stage_timer.MarkAdd(&profile->residual_fc1_dz_ms, &profile->residual_backward_ms) != mgt::Status::kOk) return mgt::Status::kCudaFailure;
             if (GemmGradWeights(blas, block_in, w.dzfc1, device_grad + ResidualFc1Weight(shape, block), sample_count, shape.hd2, shape.hd2) != mgt::Status::kOk) return mgt::Status::kCudaFailure;
         }
+        if (profile != nullptr && stage_timer.MarkAdd(&profile->residual_fc1_grad_weight_ms, &profile->residual_backward_ms) != mgt::Status::kOk) return mgt::Status::kCudaFailure;
         if (GemvBiasGrad(blas, w.dzfc1, w.ones, device_grad + ResidualFc1Bias(shape, block), sample_count, shape.hd2) != mgt::Status::kOk) return mgt::Status::kCudaFailure;
+        if (profile != nullptr && stage_timer.MarkAdd(&profile->residual_fc1_bias_ms, &profile->residual_backward_ms) != mgt::Status::kOk) return mgt::Status::kCudaFailure;
         if (NotifyGradientReady(gradient_ready, gradient_ready_user, &gradient_ready_id, ResidualFc1Weight(shape, block), static_cast<std::uint64_t>(shape.hd2) * shape.hd2 + shape.hd2, stream) != mgt::Status::kOk) return mgt::Status::kCudaFailure;
         if (use_half_linear) {
             if (GemmBackpropInputHalf(blas_lt, stream, lt_workspace_base, lt_workspace_bytes, w.h2_right_half, w.weights_half + ResidualFc1Weight(shape, block), w.dprev, sample_count, shape.hd2, shape.hd2) != mgt::Status::kOk) return mgt::Status::kCudaFailure;
         } else {
             if (GemmBackpropInput(blas, w.dzfc1, device_weights + ResidualFc1Weight(shape, block), w.dprev, sample_count, shape.hd2, shape.hd2) != mgt::Status::kOk) return mgt::Status::kCudaFailure;
         }
+        if (profile != nullptr && stage_timer.MarkAdd(&profile->residual_fc1_backprop_ms, &profile->residual_backward_ms) != mgt::Status::kOk) return mgt::Status::kCudaFailure;
         AddInPlaceKernel<<<h2_launch.blocks, h2_launch.threads, 0, stream>>>(w.dprev, w.dzfc2, batch_h2);
         if (!LaunchOk()) return mgt::Status::kCudaFailure;
+        if (profile != nullptr && stage_timer.MarkAdd(&profile->residual_skip_add_ms, &profile->residual_backward_ms) != mgt::Status::kOk) return mgt::Status::kCudaFailure;
         float* tmp = w.dcur;
         w.dcur = w.dprev;
         w.dprev = tmp;
     }
-
-    if (stage_timer.Mark(profile == nullptr ? nullptr : &profile->residual_backward_ms) != mgt::Status::kOk) return mgt::Status::kCudaFailure;
 
     if (use_half_linear) {
         HiddenDz2HalfKernel<<<h2_launch.blocks, h2_launch.threads, 0, stream>>>(shape, w.z2, w.dcur, sample_count, w.dz2, w.h2_right_half);
