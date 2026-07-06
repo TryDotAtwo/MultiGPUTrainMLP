@@ -54,5 +54,5 @@ cat runs/kaggle-2xt4/throughput_summary.json
 ```text
 avg_throughput_states_s = 462623
 input_grad_backend = position_tiled_one_hot_half_gemm
-input_grad_position_tile = 36
+input_grad_position_tile = 48
 ```

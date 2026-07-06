@@ -57,7 +57,7 @@ else:
     env.setdefault("MGT_FULL_MODEL", "1")
     env.setdefault("MGT_STEPS", "8")
     env.setdefault("MGT_BATCH_SIZE", "53248")
-    env.setdefault("MGT_INPUT_GRAD_POSITION_TILE", "36")
+    env.setdefault("MGT_INPUT_GRAD_POSITION_TILE", "48")
     env.setdefault("MGT_OVERLAP_ALLREDUCE", "1")
     env.setdefault("MGT_BACKWARD_PROFILE", "0")
     env.setdefault("MGT_LT_WORKSPACE_BYTES", "16777216")
