@@ -49,6 +49,7 @@ struct Args {
     std::uint32_t input_grad_partial_chunks = mgt::kInputGradPartialChunks;
     std::uint32_t input_grad_positions_per_block = mgt::kInputGradPositionsPerBlock;
     std::uint32_t input_grad_position_tile = 0;
+    bool input_grad_sparse = false;
     bool input_grad_fp16 = true;
     bool linear_fp16 = true;
     bool persistent_half_weights = true;
@@ -93,6 +94,9 @@ std::uint64_t ParamCount(const mgt_cuda::CudaMlpShape& shape) {
 const char* InputGradBackendName(const Args& args, const mgt::TrainPlan& train_plan) {
     const std::uint32_t chunks = train_plan.config.runtime.input_grad_partial_chunks;
     const std::uint32_t positions = train_plan.config.runtime.input_grad_positions_per_block;
+    if (train_plan.config.runtime.input_grad_sparse) {
+        return args.input_grad_fp16 ? "position_sparse_half2_owner_write" : "position_sparse_float_owner_write";
+    }
     if (train_plan.config.runtime.input_grad_position_tile > 0U) {
         return args.input_grad_fp16 ? "position_tiled_one_hot_half_gemm" : "position_tiled_one_hot_float_gemm";
     }
@@ -470,6 +474,7 @@ mgt::TrainConfig BuildTrainConfig(const Args& args) {
     config.runtime.input_grad_partial_chunks = args.input_grad_partial_chunks;
     config.runtime.input_grad_positions_per_block = args.input_grad_positions_per_block;
     config.runtime.input_grad_position_tile = args.input_grad_position_tile;
+    config.runtime.input_grad_sparse = args.input_grad_sparse;
     config.runtime.lt_workspace_bytes = args.lt_workspace_bytes;
     config.runtime.allreduce_bucket_bytes = args.allreduce_bucket_bytes;
     config.runtime.mode = args.world_size == 1 ? mgt::RuntimeMode::kSingleGpu : mgt::RuntimeMode::kMultiGpu;
@@ -577,6 +582,8 @@ bool ParseArgs(int argc, char** argv, Args* args) {
             if (!ParseUint(value, &args->input_grad_positions_per_block)) return false;
         } else if (key == "--input-grad-position-tile") {
             if (!ParseUint(value, &args->input_grad_position_tile)) return false;
+        } else if (key == "--input-grad-sparse") {
+            if (!ParseBool(value, &args->input_grad_sparse)) return false;
         } else if (key == "--input-grad-fp16") {
             if (!ParseBool(value, &args->input_grad_fp16)) return false;
         } else if (key == "--linear-fp16") {
@@ -619,7 +626,7 @@ bool ParseArgs(int argc, char** argv, Args* args) {
 int main(int argc, char** argv) {
     Args args{};
     if (!ParseArgs(argc, argv, &args)) {
-        std::cerr << "usage: mgt_native_train_smoke --output-dir DIR --steps N --device-id ID --world-size N --global-rank R --local-rank R [--batch-size N --k-min N --k-max N --hd1 N --hd2 N --nrd N --write-artifacts 0|1 --backward-profile 0|1 --overlap-allreduce 0|1 --input-grad-partial-chunks N --input-grad-positions-per-block N --input-grad-position-tile N --input-grad-fp16 0|1 --linear-fp16 0|1 --persistent-half-weights 0|1 --lt-workspace-bytes N --nccl-id-file PATH --resume-checkpoint DIR]\n";
+        std::cerr << "usage: mgt_native_train_smoke --output-dir DIR --steps N --device-id ID --world-size N --global-rank R --local-rank R [--batch-size N --k-min N --k-max N --hd1 N --hd2 N --nrd N --write-artifacts 0|1 --backward-profile 0|1 --overlap-allreduce 0|1 --input-grad-partial-chunks N --input-grad-positions-per-block N --input-grad-position-tile N --input-grad-sparse 0|1 --input-grad-fp16 0|1 --linear-fp16 0|1 --persistent-half-weights 0|1 --lt-workspace-bytes N --nccl-id-file PATH --resume-checkpoint DIR]\n";
         return EXIT_FAILURE;
     }
     int device_count = 0;
@@ -753,6 +760,7 @@ int main(int argc, char** argv) {
         << " input_grad_partial_chunks=" << train_plan.config.runtime.input_grad_partial_chunks
         << " input_grad_positions_per_block=" << train_plan.config.runtime.input_grad_positions_per_block
         << " input_grad_position_tile=" << train_plan.config.runtime.input_grad_position_tile
+        << " input_grad_sparse=" << (train_plan.config.runtime.input_grad_sparse ? 1 : 0)
         << " input_grad_fp16=" << (args.input_grad_fp16 ? 1 : 0)
         << " input_grad_backend=" << input_grad_backend
         << " linear_fp16=" << (args.linear_fp16 ? 1 : 0)
@@ -798,12 +806,12 @@ int main(int argc, char** argv) {
         const mgt::Status backward_status =
 #ifdef MGT_HAS_NCCL
             overlap_allreduce
-                ? mgt_cuda::LaunchMlpLossGradKernelProfiledWithWorkspaceLtAndCallbackExternalHalf(shape, d_weights, d_weights_half, d_states, d_labels, kSamples, d_loss, d_grad, d_backward_workspace, backward_workspace_floats, backward_blas, backward_blas_lt, train_plan.config.runtime.input_grad_partial_chunks, train_plan.config.runtime.input_grad_positions_per_block, args.input_grad_fp16, args.linear_fp16, args.backward_profile ? &backward_profile : nullptr, ScheduleGradientAllreduce, &comm_context, compute_stream, d_lt_workspace, args.lt_workspace_bytes, train_plan.config.runtime.input_grad_position_tile)
+                ? mgt_cuda::LaunchMlpLossGradKernelProfiledWithWorkspaceLtAndCallbackExternalHalf(shape, d_weights, d_weights_half, d_states, d_labels, kSamples, d_loss, d_grad, d_backward_workspace, backward_workspace_floats, backward_blas, backward_blas_lt, train_plan.config.runtime.input_grad_partial_chunks, train_plan.config.runtime.input_grad_positions_per_block, args.input_grad_fp16, args.linear_fp16, args.backward_profile ? &backward_profile : nullptr, ScheduleGradientAllreduce, &comm_context, compute_stream, d_lt_workspace, args.lt_workspace_bytes, train_plan.config.runtime.input_grad_position_tile, train_plan.config.runtime.input_grad_sparse)
                 :
 #endif
             (args.backward_profile
-                ? mgt_cuda::LaunchMlpLossGradKernelProfiledWithWorkspaceLtExternalHalf(shape, d_weights, d_weights_half, d_states, d_labels, kSamples, d_loss, d_grad, d_backward_workspace, backward_workspace_floats, backward_blas, backward_blas_lt, train_plan.config.runtime.input_grad_partial_chunks, train_plan.config.runtime.input_grad_positions_per_block, args.input_grad_fp16, args.linear_fp16, &backward_profile, compute_stream, d_lt_workspace, args.lt_workspace_bytes, train_plan.config.runtime.input_grad_position_tile)
-                : mgt_cuda::LaunchMlpLossGradKernelWithWorkspaceLtExternalHalf(shape, d_weights, d_weights_half, d_states, d_labels, kSamples, d_loss, d_grad, d_backward_workspace, backward_workspace_floats, backward_blas, backward_blas_lt, train_plan.config.runtime.input_grad_partial_chunks, train_plan.config.runtime.input_grad_positions_per_block, args.input_grad_fp16, args.linear_fp16, compute_stream, d_lt_workspace, args.lt_workspace_bytes, train_plan.config.runtime.input_grad_position_tile));
+                ? mgt_cuda::LaunchMlpLossGradKernelProfiledWithWorkspaceLtExternalHalf(shape, d_weights, d_weights_half, d_states, d_labels, kSamples, d_loss, d_grad, d_backward_workspace, backward_workspace_floats, backward_blas, backward_blas_lt, train_plan.config.runtime.input_grad_partial_chunks, train_plan.config.runtime.input_grad_positions_per_block, args.input_grad_fp16, args.linear_fp16, &backward_profile, compute_stream, d_lt_workspace, args.lt_workspace_bytes, train_plan.config.runtime.input_grad_position_tile, train_plan.config.runtime.input_grad_sparse)
+                : mgt_cuda::LaunchMlpLossGradKernelWithWorkspaceLtExternalHalf(shape, d_weights, d_weights_half, d_states, d_labels, kSamples, d_loss, d_grad, d_backward_workspace, backward_workspace_floats, backward_blas, backward_blas_lt, train_plan.config.runtime.input_grad_partial_chunks, train_plan.config.runtime.input_grad_positions_per_block, args.input_grad_fp16, args.linear_fp16, compute_stream, d_lt_workspace, args.lt_workspace_bytes, train_plan.config.runtime.input_grad_position_tile, train_plan.config.runtime.input_grad_sparse));
         if (backward_status != mgt::Status::kOk) {
             log << "rank=" << args.global_rank << " step=" << step << " phase=backward status=" << StatusName(backward_status)
                 << " status_code=" << static_cast<int>(backward_status) << "\n";
@@ -862,7 +870,7 @@ int main(int argc, char** argv) {
                 << ",\"allreduce_ms\":" << allreduce_ms << ",\"adam_ms\":" << adam_ms
                 << ",\"batch_states\":" << kSamples << ",\"loss\":" << std::setprecision(6) << last_loss
                 << ",\"memory_bytes\":" << used_bytes << ",\"gradient_slots\":" << train_plan.gradient_carousel_slots << ",\"gradient_buckets\":" << train_plan.gradient_buckets.size()
-                << ",\"input_grad_fp16\":" << (args.input_grad_fp16 ? 1 : 0) << ",\"input_grad_position_tile\":" << train_plan.config.runtime.input_grad_position_tile << ",\"input_grad_backend\":\"" << input_grad_backend << "\",\"linear_fp16\":" << (args.linear_fp16 ? 1 : 0)
+                << ",\"input_grad_fp16\":" << (args.input_grad_fp16 ? 1 : 0) << ",\"input_grad_position_tile\":" << train_plan.config.runtime.input_grad_position_tile << ",\"input_grad_sparse\":" << (train_plan.config.runtime.input_grad_sparse ? 1 : 0) << ",\"input_grad_backend\":\"" << input_grad_backend << "\",\"linear_fp16\":" << (args.linear_fp16 ? 1 : 0)
                 << ",\"persistent_half_weights\":" << (args.persistent_half_weights ? 1 : 0)
                 << ",\"lt_workspace_bytes\":" << args.lt_workspace_bytes
                 << ",\"overlap_allreduce\":" << (overlap_allreduce ? 1 : 0) << ",\"overlap_ranges\":" << overlap_ranges << ",\"overlap_chunks\":" << overlap_chunks
@@ -889,7 +897,7 @@ int main(int argc, char** argv) {
     meta << "MODEL_MODE=MLP2RB\nOUTPUT_DIM=" << shape.output_dim << "\nWORLD_SIZE=" << args.world_size << "\nGLOBAL_RANK=" << args.global_rank
          << "\nLOCAL_RANK=" << args.local_rank << "\nDEVICE_ID=" << args.device_id << "\nHD1=" << requested_hd1 << "\nPHYSICAL_HD1=" << shape.hd1 << "\nHD2=" << requested_hd2 << "\nPHYSICAL_HD2=" << shape.hd2 << "\nNUM_CLASSES=" << shape.state_value_pad << "\nNRD=" << shape.residual_blocks
          << "\nK_MIN=" << args.k_min << "\nK_MAX=" << args.k_max << "\nBATCH_SIZE=" << kSamples
-         << "\nGRADIENT_CAROUSEL_SLOTS=" << train_plan.gradient_carousel_slots << "\nLT_WORKSPACE_BYTES=" << args.lt_workspace_bytes << "\nINPUT_GRAD_PARTIAL_CHUNKS=" << train_plan.config.runtime.input_grad_partial_chunks << "\nINPUT_GRAD_POSITIONS_PER_BLOCK=" << train_plan.config.runtime.input_grad_positions_per_block << "\nINPUT_GRAD_POSITION_TILE=" << train_plan.config.runtime.input_grad_position_tile << "\nINPUT_GRAD_FP16=" << (args.input_grad_fp16 ? 1 : 0) << "\nINPUT_GRAD_BACKEND=" << input_grad_backend << "\nLINEAR_FP16=" << (args.linear_fp16 ? 1 : 0) << "\nPERSISTENT_HALF_WEIGHTS=" << (args.persistent_half_weights ? 1 : 0) << "\nOVERLAP_ALLREDUCE=" << (overlap_allreduce ? 1 : 0) << "\nGRADIENT_BUCKETS=" << train_plan.gradient_buckets.size() << "\nNCCL_ENABLED=" << (nccl_enabled ? 1 : 0) << "\nRESUME_CHECKPOINT=" << (resumed ? 1 : 0) << "\nARTIFACTS_WRITTEN=" << (args.write_artifacts ? 1 : 0) << "\nNUM_PARAMETERS=" << params << "\n";
+         << "\nGRADIENT_CAROUSEL_SLOTS=" << train_plan.gradient_carousel_slots << "\nLT_WORKSPACE_BYTES=" << args.lt_workspace_bytes << "\nINPUT_GRAD_PARTIAL_CHUNKS=" << train_plan.config.runtime.input_grad_partial_chunks << "\nINPUT_GRAD_POSITIONS_PER_BLOCK=" << train_plan.config.runtime.input_grad_positions_per_block << "\nINPUT_GRAD_POSITION_TILE=" << train_plan.config.runtime.input_grad_position_tile << "\nINPUT_GRAD_SPARSE=" << (train_plan.config.runtime.input_grad_sparse ? 1 : 0) << "\nINPUT_GRAD_FP16=" << (args.input_grad_fp16 ? 1 : 0) << "\nINPUT_GRAD_BACKEND=" << input_grad_backend << "\nLINEAR_FP16=" << (args.linear_fp16 ? 1 : 0) << "\nPERSISTENT_HALF_WEIGHTS=" << (args.persistent_half_weights ? 1 : 0) << "\nOVERLAP_ALLREDUCE=" << (overlap_allreduce ? 1 : 0) << "\nGRADIENT_BUCKETS=" << train_plan.gradient_buckets.size() << "\nNCCL_ENABLED=" << (nccl_enabled ? 1 : 0) << "\nRESUME_CHECKPOINT=" << (resumed ? 1 : 0) << "\nARTIFACTS_WRITTEN=" << (args.write_artifacts ? 1 : 0) << "\nNUM_PARAMETERS=" << params << "\n";
     std::ofstream layers(args.output_dir / "layers.json");
     layers << "{\n  \"model_mode\": \"MLP2RB\",\n  \"output_dim\": " << train_plan.layout.output_dim << ",\n  \"state_len\": " << shape.state_len << ",\n  \"state_storage_len\": " << train_plan.padded_state_dim << ",\n  \"num_classes\": " << shape.state_value_pad << ",\n  \"hd1\": " << requested_hd1 << ",\n  \"physical_hd1\": " << shape.hd1 << ",\n  \"hd2\": " << requested_hd2 << ",\n  \"physical_hd2\": " << shape.hd2 << ",\n  \"nrd\": " << shape.residual_blocks << ",\n  \"artifacts_written\": " << (args.write_artifacts ? "true" : "false") << ",\n  \"num_parameters\": " << params << "\n}\n";
     if (!WriteLinearOpsManifest(args.output_dir, train_plan)) return EXIT_FAILURE;

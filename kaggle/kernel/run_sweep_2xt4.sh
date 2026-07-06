@@ -12,41 +12,43 @@ mkdir -p "$sweep_root"
 cmake -S native -B "$build_dir" -DMGT_ENABLE_CUDA=ON -DMGT_ENABLE_NCCL=ON -DCMAKE_CUDA_ARCHITECTURES=${MGT_CUDA_ARCH} -DMGT_CUTLASS_ROOT="${CUTLASS_ROOT:-/opt/cutlass}" -DMGT_AUTO_CUTLASS_HALF_GEMM=${MGT_AUTO_CUTLASS_HALF_GEMM:-ON}
 if [ "${MGT_SWEEP_RUN_CTEST:-1}" = "1" ]; then
   cmake --build "$build_dir" --config Release
-  ctest --test-dir "$build_dir" -R 'cuda_compile|cuda_random_walk_smoke|cuda_adamw_smoke|cuda_mlp_forward_smoke|cuda_mlp_backward_smoke|cuda_train_step_smoke|nccl_single_rank_smoke|nccl_two_device_smoke|native_train_smoke|native_train_profile_smoke|native_train_resume_smoke|native_train_artifacts' --output-on-failure -C Release
+  ctest --test-dir "$build_dir" -R 'cuda_compile|cuda_random_walk_smoke|cuda_adamw_smoke|cuda_mlp_forward_smoke|cuda_mlp_backward_smoke|cuda_train_step_smoke|nccl_single_rank_smoke|nccl_two_device_smoke|native_train_smoke|native_train_profile_smoke|native_train_input_grad_.*backend|native_train_resume_smoke|native_train_artifacts' --output-on-failure -C Release
 else
   cmake --build "$build_dir" --config Release --target mgt_native_train
 fi
 cat > "$sweep_root/sweep_manifest.tsv" <<'EOF'
-config_id	batch_size	input_grad_position_tile	lt_workspace_bytes	allreduce_bucket_bytes	backward_profile	overlap_allreduce
+config_id	batch_size	input_grad_position_tile	lt_workspace_bytes	allreduce_bucket_bytes	backward_profile	overlap_allreduce	input_grad_sparse
 EOF
 default_configs=$(cat <<'EOF'
-b49152_t36_ws0_bucket4m 49152 36 0 4194304 0 1
-b53248_t36_ws0_bucket4m 53248 36 0 4194304 0 1
-b57344_t36_ws0_bucket4m 57344 36 0 4194304 0 1
-b61440_t36_ws0_bucket4m 61440 36 0 4194304 0 1
-b53248_t16_ws0_bucket4m 53248 16 0 4194304 0 1
-b53248_t24_ws0_bucket4m 53248 24 0 4194304 0 1
-b53248_t32_ws0_bucket4m 53248 32 0 4194304 0 1
-b53248_t40_ws0_bucket4m 53248 40 0 4194304 0 1
-b53248_t36_ws16m_bucket4m 53248 36 16777216 4194304 0 1
-b53248_t36_ws32m_bucket4m 53248 36 33554432 4194304 0 1
-b53248_t36_ws64m_bucket4m 53248 36 67108864 4194304 0 1
-b53248_t36_ws0_nooverlap 53248 36 0 4194304 0 0
-b53248_t36_ws0_profile 53248 36 0 4194304 1 1
+b49152_t36_ws0_bucket4m 49152 36 0 4194304 0 1 0
+b53248_t36_ws0_bucket4m 53248 36 0 4194304 0 1 0
+b57344_t36_ws0_bucket4m 57344 36 0 4194304 0 1 0
+b61440_t36_ws0_bucket4m 61440 36 0 4194304 0 1 0
+b53248_t16_ws0_bucket4m 53248 16 0 4194304 0 1 0
+b53248_t24_ws0_bucket4m 53248 24 0 4194304 0 1 0
+b53248_t32_ws0_bucket4m 53248 32 0 4194304 0 1 0
+b53248_t40_ws0_bucket4m 53248 40 0 4194304 0 1 0
+b53248_t36_ws16m_bucket4m 53248 36 16777216 4194304 0 1 0
+b53248_t36_ws32m_bucket4m 53248 36 33554432 4194304 0 1 0
+b53248_sparse_ws32m_bucket4m 53248 36 33554432 4194304 0 1 1
+b53248_t36_ws64m_bucket4m 53248 36 67108864 4194304 0 1 0
+b53248_t36_ws0_nooverlap 53248 36 0 4194304 0 0 0
+b53248_t36_ws0_profile 53248 36 0 4194304 1 1 0
 EOF
 )
 configs_text="${MGT_SWEEP_CONFIGS:-$default_configs}"
-while read -r config_id batch_size position_tile lt_workspace bucket_bytes backward_profile overlap_allreduce; do
+while read -r config_id batch_size position_tile lt_workspace bucket_bytes backward_profile overlap_allreduce input_grad_sparse; do
   if [ -z "${config_id:-}" ]; then
     continue
   fi
   case "$config_id" in
     \#*) continue ;;
   esac
+  input_grad_sparse="${input_grad_sparse:-0}"
   run_dir="$sweep_root/$config_id"
   mkdir -p "$run_dir"
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$config_id" "$batch_size" "$position_tile" "$lt_workspace" "$bucket_bytes" "$backward_profile" "$overlap_allreduce" >> "$sweep_root/sweep_manifest.tsv"
-  echo "sweep_config_start id=${config_id} batch=${batch_size} tile=${position_tile} workspace=${lt_workspace} bucket=${bucket_bytes} profile=${backward_profile} overlap=${overlap_allreduce}"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$config_id" "$batch_size" "$position_tile" "$lt_workspace" "$bucket_bytes" "$backward_profile" "$overlap_allreduce" "$input_grad_sparse" >> "$sweep_root/sweep_manifest.tsv"
+  echo "sweep_config_start id=${config_id} batch=${batch_size} tile=${position_tile} workspace=${lt_workspace} bucket=${bucket_bytes} profile=${backward_profile} overlap=${overlap_allreduce} sparse=${input_grad_sparse}"
   set +e
   MGT_CONFIG_ID="$config_id" \
   MGT_BUILD_DIR="$build_dir" \
@@ -57,6 +59,7 @@ while read -r config_id batch_size position_tile lt_workspace bucket_bytes backw
   MGT_STEPS="${MGT_SWEEP_STEPS:-8}" \
   MGT_BATCH_SIZE="$batch_size" \
   MGT_INPUT_GRAD_POSITION_TILE="$position_tile" \
+  MGT_INPUT_GRAD_SPARSE="$input_grad_sparse" \
   MGT_LT_WORKSPACE_BYTES="$lt_workspace" \
   MGT_ALLREDUCE_BUCKET_BYTES="$bucket_bytes" \
   MGT_BACKWARD_PROFILE="$backward_profile" \

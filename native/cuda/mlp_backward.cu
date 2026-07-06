@@ -1092,6 +1092,50 @@ __global__ void InputGradByPositionGroupHiddenTileKernel(CudaMlpShape shape, con
     }
 }
 
+inline constexpr std::uint32_t kInputGradHalf2Threads = 64;
+
+__global__ void InputGradByPositionHiddenPairHalfKernel(CudaMlpShape shape, const mgt::TrainStateStorage* states, const __half* dz1, std::uint32_t samples, float* grad) {
+    extern __shared__ float shared_sums[];
+    const std::uint32_t h0 = (blockIdx.x * blockDim.x + threadIdx.x) * 2U;
+    const std::uint32_t pos = blockIdx.y;
+    if (pos >= shape.state_len) return;
+
+    float* value_sums0 = shared_sums + static_cast<std::uint32_t>(threadIdx.x) * 2U * kInputGradSharedStride;
+    float* value_sums1 = value_sums0 + kInputGradSharedStride;
+    const bool active_h0 = h0 < shape.hd1;
+    const bool active_h1 = h0 + 1U < shape.hd1;
+    const std::uint32_t lane = threadIdx.x & 31U;
+    for (std::uint32_t value = 0; value < shape.state_value_pad; ++value) {
+        value_sums0[value] = 0.0f;
+        value_sums1[value] = 0.0f;
+    }
+
+    for (std::uint32_t b = 0; b < samples; ++b) {
+        std::uint32_t value = 0;
+        if (lane == 0) value = states[b].v[pos];
+        value = __shfl_sync(0xffffffffU, value, 0);
+        if (value >= shape.state_value_pad || !active_h0) continue;
+        const __half* row = dz1 + static_cast<std::uint64_t>(b) * shape.hd1 + h0;
+        if (active_h1) {
+            const __half2 pair = __halves2half2(row[0], row[1]);
+            value_sums0[value] += __half2float(__low2half(pair));
+            value_sums1[value] += __half2float(__high2half(pair));
+        } else {
+            value_sums0[value] += __half2float(row[0]);
+        }
+    }
+
+    if (!active_h0) return;
+    for (std::uint32_t value = 0; value < shape.state_value_pad; ++value) {
+        const std::uint64_t row = static_cast<std::uint64_t>(pos) * shape.state_value_pad + value;
+        grad[row * shape.hd1 + h0] = value_sums0[value];
+        if (active_h1) grad[row * shape.hd1 + h0 + 1U] = value_sums1[value];
+    }
+}
+
+std::size_t InputGradHalf2SharedBytes(std::uint32_t threads) {
+    return static_cast<std::size_t>(threads) * 2U * kInputGradSharedStride * sizeof(float);
+}
 std::size_t InputGradGroupSharedBytes(std::uint32_t positions_per_block) {
     return static_cast<std::size_t>(positions_per_block) * kInputGradThreads * kInputGradSharedStride * sizeof(float);
 }
@@ -1247,7 +1291,7 @@ mgt::Status LaunchMlpLossGradKernelWithWorkspaceInternal(const CudaMlpShape& sha
                                                          cudaStream_t stream,
                                                          void* lt_workspace_base = nullptr,
                                                          std::uint64_t lt_workspace_bytes = 0,
-                                                         std::uint32_t input_grad_position_tile = 0) {
+                                                         std::uint32_t input_grad_position_tile = 0, bool input_grad_sparse = false) {
     if (ValidateCudaMlpShape(shape) != mgt::Status::kOk || device_weights == nullptr || device_states == nullptr || device_labels == nullptr || device_loss == nullptr || device_grad == nullptr || sample_count == 0 || workspace_base == nullptr || blas == nullptr || input_grad_partial_chunks == 0 || input_grad_positions_per_block == 0) return mgt::Status::kInvalidConfig;
     if ((use_half_input_grad || use_half_linear) && blas_lt == nullptr) return mgt::Status::kInvalidConfig;
     if (lt_workspace_bytes > 0 && lt_workspace_base == nullptr) return mgt::Status::kInvalidConfig;
@@ -1437,7 +1481,18 @@ mgt::Status LaunchMlpLossGradKernelWithWorkspaceInternal(const CudaMlpShape& sha
     }
     if (!LaunchOk()) return mgt::Status::kCudaFailure;
     if (stage_timer.Mark(profile == nullptr ? nullptr : &profile->hidden_backward_ms) != mgt::Status::kOk) return mgt::Status::kCudaFailure;
-    if (input_grad_position_tile > 0U) {
+    if (input_grad_sparse) {
+        if (use_half_input_grad) {
+            const std::size_t input_grad_sparse_shared_bytes = InputGradHalf2SharedBytes(kInputGradHalf2Threads);
+            const dim3 input_grad_grid((shape.hd1 + 2U * kInputGradHalf2Threads - 1U) / (2U * kInputGradHalf2Threads), shape.state_len);
+            InputGradByPositionHiddenPairHalfKernel<<<input_grad_grid, kInputGradHalf2Threads, input_grad_sparse_shared_bytes, stream>>>(shape, device_states, w.dz1_half, sample_count, device_grad);
+        } else {
+            const std::size_t input_grad_shared_bytes = kInputGradThreads * kInputGradSharedStride * sizeof(float);
+            const dim3 input_grad_grid((shape.hd1 + kInputGradThreads - 1U) / kInputGradThreads, shape.state_len);
+            InputGradByPositionHiddenTileKernel<<<input_grad_grid, kInputGradThreads, input_grad_shared_bytes, stream>>>(shape, device_states, w.dz1, sample_count, device_grad);
+        }
+        if (!LaunchOk()) return mgt::Status::kCudaFailure;
+    } else if (input_grad_position_tile > 0U) {
         const std::uint32_t tile_positions_requested = input_grad_position_tile < shape.state_len ? input_grad_position_tile : shape.state_len;
         const std::uint32_t tile_positions = tile_positions_requested == 0U ? 1U : tile_positions_requested;
         for (std::uint32_t first_pos = 0; first_pos < shape.state_len; first_pos += tile_positions) {
@@ -1736,8 +1791,8 @@ __host__ mgt::Status LaunchMlpLossGradKernelWithWorkspaceLtExternalHalf(const Cu
                                                                         cudaStream_t stream,
                                                                         void* lt_workspace_base,
                                                                         std::uint64_t lt_workspace_bytes,
-                                                                        std::uint32_t input_grad_position_tile) {
-    return LaunchMlpLossGradKernelWithWorkspaceInternal(shape, device_weights, device_states, device_labels, sample_count, device_loss, device_grad, workspace_base, workspace_floats, blas, blas_lt, device_weights_half, input_grad_partial_chunks, input_grad_positions_per_block, use_half_input_grad, use_half_linear, nullptr, nullptr, nullptr, stream, lt_workspace_base, lt_workspace_bytes, input_grad_position_tile);
+                                                                        std::uint32_t input_grad_position_tile, bool input_grad_sparse) {
+    return LaunchMlpLossGradKernelWithWorkspaceInternal(shape, device_weights, device_states, device_labels, sample_count, device_loss, device_grad, workspace_base, workspace_floats, blas, blas_lt, device_weights_half, input_grad_partial_chunks, input_grad_positions_per_block, use_half_input_grad, use_half_linear, nullptr, nullptr, nullptr, stream, lt_workspace_base, lt_workspace_bytes, input_grad_position_tile, input_grad_sparse);
 }
 
 __host__ mgt::Status LaunchMlpLossGradKernelProfiledWithWorkspaceLtExternalHalf(const CudaMlpShape& shape,
@@ -1760,9 +1815,9 @@ __host__ mgt::Status LaunchMlpLossGradKernelProfiledWithWorkspaceLtExternalHalf(
                                                                                 cudaStream_t stream,
                                                                                 void* lt_workspace_base,
                                                                                 std::uint64_t lt_workspace_bytes,
-                                                                                std::uint32_t input_grad_position_tile) {
+                                                                                std::uint32_t input_grad_position_tile, bool input_grad_sparse) {
     if (profile == nullptr) return mgt::Status::kInvalidConfig;
-    return LaunchMlpLossGradKernelWithWorkspaceInternal(shape, device_weights, device_states, device_labels, sample_count, device_loss, device_grad, workspace_base, workspace_floats, blas, blas_lt, device_weights_half, input_grad_partial_chunks, input_grad_positions_per_block, use_half_input_grad, use_half_linear, profile, nullptr, nullptr, stream, lt_workspace_base, lt_workspace_bytes, input_grad_position_tile);
+    return LaunchMlpLossGradKernelWithWorkspaceInternal(shape, device_weights, device_states, device_labels, sample_count, device_loss, device_grad, workspace_base, workspace_floats, blas, blas_lt, device_weights_half, input_grad_partial_chunks, input_grad_positions_per_block, use_half_input_grad, use_half_linear, profile, nullptr, nullptr, stream, lt_workspace_base, lt_workspace_bytes, input_grad_position_tile, input_grad_sparse);
 }
 
 __host__ mgt::Status LaunchMlpLossGradKernelProfiledWithWorkspaceLtAndCallbackExternalHalf(const CudaMlpShape& shape,
@@ -1787,8 +1842,8 @@ __host__ mgt::Status LaunchMlpLossGradKernelProfiledWithWorkspaceLtAndCallbackEx
                                                                                            cudaStream_t stream,
                                                                                            void* lt_workspace_base,
                                                                                            std::uint64_t lt_workspace_bytes,
-                                                                                           std::uint32_t input_grad_position_tile) {
-    return LaunchMlpLossGradKernelWithWorkspaceInternal(shape, device_weights, device_states, device_labels, sample_count, device_loss, device_grad, workspace_base, workspace_floats, blas, blas_lt, device_weights_half, input_grad_partial_chunks, input_grad_positions_per_block, use_half_input_grad, use_half_linear, profile, gradient_ready, gradient_ready_user, stream, lt_workspace_base, lt_workspace_bytes, input_grad_position_tile);
+                                                                                           std::uint32_t input_grad_position_tile, bool input_grad_sparse) {
+    return LaunchMlpLossGradKernelWithWorkspaceInternal(shape, device_weights, device_states, device_labels, sample_count, device_loss, device_grad, workspace_base, workspace_floats, blas, blas_lt, device_weights_half, input_grad_partial_chunks, input_grad_positions_per_block, use_half_input_grad, use_half_linear, profile, gradient_ready, gradient_ready_user, stream, lt_workspace_base, lt_workspace_bytes, input_grad_position_tile, input_grad_sparse);
 }
 __host__ mgt::Status LaunchMlpLossGradKernelProfiledWithWorkspaceLtAndCallback(const CudaMlpShape& shape,
                                                                                const float* device_weights,

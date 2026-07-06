@@ -240,7 +240,8 @@ __host__ mgt::Status LaunchMlpLossGradKernelWithWorkspaceLtExternalHalf(const Cu
                                                                         cudaStream_t stream,
                                                                         void* lt_workspace_base = nullptr,
                                                                         std::uint64_t lt_workspace_bytes = 0,
-                                                                        std::uint32_t input_grad_position_tile = 0);
+                                                                        std::uint32_t input_grad_position_tile = 0,
+                                                                        bool input_grad_sparse = false);
 __host__ mgt::Status LaunchMlpLossGradKernelProfiledWithWorkspaceLtExternalHalf(const CudaMlpShape& shape,
                                                                                 const float* device_weights,
                                                                                 const __half* device_weights_half,
@@ -261,7 +262,8 @@ __host__ mgt::Status LaunchMlpLossGradKernelProfiledWithWorkspaceLtExternalHalf(
                                                                                 cudaStream_t stream,
                                                                                 void* lt_workspace_base = nullptr,
                                                                                 std::uint64_t lt_workspace_bytes = 0,
-                                                                                std::uint32_t input_grad_position_tile = 0);
+                                                                                std::uint32_t input_grad_position_tile = 0,
+                                                                                bool input_grad_sparse = false);
 __host__ mgt::Status LaunchMlpLossGradKernelProfiledWithWorkspaceLtAndCallbackExternalHalf(const CudaMlpShape& shape,
                                                                                            const float* device_weights,
                                                                                            const __half* device_weights_half,
@@ -284,7 +286,8 @@ __host__ mgt::Status LaunchMlpLossGradKernelProfiledWithWorkspaceLtAndCallbackEx
                                                                                            cudaStream_t stream,
                                                                                            void* lt_workspace_base = nullptr,
                                                                                            std::uint64_t lt_workspace_bytes = 0,
-                                                                                           std::uint32_t input_grad_position_tile = 0);
+                                                                                           std::uint32_t input_grad_position_tile = 0,
+                                                                                           bool input_grad_sparse = false);
 __host__ mgt::Status LaunchMlpLossGradKernelProfiledWithWorkspaceLtAndCallback(const CudaMlpShape& shape,
                                                                                const float* device_weights,
                                                                                const mgt::TrainStateStorage* device_states,

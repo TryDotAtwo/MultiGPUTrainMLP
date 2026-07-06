@@ -31,7 +31,7 @@ bool CloseLoss(float lhs, float rhs) {
 int RunCase(const mgt_cuda::CudaMlpShape& shape, std::uint32_t samples) {
     const std::uint64_t params = ParamCount(shape);
 
-    std::vector<float> weights(params), labels(static_cast<std::uint64_t>(samples) * shape.output_dim), grad_ref(params), grad_mixed(params), grad_tile(params);
+    std::vector<float> weights(params), labels(static_cast<std::uint64_t>(samples) * shape.output_dim), grad_ref(params), grad_mixed(params), grad_tile(params), grad_sparse(params);
     std::vector<mgt::TrainStateStorage> states(samples);
     for (std::uint64_t i = 0; i < params; ++i) {
         weights[i] = static_cast<float>((static_cast<int>((i * 5 + shape.output_dim) % 31) - 15) * 0.0015);
@@ -54,9 +54,11 @@ int RunCase(const mgt_cuda::CudaMlpShape& shape, std::uint32_t samples) {
     float* d_loss_ref = nullptr;
     float* d_loss_mixed = nullptr;
     float* d_loss_tile = nullptr;
+    float* d_loss_sparse = nullptr;
     float* d_grad_ref = nullptr;
     float* d_grad_mixed = nullptr;
     float* d_grad_tile = nullptr;
+    float* d_grad_sparse = nullptr;
     float* d_workspace_ref = nullptr;
     float* d_workspace_mixed = nullptr;
     mgt::TrainStateStorage* d_states = nullptr;
@@ -74,9 +76,11 @@ int RunCase(const mgt_cuda::CudaMlpShape& shape, std::uint32_t samples) {
     if (Check(cudaMalloc(&d_loss_ref, sizeof(float))) != 0) return EXIT_FAILURE;
     if (Check(cudaMalloc(&d_loss_mixed, sizeof(float))) != 0) return EXIT_FAILURE;
     if (Check(cudaMalloc(&d_loss_tile, sizeof(float))) != 0) return EXIT_FAILURE;
+    if (Check(cudaMalloc(&d_loss_sparse, sizeof(float))) != 0) return EXIT_FAILURE;
     if (Check(cudaMalloc(&d_grad_ref, params * sizeof(float))) != 0) return EXIT_FAILURE;
     if (Check(cudaMalloc(&d_grad_mixed, params * sizeof(float))) != 0) return EXIT_FAILURE;
     if (Check(cudaMalloc(&d_grad_tile, params * sizeof(float))) != 0) return EXIT_FAILURE;
+    if (Check(cudaMalloc(&d_grad_sparse, params * sizeof(float))) != 0) return EXIT_FAILURE;
     if (Check(cudaMalloc(&d_workspace_ref, workspace_ref * sizeof(float))) != 0) return EXIT_FAILURE;
     if (Check(cudaMalloc(&d_workspace_mixed, workspace_mixed * sizeof(float))) != 0) return EXIT_FAILURE;
     if (Check(cudaMalloc(&d_states, samples * sizeof(mgt::TrainStateStorage))) != 0) return EXIT_FAILURE;
@@ -115,14 +119,22 @@ int RunCase(const mgt_cuda::CudaMlpShape& shape, std::uint32_t samples) {
         std::fprintf(stderr, "position-tiled mixed Lt/CUTLASS output_dim=%u status=%d\n", shape.output_dim, static_cast<int>(status));
         return EXIT_FAILURE;
     }
+    status = mgt_cuda::LaunchMlpLossGradKernelWithWorkspaceLtExternalHalf(shape, d_weights, d_weights_half, d_states, d_labels, samples, d_loss_sparse, d_grad_sparse,
+                                                                            d_workspace_mixed, workspace_mixed, blas_mixed, blas_lt, 1, 1, true, true, 0, nullptr, 0, 0, true);
+    if (status != mgt::Status::kOk) {
+        std::fprintf(stderr, "sparse mixed Lt/CUTLASS output_dim=%u status=%d\n", shape.output_dim, static_cast<int>(status));
+        return EXIT_FAILURE;
+    }
     if (Check(cudaDeviceSynchronize()) != 0) return EXIT_FAILURE;
 
     float loss_ref = 0.0f;
     float loss_mixed = 0.0f;
     float loss_tile = 0.0f;
+    float loss_sparse = 0.0f;
     if (Check(cudaMemcpy(&loss_ref, d_loss_ref, sizeof(float), cudaMemcpyDeviceToHost)) != 0) return EXIT_FAILURE;
     if (Check(cudaMemcpy(&loss_mixed, d_loss_mixed, sizeof(float), cudaMemcpyDeviceToHost)) != 0) return EXIT_FAILURE;
     if (Check(cudaMemcpy(&loss_tile, d_loss_tile, sizeof(float), cudaMemcpyDeviceToHost)) != 0) return EXIT_FAILURE;
+    if (Check(cudaMemcpy(&loss_sparse, d_loss_sparse, sizeof(float), cudaMemcpyDeviceToHost)) != 0) return EXIT_FAILURE;
     if (!std::isfinite(loss_ref) || !std::isfinite(loss_mixed) || !CloseLoss(loss_ref, loss_mixed)) {
         std::fprintf(stderr, "mixed loss mismatch output_dim=%u ref=%0.9g mixed=%0.9g\n", shape.output_dim, loss_ref, loss_mixed);
         return EXIT_FAILURE;
@@ -131,10 +143,15 @@ int RunCase(const mgt_cuda::CudaMlpShape& shape, std::uint32_t samples) {
         std::fprintf(stderr, "position-tiled loss mismatch output_dim=%u ref=%0.9g tile=%0.9g\n", shape.output_dim, loss_ref, loss_tile);
         return EXIT_FAILURE;
     }
+    if (!std::isfinite(loss_sparse) || !CloseLoss(loss_ref, loss_sparse)) {
+        std::fprintf(stderr, "sparse loss mismatch output_dim=%u ref=%0.9g sparse=%0.9g\n", shape.output_dim, loss_ref, loss_sparse);
+        return EXIT_FAILURE;
+    }
 
     if (Check(cudaMemcpy(grad_ref.data(), d_grad_ref, params * sizeof(float), cudaMemcpyDeviceToHost)) != 0) return EXIT_FAILURE;
     if (Check(cudaMemcpy(grad_mixed.data(), d_grad_mixed, params * sizeof(float), cudaMemcpyDeviceToHost)) != 0) return EXIT_FAILURE;
     if (Check(cudaMemcpy(grad_tile.data(), d_grad_tile, params * sizeof(float), cudaMemcpyDeviceToHost)) != 0) return EXIT_FAILURE;
+    if (Check(cudaMemcpy(grad_sparse.data(), d_grad_sparse, params * sizeof(float), cudaMemcpyDeviceToHost)) != 0) return EXIT_FAILURE;
 
     double diff2 = 0.0;
     double ref2 = 0.0;
@@ -168,6 +185,22 @@ int RunCase(const mgt_cuda::CudaMlpShape& shape, std::uint32_t samples) {
         return EXIT_FAILURE;
     }
 
+    double sparse_diff2 = 0.0;
+    double sparse_ref2 = 0.0;
+    double sparse_max_abs = 0.0;
+    for (std::uint64_t i = 0; i < params; ++i) {
+        if (!std::isfinite(grad_sparse[i])) return EXIT_FAILURE;
+        const double diff = static_cast<double>(grad_sparse[i]) - static_cast<double>(grad_ref[i]);
+        sparse_diff2 += diff * diff;
+        sparse_ref2 += static_cast<double>(grad_ref[i]) * static_cast<double>(grad_ref[i]);
+        sparse_max_abs = std::fmax(sparse_max_abs, std::fabs(diff));
+    }
+    const double rel_l2_sparse = std::sqrt(sparse_diff2 / std::fmax(sparse_ref2, 1.0e-30));
+    if (rel_l2_sparse > 8.0e-2 || sparse_max_abs > 2.0e-2) {
+        std::fprintf(stderr, "sparse grad error output_dim=%u rel_l2=%0.9g max_abs=%0.9g loss_ref=%0.9g loss_sparse=%0.9g\n", shape.output_dim, rel_l2_sparse, sparse_max_abs, loss_ref, loss_sparse);
+        return EXIT_FAILURE;
+    }
+
     cublasDestroy(blas_mixed);
     cublasLtDestroy(blas_lt);
     cublasDestroy(blas_ref);
@@ -176,9 +209,11 @@ int RunCase(const mgt_cuda::CudaMlpShape& shape, std::uint32_t samples) {
     cudaFree(d_workspace_ref);
     cudaFree(d_grad_mixed);
     cudaFree(d_grad_tile);
+    cudaFree(d_grad_sparse);
     cudaFree(d_grad_ref);
     cudaFree(d_loss_mixed);
     cudaFree(d_loss_tile);
+    cudaFree(d_loss_sparse);
     cudaFree(d_loss_ref);
     cudaFree(d_labels);
     cudaFree(d_weights);

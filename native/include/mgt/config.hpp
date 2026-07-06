@@ -81,6 +81,7 @@ struct RuntimeSpec {
     std::uint32_t input_grad_partial_chunks = kInputGradPartialChunks;
     std::uint32_t input_grad_positions_per_block = kInputGradPositionsPerBlock;
     std::uint32_t input_grad_position_tile = 0;
+    bool input_grad_sparse = false;
     std::uint64_t allreduce_bucket_bytes = kDefaultAllreduceBucketBytes;
     std::uint64_t lt_workspace_bytes = kDefaultLtWorkspaceBytes;
     RuntimeMode mode = RuntimeMode::kSingleGpu;

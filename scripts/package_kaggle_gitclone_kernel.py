@@ -45,6 +45,7 @@ env.setdefault("MGT_CUDA_ARCH", "75")
 env.setdefault("MGT_DEPS_DIR", "/tmp/mgt_deps")
 env.setdefault("MGT_WRITE_ARTIFACTS", "0")
 env.setdefault("MGT_INPUT_GRAD_FP16", "1")
+env.setdefault("MGT_INPUT_GRAD_SPARSE", "0")
 env.setdefault("MGT_LINEAR_FP16", "1")
 env.setdefault("MGT_OUTPUT_DIM", "1")
 if entry.endswith("run_sweep_2xt4.sh"):

@@ -33,6 +33,7 @@ state_alignment=""
 hidden_alignment=""
 gradient_slots=""
 input_grad_partial_chunks=""
+input_grad_sparse=""
 input_grad_fp16=""
 linear_fp16=""
 overlap_allreduce=""
@@ -53,6 +54,7 @@ while [ "$#" -gt 0 ]; do
     --hidden-alignment) hidden_alignment="$2"; shift 2 ;;
     --gradient-carousel-slots) gradient_slots="$2"; shift 2 ;;
     --input-grad-partial-chunks) input_grad_partial_chunks="$2"; shift 2 ;;
+    --input-grad-sparse) input_grad_sparse="$2"; shift 2 ;;
     --input-grad-fp16) input_grad_fp16="$2"; shift 2 ;;
     --linear-fp16) linear_fp16="$2"; shift 2 ;;
     --overlap-allreduce) overlap_allreduce="$2"; shift 2 ;;
@@ -76,12 +78,13 @@ HIDDEN_ALIGNMENT=%s
 BATCH_SIZE=%s
 GRADIENT_CAROUSEL_SLOTS=%s
 INPUT_GRAD_PARTIAL_CHUNKS=%s
+INPUT_GRAD_SPARSE=%s
 INPUT_GRAD_FP16=%s
 LINEAR_FP16=%s
 OVERLAP_ALLREDUCE=%s
 ALLREDUCE_BUCKET_BYTES=%s
 LR=%s
-' "$weight_decay" "$hd1" "$hd2" "$state_len" "$state_value_count" "$move_count" "$state_alignment" "$hidden_alignment" "$batch_size" "$gradient_slots" "$input_grad_partial_chunks" "$input_grad_fp16" "$linear_fp16" "$overlap_allreduce" "$allreduce_bucket_bytes" "$lr" > "$out/metadata.env"
+' "$weight_decay" "$hd1" "$hd2" "$state_len" "$state_value_count" "$move_count" "$state_alignment" "$hidden_alignment" "$batch_size" "$gradient_slots" "$input_grad_partial_chunks" "$input_grad_sparse" "$input_grad_fp16" "$linear_fp16" "$overlap_allreduce" "$allreduce_bucket_bytes" "$lr" > "$out/metadata.env"
 printf '{"hd1": %s, "hd2": %s, "output_dim": 1}
 ' "$hd1" "$hd2" > "$out/layers.json"
 printf 'rank=0 phase=train steps=%s
@@ -114,6 +117,7 @@ printf 'fake native ok
     cfg.hidden_alignment = 8;
     cfg.gradient_carousel_slots = 4;
     cfg.input_grad_partial_chunks = 1;
+    cfg.input_grad_sparse = true;
     cfg.input_grad_fp16 = true;
     cfg.linear_fp16 = true;
     cfg.allreduce_bucket_bytes = 1_048_576;
@@ -145,6 +149,7 @@ printf 'fake native ok
     assert!(metadata.contains("HIDDEN_ALIGNMENT=8"));
     assert!(metadata.contains("BATCH_SIZE=17"));
     assert!(metadata.contains("INPUT_GRAD_PARTIAL_CHUNKS=1"));
+    assert!(metadata.contains("INPUT_GRAD_SPARSE=1"));
     assert!(metadata.contains("INPUT_GRAD_FP16=1"));
     assert!(metadata.contains("LINEAR_FP16=1"));
     assert!(metadata.contains("OVERLAP_ALLREDUCE=1"));

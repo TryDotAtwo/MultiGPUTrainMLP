@@ -38,6 +38,7 @@ if [ "${MGT_PERF_RUN:-0}" = "1" ]; then
   export MGT_BACKWARD_PROFILE="${MGT_BACKWARD_PROFILE:-0}"
   export MGT_INPUT_GRAD_FP16="${MGT_INPUT_GRAD_FP16:-1}"
   export MGT_INPUT_GRAD_POSITION_TILE="${MGT_INPUT_GRAD_POSITION_TILE:-36}"
+  export MGT_INPUT_GRAD_SPARSE="${MGT_INPUT_GRAD_SPARSE:-0}"
   export MGT_LINEAR_FP16="${MGT_LINEAR_FP16:-1}"
   export MGT_OVERLAP_ALLREDUCE="${MGT_OVERLAP_ALLREDUCE:-1}"
   export MGT_ALLREDUCE_BUCKET_BYTES="${MGT_ALLREDUCE_BUCKET_BYTES:-4194304}"
@@ -71,6 +72,7 @@ for rank in $(seq 0 $((world_size - 1))); do
     --backward-profile "${MGT_BACKWARD_PROFILE:-0}" \
     --input-grad-fp16 "${MGT_INPUT_GRAD_FP16:-0}" \
     --input-grad-position-tile "${MGT_INPUT_GRAD_POSITION_TILE:-0}" \
+    --input-grad-sparse "${MGT_INPUT_GRAD_SPARSE:-0}" \
     --linear-fp16 "${MGT_LINEAR_FP16:-0}" \
     --lt-workspace-bytes "${MGT_LT_WORKSPACE_BYTES:-0}" \
     --overlap-allreduce "${MGT_OVERLAP_ALLREDUCE:-1}" \
@@ -103,6 +105,7 @@ summary = {
         "steps": int(os.environ.get("MGT_STEPS", "3")),
         "output_dim": int(os.environ.get("MGT_OUTPUT_DIM", "1")),
         "input_grad_position_tile": int(os.environ.get("MGT_INPUT_GRAD_POSITION_TILE", "0")),
+        "input_grad_sparse": int(os.environ.get("MGT_INPUT_GRAD_SPARSE", "0")),
         "input_grad_fp16": int(os.environ.get("MGT_INPUT_GRAD_FP16", "0")),
         "linear_fp16": int(os.environ.get("MGT_LINEAR_FP16", "0")),
         "overlap_allreduce": int(os.environ.get("MGT_OVERLAP_ALLREDUCE", "1")),

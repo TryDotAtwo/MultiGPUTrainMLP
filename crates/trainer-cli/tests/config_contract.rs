@@ -22,6 +22,7 @@ fn p888_default_matches_static_contract() {
     assert_eq!(cfg.gradient_carousel_slots, 3);
     assert_eq!(cfg.input_grad_partial_chunks, 1);
     assert_eq!(cfg.input_grad_positions_per_block, 1);
+    assert!(!cfg.input_grad_sparse);
     assert!(!cfg.input_grad_fp16);
     assert!(!cfg.linear_fp16);
     assert_eq!(cfg.allreduce_bucket_bytes, 4 * 1024 * 1024);

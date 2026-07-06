@@ -40,6 +40,7 @@ pub fn run_training(cfg: &TrainerConfig, output_dir: &Path) -> Result<()> {
         "MGT_INPUT_GRAD_POSITIONS_PER_BLOCK",
         cfg.input_grad_positions_per_block,
     )?;
+    let input_grad_sparse = read_env_bool("MGT_INPUT_GRAD_SPARSE", cfg.input_grad_sparse)?;
     let input_grad_fp16 = read_env_bool("MGT_INPUT_GRAD_FP16", cfg.input_grad_fp16)?;
     let linear_fp16 = read_env_bool("MGT_LINEAR_FP16", cfg.linear_fp16)?;
     let overlap_allreduce = read_env_bool("MGT_OVERLAP_ALLREDUCE", true)?;
@@ -110,6 +111,8 @@ pub fn run_training(cfg: &TrainerConfig, output_dir: &Path) -> Result<()> {
         .arg(input_grad_partial_chunks.to_string())
         .arg("--input-grad-positions-per-block")
         .arg(input_grad_positions_per_block.to_string())
+        .arg("--input-grad-sparse")
+        .arg(if input_grad_sparse { "1" } else { "0" })
         .arg("--input-grad-fp16")
         .arg(if input_grad_fp16 { "1" } else { "0" })
         .arg("--linear-fp16")
@@ -230,7 +233,7 @@ fn read_env_bool(name: &str, default_value: bool) -> Result<bool> {
 
 fn config_snapshot(cfg: &TrainerConfig) -> String {
     format!(
-        "group_id = {}\ntarget_id = {}\nstate_len = {}\nstate_alignment = {}\nstate_storage_len = {}\nnum_classes = {}\nmove_count = {}\noutput_dim = {}\nhd1 = {}\nhd2 = {}\nresidual_blocks = {}\nhidden_alignment = {}\nbatch_size = {}\nwalkers = {}\nk_min = {}\nk_max = {}\nepochs = {}\nlearning_rate = {}\nweight_decay = {}\nadam_beta1 = {}\nadam_beta2 = {}\nadam_eps = {}\nbase_seed = \"0x{:016x}\"\ncheckpoint_period_steps = {}\nweight_export_period_steps = {}\ngradient_carousel_slots = {}\ninput_grad_partial_chunks = {}\ninput_grad_positions_per_block = {}\ninput_grad_fp16 = {}\nlinear_fp16 = {}\noverlap_allreduce = true\nallreduce_bucket_bytes = {}\n",
+        "group_id = {}\ntarget_id = {}\nstate_len = {}\nstate_alignment = {}\nstate_storage_len = {}\nnum_classes = {}\nmove_count = {}\noutput_dim = {}\nhd1 = {}\nhd2 = {}\nresidual_blocks = {}\nhidden_alignment = {}\nbatch_size = {}\nwalkers = {}\nk_min = {}\nk_max = {}\nepochs = {}\nlearning_rate = {}\nweight_decay = {}\nadam_beta1 = {}\nadam_beta2 = {}\nadam_eps = {}\nbase_seed = \"0x{:016x}\"\ncheckpoint_period_steps = {}\nweight_export_period_steps = {}\ngradient_carousel_slots = {}\ninput_grad_partial_chunks = {}\ninput_grad_positions_per_block = {}\ninput_grad_sparse = {}\ninput_grad_fp16 = {}\nlinear_fp16 = {}\noverlap_allreduce = true\nallreduce_bucket_bytes = {}\n",
         cfg.group_id,
         cfg.target_id,
         cfg.state_len,
@@ -259,6 +262,7 @@ fn config_snapshot(cfg: &TrainerConfig) -> String {
         cfg.gradient_carousel_slots,
         cfg.input_grad_partial_chunks,
         cfg.input_grad_positions_per_block,
+        cfg.input_grad_sparse,
         cfg.input_grad_fp16,
         cfg.linear_fp16,
         cfg.allreduce_bucket_bytes,
