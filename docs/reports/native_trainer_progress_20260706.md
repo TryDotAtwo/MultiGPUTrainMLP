@@ -44,6 +44,15 @@ Kaggle v11 autotune checks:
 - Sweep rows: 4 ok, 0 failed.
 - Loss log scan: 64 finite loss records, no non-finite values, observed range 293.116 to 297.344.
 
+Kaggle v12 residual-subprofile checks:
+
+- Kernel status: complete.
+- Git revision: `0cde775084697fa6b701e4777596aeb0bbefb23c`.
+- GPU preflight: 2 x Tesla T4.
+- CTest: 17/17 tests passed.
+- Sweep rows: 3 ok, 0 failed.
+- Loss log scan: 48 finite loss records, no non-finite values, observed range 293.116 to 297.344.
+
 ## Performance
 
 Local one-GPU run after the safe cuBLASLt fallback:
@@ -59,6 +68,7 @@ Kaggle two-T4 runs:
 | v9 tile48 profile | `55a60e6` | `b53248_t48_ws16m_bucket4m` | 457828.31 | 232.65 | 213.89 | 28.16 | Noisy allreduce tail; useful profile row. |
 | v10 safe cuBLASLt cache | `9aff99e` | `b53248_t56_ws16m_bucket4m` | 513110.86 | 207.55 | 188.65 | 15.17 | Best observed 2xT4 result so far, but treat as no-regression plus slight observed improvement because Kaggle run-to-run noise is material. |
 | v11 cuBLASLt autotune | `9c1f6d6` | `b53248_t56_auto` | 518031.40 | 205.58 | 187.01 | 15.97 | New best observed 2xT4 result; +0.96% over v10 best, still small enough to treat as measured improvement rather than a guaranteed universal gain. |
+| v12 residual subprofile | `0cde775` | `b53248_t56_auto` | 521582.82 | 204.19 | 185.28 | 16.06 | New best observed 2xT4 result; +0.69% over v11 best, with the same caveat about Kaggle run-to-run noise. |
 
 Kaggle v10 top configs:
 
@@ -80,6 +90,14 @@ Kaggle v11 autotune configs:
 | `b53248_t48_auto` | 516508.34 | 206.19 | 187.13 | 15.25 |
 | `b53248_t48_auto_profile` | 513811.17 | 207.27 | 188.57 | 14.71 |
 | `b53248_t64_auto` | 510361.21 | 208.68 | 189.53 | 16.91 |
+
+Kaggle v12 residual-subprofile configs:
+
+| Config | Throughput, states/s | Step ms | Backward ms | Allreduce ms |
+| --- | ---: | ---: | ---: | ---: |
+| `b53248_t56_auto` | 521582.82 | 204.19 | 185.28 | 16.06 |
+| `b53248_t56_auto_profile_substage` | 518069.25 | 205.57 | 186.95 | 15.11 |
+| `b53248_t48_auto_profile_substage` | 515005.61 | 206.79 | 188.27 | 14.72 |
 
 ## Stage profile
 
@@ -115,12 +133,21 @@ Kaggle v11 profile row `b53248_t48_auto_profile`:
 
 Compared with the v10 tile48 profile, autotune mainly improved input gradient from 45.36 ms to 42.99 ms and output from 4.67 ms to 4.38 ms. Residual backward stayed the dominant compute stage at about 61 ms.
 
+Kaggle v12 residual-subprofile rows:
+
+| Config | Residual backward ms | FC2 dZ ms | FC1 dZ ms | Input gradient ms |
+| --- | ---: | ---: | ---: | ---: |
+| `b53248_t48_auto_profile_substage` | 63.57 | 13.63 | 10.89 | 40.81 |
+| `b53248_t56_auto_profile_substage` | 63.31 | 13.59 | 10.88 | 40.02 |
+
+The two-T4 profile confirms that residual backward is still the first target. The activation-gradient kernels alone cost about 24.5 ms per profiled step on T4, but they are memory-heavy and launch-count-sensitive; naive two-dimensional tiling did not help locally.
+
 ## Next work
 
-1. Repeat the v11 autotune 2xT4 sweep once more if choosing a permanent default tile; tile 56 is ahead in v10 and v11, but by a small margin.
-2. Attack residual backward first, because it remains the largest profiled compute stage.
-3. Keep input-gradient GEMM as the second target; autotune helped, but this stage still costs about 43 ms in the profile row.
-4. Move more repeated launch structure toward CUDA Graph capture after the residual backward path is stable.
+1. Treat tile 56 as the current measured 2xT4 default candidate, but do not hard-code it into the engine; it remains a shape/runtime-tuned value.
+2. Attack residual backward first, because v12 shows about 63 ms there on T4 and the two activation-gradient kernels alone cost about 24.5 ms.
+3. Keep input-gradient GEMM as the second target; autotune helped, but this stage still costs about 40 ms in the v12 profile rows.
+4. Move repeated residual-backward launch structure toward CUDA Graph capture or real kernel fusion; naive residual dZ tiling was measured and rejected.
 5. Continue the CUTLASS path only where it gives more control than cuBLASLt autotune for a shape family, not as a blind replacement.
 6. Keep correctness checks tied to every speed step: CTest, finite-loss scan, and at least one profile row.
 
@@ -191,3 +218,26 @@ Local one-GPU profile wrapper row: `local_residual_subprofile_wrapper_profile_b2
 | Residual backward total | 30.97 |
 
 This points to the next real optimization slice: reduce residual-backward launch count and memory traffic first. The largest individual buckets are the two activation-gradient kernels, then weight-gradient GEMMs, then skip add. The previous bias-gradient and beta=1 skip-add attempts were measured and rejected because they slowed the non-profiled path.
+
+## Rejected residual dZ tiling attempts, 2026-07-07
+
+After the v12 Kaggle run, three local residual activation-gradient variants were tested against the stable one-GPU baseline. All three kept correctness but lost throughput, so the code was restored to the `0cde775` residual-backward path.
+
+Stable local baseline:
+
+| Run | Throughput, states/s | Step ms | Backward ms | Notes |
+| --- | ---: | ---: | ---: | --- |
+| `local_residual_subprofile_wrapper_b24576_t48_20steps_20260707` | 309296.17 | 79.60 | 77.37 | Average over steps 1..19. |
+| same run, last 10 steady steps | 317724.91 | 77.43 | 75.13 | Warm-state estimate. |
+
+Rejected local variants:
+
+| Variant | Throughput, states/s | Step ms | Backward ms | Result |
+| --- | ---: | ---: | ---: | --- |
+| Fixed `128x2` tiled residual dZ | 288679.62 | 85.16 | 83.08 | Rejected; slower than baseline. |
+| Adaptive `224x2` residual dZ | 302565.30 | 81.35 | 79.10 | Rejected; still slower than baseline. |
+| Adaptive `224x1` residual dZ | 283213.27 | 87.03 | 84.66 | Rejected; worst of the tested variants. |
+
+Correctness verification for the adaptive row-1 variant: CTest filter `cuda_mlp_backward_cpu_compare|cuda_mlp_backward_mixed_precision_error|cuda_train_step_smoke` passed 3/3. The performance result is the blocker, not numerical correctness.
+
+Conclusion: do not continue with naive residual dZ launch tiling. The next higher-probability optimization is either CUDA Graph capture for the repeated residual-backward launch chain, or a real fused residual-backward kernel that removes multiple global-memory round trips instead of only changing the launch geometry.
