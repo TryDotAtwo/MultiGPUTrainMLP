@@ -4,6 +4,9 @@
 #include "mgt_cuda/random_walk_kernel.cuh"
 #include "mgt/puzzle_io.hpp"
 #include <cuda_runtime.h>
+#include <cuda_fp16.h>
+#include <cublas_v2.h>
+#include <cublasLt.h>
 #include <cmath>
 #include <cstdlib>
 #include <vector>
@@ -101,6 +104,50 @@ int main() {
     float loss_after = 0.0f;
     if (Check(cudaMemcpy(&loss_after, d_loss, sizeof(float), cudaMemcpyDeviceToHost)) != 0) return EXIT_FAILURE;
     if (!std::isfinite(loss_after) || loss_after > loss_before) return EXIT_FAILURE;
+
+    __half* d_weights_half = nullptr;
+    float* d_workspace_fast = nullptr;
+    void* d_lt_workspace = nullptr;
+    cublasHandle_t blas_fast = nullptr;
+    cublasLtHandle_t blas_lt = nullptr;
+    const std::uint64_t workspace_fast = mgt_cuda::MlpLossGradWorkspaceFloats(shape, kSamples, 1, true, true);
+    if (workspace_fast == 0) return EXIT_FAILURE;
+    if (Check(cudaMalloc(&d_weights_half, params * sizeof(__half))) != 0) return EXIT_FAILURE;
+    if (Check(cudaMalloc(&d_workspace_fast, workspace_fast * sizeof(float))) != 0) return EXIT_FAILURE;
+    if (Check(cudaMalloc(&d_lt_workspace, 1ULL << 20U)) != 0) return EXIT_FAILURE;
+    if (cublasCreate(&blas_fast) != CUBLAS_STATUS_SUCCESS) return EXIT_FAILURE;
+    if (cublasLtCreate(&blas_lt) != CUBLAS_STATUS_SUCCESS) return EXIT_FAILURE;
+    std::vector<__half> weights_half(params);
+    for (std::uint64_t i = 0; i < params; ++i) weights_half[i] = __float2half_rn(weights[i]);
+    if (Check(cudaMemcpy(d_weights, weights.data(), params * sizeof(float), cudaMemcpyHostToDevice)) != 0) return EXIT_FAILURE;
+    if (Check(cudaMemcpy(d_weights_half, weights_half.data(), params * sizeof(__half), cudaMemcpyHostToDevice)) != 0) return EXIT_FAILURE;
+    if (Check(cudaMemset(d_m, 0, params * sizeof(float))) != 0) return EXIT_FAILURE;
+    if (Check(cudaMemset(d_v, 0, params * sizeof(float))) != 0) return EXIT_FAILURE;
+
+    if (mgt_cuda::LaunchMlpLossGradKernelWithWorkspaceLtExternalHalf(shape, d_weights, d_weights_half, d_states, d_labels, kSamples, d_loss, d_grad,
+                                                                      d_workspace_fast, workspace_fast, blas_fast, blas_lt, 1, 1, true, true, 0,
+                                                                      d_lt_workspace, 1ULL << 20U, 4, false) != mgt::Status::kOk) return EXIT_FAILURE;
+    if (Check(cudaDeviceSynchronize()) != 0) return EXIT_FAILURE;
+    float fast_loss_before = 0.0f;
+    if (Check(cudaMemcpy(&fast_loss_before, d_loss, sizeof(float), cudaMemcpyDeviceToHost)) != 0) return EXIT_FAILURE;
+    if (!std::isfinite(fast_loss_before) || fast_loss_before <= 0.0f) return EXIT_FAILURE;
+
+    const mgt_cuda::AdamWKernelConfig fast_adam{params, 1, 0.0001f, 0.9f, 0.999f, 1.0e-8f, 0.0f};
+    if (mgt_cuda::LaunchAdamWKernelWithHalfMirror(fast_adam, d_weights, d_weights_half, d_grad, d_m, d_v, 0) != mgt::Status::kOk) return EXIT_FAILURE;
+    if (Check(cudaDeviceSynchronize()) != 0) return EXIT_FAILURE;
+    if (mgt_cuda::LaunchMlpLossGradKernelWithWorkspaceLtExternalHalf(shape, d_weights, d_weights_half, d_states, d_labels, kSamples, d_loss, d_grad,
+                                                                      d_workspace_fast, workspace_fast, blas_fast, blas_lt, 1, 1, true, true, 0,
+                                                                      d_lt_workspace, 1ULL << 20U, 4, false) != mgt::Status::kOk) return EXIT_FAILURE;
+    if (Check(cudaDeviceSynchronize()) != 0) return EXIT_FAILURE;
+    float fast_loss_after = 0.0f;
+    if (Check(cudaMemcpy(&fast_loss_after, d_loss, sizeof(float), cudaMemcpyDeviceToHost)) != 0) return EXIT_FAILURE;
+    if (!std::isfinite(fast_loss_after) || fast_loss_after > fast_loss_before) return EXIT_FAILURE;
+
+    cublasLtDestroy(blas_lt);
+    cublasDestroy(blas_fast);
+    cudaFree(d_lt_workspace);
+    cudaFree(d_workspace_fast);
+    cudaFree(d_weights_half);
 
     cudaFree(d_target);
     cudaFree(d_moves);
