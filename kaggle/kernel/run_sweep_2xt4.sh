@@ -89,6 +89,10 @@ while read -r config_id batch_size position_tile lt_workspace bucket_bytes backw
   MGT_WRITE_ARTIFACTS=0 \
   MGT_INPUT_GRAD_FP16="${MGT_INPUT_GRAD_FP16:-1}" \
   MGT_LINEAR_FP16="${MGT_LINEAR_FP16:-1}" \
+  MGT_LT_AUTOTUNE="${MGT_LT_AUTOTUNE:-0}" \
+  MGT_LT_AUTOTUNE_CANDIDATES="${MGT_LT_AUTOTUNE_CANDIDATES:-8}" \
+  MGT_LT_AUTOTUNE_WARMUPS="${MGT_LT_AUTOTUNE_WARMUPS:-1}" \
+  MGT_LT_AUTOTUNE_ITERS="${MGT_LT_AUTOTUNE_ITERS:-2}" \
   MGT_OUTPUT_DIM="${MGT_OUTPUT_DIM:-1}" \
   bash kaggle/kernel/run_ranks_2xt4.sh > "$run_dir/launch.log" 2>&1
   code=$?

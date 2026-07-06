@@ -43,6 +43,10 @@ if [ "${MGT_PERF_RUN:-0}" = "1" ]; then
   export MGT_OVERLAP_ALLREDUCE="${MGT_OVERLAP_ALLREDUCE:-1}"
   export MGT_ALLREDUCE_BUCKET_BYTES="${MGT_ALLREDUCE_BUCKET_BYTES:-4194304}"
   export MGT_LT_WORKSPACE_BYTES="${MGT_LT_WORKSPACE_BYTES:-16777216}"
+  export MGT_LT_AUTOTUNE="${MGT_LT_AUTOTUNE:-0}"
+  export MGT_LT_AUTOTUNE_CANDIDATES="${MGT_LT_AUTOTUNE_CANDIDATES:-8}"
+  export MGT_LT_AUTOTUNE_WARMUPS="${MGT_LT_AUTOTUNE_WARMUPS:-1}"
+  export MGT_LT_AUTOTUNE_ITERS="${MGT_LT_AUTOTUNE_ITERS:-2}"
 fi
 if [ "${MGT_FULL_MODEL:-0}" = "1" ]; then
   export MGT_STEPS="${MGT_STEPS:-1}"
@@ -76,6 +80,10 @@ for rank in $(seq 0 $((world_size - 1))); do
     --input-grad-sparse "${MGT_INPUT_GRAD_SPARSE:-0}" \
     --linear-fp16 "${MGT_LINEAR_FP16:-0}" \
     --lt-workspace-bytes "${MGT_LT_WORKSPACE_BYTES:-0}" \
+    --lt-autotune "${MGT_LT_AUTOTUNE:-0}" \
+    --lt-autotune-candidates "${MGT_LT_AUTOTUNE_CANDIDATES:-8}" \
+    --lt-autotune-warmups "${MGT_LT_AUTOTUNE_WARMUPS:-1}" \
+    --lt-autotune-iters "${MGT_LT_AUTOTUNE_ITERS:-2}" \
     --overlap-allreduce "${MGT_OVERLAP_ALLREDUCE:-1}" \
     --allreduce-bucket-bytes "${MGT_ALLREDUCE_BUCKET_BYTES:-4194304}" \
     --nccl-id-file "$run_root/nccl.id" > "$run_root/rank${rank}.stdout" 2>&1 &
@@ -112,6 +120,10 @@ summary = {
         "overlap_allreduce": int(os.environ.get("MGT_OVERLAP_ALLREDUCE", "1")),
         "allreduce_bucket_bytes": int(os.environ.get("MGT_ALLREDUCE_BUCKET_BYTES", "4194304")),
         "lt_workspace_bytes": int(os.environ.get("MGT_LT_WORKSPACE_BYTES", "0")),
+        "lt_autotune": int(os.environ.get("MGT_LT_AUTOTUNE", "0")),
+        "lt_autotune_candidates": int(os.environ.get("MGT_LT_AUTOTUNE_CANDIDATES", "8")),
+        "lt_autotune_warmups": int(os.environ.get("MGT_LT_AUTOTUNE_WARMUPS", "1")),
+        "lt_autotune_iters": int(os.environ.get("MGT_LT_AUTOTUNE_ITERS", "2")),
         "backward_profile": int(os.environ.get("MGT_BACKWARD_PROFILE", "0")),
     },
 }

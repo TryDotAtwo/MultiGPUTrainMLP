@@ -55,6 +55,10 @@ struct Args {
     bool persistent_half_weights = true;
     std::uint64_t allreduce_bucket_bytes = mgt::kDefaultAllreduceBucketBytes;
     std::uint64_t lt_workspace_bytes = mgt::kDefaultLtWorkspaceBytes;
+    bool lt_autotune = false;
+    std::uint32_t lt_autotune_candidates = 8;
+    std::uint32_t lt_autotune_warmups = 1;
+    std::uint32_t lt_autotune_iters = 2;
     std::uint64_t seed = 1234;
     float lr = 0.0001f;
     float weight_decay = 0.0f;
@@ -594,6 +598,14 @@ bool ParseArgs(int argc, char** argv, Args* args) {
             if (!ParseUint64(value, &args->allreduce_bucket_bytes)) return false;
         } else if (key == "--lt-workspace-bytes") {
             if (!ParseUint64(value, &args->lt_workspace_bytes)) return false;
+        } else if (key == "--lt-autotune") {
+            if (!ParseBool(value, &args->lt_autotune)) return false;
+        } else if (key == "--lt-autotune-candidates") {
+            if (!ParseUint(value, &args->lt_autotune_candidates)) return false;
+        } else if (key == "--lt-autotune-warmups") {
+            if (!ParseUint(value, &args->lt_autotune_warmups)) return false;
+        } else if (key == "--lt-autotune-iters") {
+            if (!ParseUint(value, &args->lt_autotune_iters)) return false;
         } else if (key == "--seed") {
             if (!ParseUint64(value, &args->seed)) return false;
         } else if (key == "--lr") {
@@ -626,7 +638,7 @@ bool ParseArgs(int argc, char** argv, Args* args) {
 int main(int argc, char** argv) {
     Args args{};
     if (!ParseArgs(argc, argv, &args)) {
-        std::cerr << "usage: mgt_native_train_smoke --output-dir DIR --steps N --device-id ID --world-size N --global-rank R --local-rank R [--batch-size N --k-min N --k-max N --hd1 N --hd2 N --nrd N --write-artifacts 0|1 --backward-profile 0|1 --overlap-allreduce 0|1 --input-grad-partial-chunks N --input-grad-positions-per-block N --input-grad-position-tile N --input-grad-sparse 0|1 --input-grad-fp16 0|1 --linear-fp16 0|1 --persistent-half-weights 0|1 --lt-workspace-bytes N --nccl-id-file PATH --resume-checkpoint DIR]\n";
+        std::cerr << "usage: mgt_native_train_smoke --output-dir DIR --steps N --device-id ID --world-size N --global-rank R --local-rank R [--batch-size N --k-min N --k-max N --hd1 N --hd2 N --nrd N --write-artifacts 0|1 --backward-profile 0|1 --overlap-allreduce 0|1 --input-grad-partial-chunks N --input-grad-positions-per-block N --input-grad-position-tile N --input-grad-sparse 0|1 --input-grad-fp16 0|1 --linear-fp16 0|1 --persistent-half-weights 0|1 --lt-workspace-bytes N --lt-autotune 0|1 --lt-autotune-candidates N --lt-autotune-warmups N --lt-autotune-iters N --nccl-id-file PATH --resume-checkpoint DIR]\n";
         return EXIT_FAILURE;
     }
     int device_count = 0;
@@ -691,6 +703,7 @@ int main(int argc, char** argv) {
     if (args.lt_workspace_bytes > 0 && Check(cudaMalloc(&d_lt_workspace, args.lt_workspace_bytes)) != 0) return EXIT_FAILURE;
     if (cublasCreate(&backward_blas) != CUBLAS_STATUS_SUCCESS) return EXIT_FAILURE;
     if ((args.input_grad_fp16 || args.linear_fp16) && cublasLtCreate(&backward_blas_lt) != CUBLAS_STATUS_SUCCESS) return EXIT_FAILURE;
+    mgt_cuda::ConfigureLtMatmulAutotune({args.lt_autotune, args.lt_autotune_candidates, args.lt_autotune_warmups, args.lt_autotune_iters});
     if (Check(cudaStreamCreateWithFlags(&compute_stream, cudaStreamNonBlocking)) != 0) return EXIT_FAILURE;
     if (Check(cudaStreamCreateWithFlags(&comm_stream, cudaStreamNonBlocking)) != 0) return EXIT_FAILURE;
     if (Check(cudaMalloc(&d_m, params * sizeof(float))) != 0) return EXIT_FAILURE;
@@ -766,6 +779,10 @@ int main(int argc, char** argv) {
         << " linear_fp16=" << (args.linear_fp16 ? 1 : 0)
         << " persistent_half_weights=" << (args.persistent_half_weights ? 1 : 0)
         << " lt_workspace_bytes=" << args.lt_workspace_bytes
+        << " lt_autotune=" << (args.lt_autotune ? 1 : 0)
+        << " lt_autotune_candidates=" << args.lt_autotune_candidates
+        << " lt_autotune_warmups=" << args.lt_autotune_warmups
+        << " lt_autotune_iters=" << args.lt_autotune_iters
         << " overlap_allreduce=" << (overlap_allreduce ? 1 : 0)
         << " nccl=" << (nccl_enabled ? 1 : 0) << " resumed=" << (resumed ? 1 : 0) << "\n";
 
@@ -873,6 +890,10 @@ int main(int argc, char** argv) {
                 << ",\"input_grad_fp16\":" << (args.input_grad_fp16 ? 1 : 0) << ",\"input_grad_position_tile\":" << train_plan.config.runtime.input_grad_position_tile << ",\"input_grad_sparse\":" << (train_plan.config.runtime.input_grad_sparse ? 1 : 0) << ",\"input_grad_backend\":\"" << input_grad_backend << "\",\"linear_fp16\":" << (args.linear_fp16 ? 1 : 0)
                 << ",\"persistent_half_weights\":" << (args.persistent_half_weights ? 1 : 0)
                 << ",\"lt_workspace_bytes\":" << args.lt_workspace_bytes
+                << ",\"lt_autotune\":" << (args.lt_autotune ? 1 : 0)
+                << ",\"lt_autotune_candidates\":" << args.lt_autotune_candidates
+                << ",\"lt_autotune_warmups\":" << args.lt_autotune_warmups
+                << ",\"lt_autotune_iters\":" << args.lt_autotune_iters
                 << ",\"overlap_allreduce\":" << (overlap_allreduce ? 1 : 0) << ",\"overlap_ranges\":" << overlap_ranges << ",\"overlap_chunks\":" << overlap_chunks
                 << ",\"bw_input_forward_ms\":" << backward_profile.input_forward_ms
                 << ",\"bw_hidden_forward_ms\":" << backward_profile.hidden_forward_ms
@@ -897,7 +918,7 @@ int main(int argc, char** argv) {
     meta << "MODEL_MODE=MLP2RB\nOUTPUT_DIM=" << shape.output_dim << "\nWORLD_SIZE=" << args.world_size << "\nGLOBAL_RANK=" << args.global_rank
          << "\nLOCAL_RANK=" << args.local_rank << "\nDEVICE_ID=" << args.device_id << "\nHD1=" << requested_hd1 << "\nPHYSICAL_HD1=" << shape.hd1 << "\nHD2=" << requested_hd2 << "\nPHYSICAL_HD2=" << shape.hd2 << "\nNUM_CLASSES=" << shape.state_value_pad << "\nNRD=" << shape.residual_blocks
          << "\nK_MIN=" << args.k_min << "\nK_MAX=" << args.k_max << "\nBATCH_SIZE=" << kSamples
-         << "\nGRADIENT_CAROUSEL_SLOTS=" << train_plan.gradient_carousel_slots << "\nLT_WORKSPACE_BYTES=" << args.lt_workspace_bytes << "\nINPUT_GRAD_PARTIAL_CHUNKS=" << train_plan.config.runtime.input_grad_partial_chunks << "\nINPUT_GRAD_POSITIONS_PER_BLOCK=" << train_plan.config.runtime.input_grad_positions_per_block << "\nINPUT_GRAD_POSITION_TILE=" << train_plan.config.runtime.input_grad_position_tile << "\nINPUT_GRAD_SPARSE=" << (train_plan.config.runtime.input_grad_sparse ? 1 : 0) << "\nINPUT_GRAD_FP16=" << (args.input_grad_fp16 ? 1 : 0) << "\nINPUT_GRAD_BACKEND=" << input_grad_backend << "\nLINEAR_FP16=" << (args.linear_fp16 ? 1 : 0) << "\nPERSISTENT_HALF_WEIGHTS=" << (args.persistent_half_weights ? 1 : 0) << "\nOVERLAP_ALLREDUCE=" << (overlap_allreduce ? 1 : 0) << "\nGRADIENT_BUCKETS=" << train_plan.gradient_buckets.size() << "\nNCCL_ENABLED=" << (nccl_enabled ? 1 : 0) << "\nRESUME_CHECKPOINT=" << (resumed ? 1 : 0) << "\nARTIFACTS_WRITTEN=" << (args.write_artifacts ? 1 : 0) << "\nNUM_PARAMETERS=" << params << "\n";
+         << "\nGRADIENT_CAROUSEL_SLOTS=" << train_plan.gradient_carousel_slots << "\nLT_WORKSPACE_BYTES=" << args.lt_workspace_bytes << "\nLT_AUTOTUNE=" << (args.lt_autotune ? 1 : 0) << "\nLT_AUTOTUNE_CANDIDATES=" << args.lt_autotune_candidates << "\nLT_AUTOTUNE_WARMUPS=" << args.lt_autotune_warmups << "\nLT_AUTOTUNE_ITERS=" << args.lt_autotune_iters << "\nINPUT_GRAD_PARTIAL_CHUNKS=" << train_plan.config.runtime.input_grad_partial_chunks << "\nINPUT_GRAD_POSITIONS_PER_BLOCK=" << train_plan.config.runtime.input_grad_positions_per_block << "\nINPUT_GRAD_POSITION_TILE=" << train_plan.config.runtime.input_grad_position_tile << "\nINPUT_GRAD_SPARSE=" << (train_plan.config.runtime.input_grad_sparse ? 1 : 0) << "\nINPUT_GRAD_FP16=" << (args.input_grad_fp16 ? 1 : 0) << "\nINPUT_GRAD_BACKEND=" << input_grad_backend << "\nLINEAR_FP16=" << (args.linear_fp16 ? 1 : 0) << "\nPERSISTENT_HALF_WEIGHTS=" << (args.persistent_half_weights ? 1 : 0) << "\nOVERLAP_ALLREDUCE=" << (overlap_allreduce ? 1 : 0) << "\nGRADIENT_BUCKETS=" << train_plan.gradient_buckets.size() << "\nNCCL_ENABLED=" << (nccl_enabled ? 1 : 0) << "\nRESUME_CHECKPOINT=" << (resumed ? 1 : 0) << "\nARTIFACTS_WRITTEN=" << (args.write_artifacts ? 1 : 0) << "\nNUM_PARAMETERS=" << params << "\n";
     std::ofstream layers(args.output_dir / "layers.json");
     layers << "{\n  \"model_mode\": \"MLP2RB\",\n  \"output_dim\": " << train_plan.layout.output_dim << ",\n  \"state_len\": " << shape.state_len << ",\n  \"state_storage_len\": " << train_plan.padded_state_dim << ",\n  \"num_classes\": " << shape.state_value_pad << ",\n  \"hd1\": " << requested_hd1 << ",\n  \"physical_hd1\": " << shape.hd1 << ",\n  \"hd2\": " << requested_hd2 << ",\n  \"physical_hd2\": " << shape.hd2 << ",\n  \"nrd\": " << shape.residual_blocks << ",\n  \"artifacts_written\": " << (args.write_artifacts ? "true" : "false") << ",\n  \"num_parameters\": " << params << "\n}\n";
     if (!WriteLinearOpsManifest(args.output_dir, train_plan)) return EXIT_FAILURE;

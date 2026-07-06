@@ -4,7 +4,9 @@
 #include <cublasLt.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
+#include <algorithm>
 #include <cstddef>
+#include <limits>
 #ifdef MGT_HAS_CUTLASS_HALF_GEMM
 #include <cutlass/arch/arch.h>
 #include <cutlass/cutlass.h>
@@ -433,6 +435,24 @@ struct LtMatmulPlanKey {
     std::uint64_t workspace_bytes;
 };
 
+inline constexpr std::uint32_t kLtMatmulMaxHeuristicCandidates = 16;
+inline constexpr std::uint32_t kLtMatmulMaxWarmupIterations = 8;
+inline constexpr std::uint32_t kLtMatmulMaxTimingIterations = 16;
+
+LtMatmulAutotuneConfig NormalizeLtMatmulAutotuneConfig(LtMatmulAutotuneConfig config) {
+    if (config.max_candidates == 0U) config.max_candidates = 1U;
+    config.max_candidates = std::min<std::uint32_t>(config.max_candidates, kLtMatmulMaxHeuristicCandidates);
+    config.warmup_iterations = std::min<std::uint32_t>(config.warmup_iterations, kLtMatmulMaxWarmupIterations);
+    if (config.timing_iterations == 0U) config.timing_iterations = 1U;
+    config.timing_iterations = std::min<std::uint32_t>(config.timing_iterations, kLtMatmulMaxTimingIterations);
+    return config;
+}
+
+struct LtMatmulAlgoCandidate {
+    cublasLtMatmulAlgo_t algo{};
+    std::size_t workspace_bytes = 0;
+};
+
 struct LtMatmulPlanCacheEntry {
     bool initialized = false;
     LtMatmulPlanKey key{};
@@ -443,9 +463,13 @@ struct LtMatmulPlanCacheEntry {
     cublasLtMatmulAlgo_t algo{};
     std::size_t algo_workspace_bytes = 0;
     bool has_algo = false;
+    bool autotuned = false;
+    std::uint32_t candidate_count = 0;
+    LtMatmulAlgoCandidate candidates[kLtMatmulMaxHeuristicCandidates]{};
 };
 
 inline constexpr std::uint32_t kLtMatmulPlanCacheCapacity = 256;
+LtMatmulAutotuneConfig g_lt_matmul_autotune_config{};
 LtMatmulPlanCacheEntry g_lt_matmul_plan_cache[kLtMatmulPlanCacheCapacity]{};
 
 bool SameLtMatmulPlanKey(const LtMatmulPlanKey& lhs, const LtMatmulPlanKey& rhs) {
@@ -491,6 +515,10 @@ mgt::Status InitLtMatmulPlan(cublasLtHandle_t handle, LtMatmulPlanCacheEntry* en
     entry->a_desc = a_desc;
     entry->b_desc = b_desc;
     entry->c_desc = c_desc;
+    entry->algo_workspace_bytes = 0;
+    entry->has_algo = false;
+    entry->autotuned = false;
+    entry->candidate_count = 0;
 
     if (key.workspace_bytes > 0) {
         if (handle == nullptr) {
@@ -504,23 +532,28 @@ mgt::Status InitLtMatmulPlan(cublasLtHandle_t handle, LtMatmulPlanCacheEntry* en
         }
         const std::size_t max_workspace_bytes = static_cast<std::size_t>(key.workspace_bytes);
         cublasStatus_t heuristic_status = cublasLtMatmulPreferenceSetAttribute(preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &max_workspace_bytes, sizeof(max_workspace_bytes));
-        constexpr int kLtMatmulHeuristicCapacity = 8;
-        cublasLtMatmulHeuristicResult_t heuristics[kLtMatmulHeuristicCapacity]{};
+        const LtMatmulAutotuneConfig autotune_config = NormalizeLtMatmulAutotuneConfig(g_lt_matmul_autotune_config);
+        cublasLtMatmulHeuristicResult_t heuristics[kLtMatmulMaxHeuristicCandidates]{};
         int returned_algorithms = 0;
         if (heuristic_status == CUBLAS_STATUS_SUCCESS) {
-            heuristic_status = cublasLtMatmulAlgoGetHeuristic(handle, op_desc, a_desc, b_desc, c_desc, c_desc, preference, kLtMatmulHeuristicCapacity, heuristics, &returned_algorithms);
+            heuristic_status = cublasLtMatmulAlgoGetHeuristic(handle, op_desc, a_desc, b_desc, c_desc, c_desc, preference, static_cast<int>(autotune_config.max_candidates), heuristics, &returned_algorithms);
         }
         if (heuristic_status == CUBLAS_STATUS_SUCCESS) {
-            for (int i = 0; i < returned_algorithms; ++i) {
+            const std::uint32_t checked_algorithms = std::min<std::uint32_t>(static_cast<std::uint32_t>(returned_algorithms), autotune_config.max_candidates);
+            for (std::uint32_t i = 0; i < checked_algorithms; ++i) {
                 cublasLtMatmulHeuristicResult_t checked{};
                 if (heuristics[i].workspaceSize <= max_workspace_bytes &&
                     cublasLtMatmulAlgoCheck(handle, op_desc, a_desc, b_desc, c_desc, c_desc, &heuristics[i].algo, &checked) == CUBLAS_STATUS_SUCCESS &&
-                    checked.workspaceSize <= max_workspace_bytes) {
-                    entry->algo = heuristics[i].algo;
-                    entry->algo_workspace_bytes = checked.workspaceSize > heuristics[i].workspaceSize ? checked.workspaceSize : heuristics[i].workspaceSize;
-                    entry->has_algo = true;
-                    break;
+                    checked.workspaceSize <= max_workspace_bytes && entry->candidate_count < kLtMatmulMaxHeuristicCandidates) {
+                    LtMatmulAlgoCandidate& candidate = entry->candidates[entry->candidate_count++];
+                    candidate.algo = heuristics[i].algo;
+                    candidate.workspace_bytes = checked.workspaceSize > heuristics[i].workspaceSize ? checked.workspaceSize : heuristics[i].workspaceSize;
                 }
+            }
+            if (entry->candidate_count > 0U) {
+                entry->algo = entry->candidates[0].algo;
+                entry->algo_workspace_bytes = entry->candidates[0].workspace_bytes;
+                entry->has_algo = true;
             }
         }
         cublasLtMatmulPreferenceDestroy(preference);
@@ -550,6 +583,77 @@ mgt::Status GetLtMatmulPlan(cublasLtHandle_t handle, const LtMatmulPlanKey& key,
     }
     return mgt::Status::kInvalidConfig;
 }
+mgt::Status AutotuneLtMatmulPlan(cublasLtHandle_t handle,
+                                  LtMatmulPlanCacheEntry* plan,
+                                  cudaStream_t stream,
+                                  void* lt_workspace,
+                                  std::uint64_t lt_workspace_bytes,
+                                  const __half* a,
+                                  const __half* b,
+                                  float* c,
+                                  float beta) {
+    LtMatmulAutotuneConfig config = NormalizeLtMatmulAutotuneConfig(g_lt_matmul_autotune_config);
+    if (!config.enabled || plan == nullptr || plan->autotuned || plan->candidate_count <= 1U || beta != 0.0f) return mgt::Status::kOk;
+    plan->autotuned = true;
+    if (handle == nullptr || lt_workspace == nullptr || lt_workspace_bytes == 0U) return mgt::Status::kOk;
+
+    cudaEvent_t start = nullptr;
+    cudaEvent_t stop = nullptr;
+    if (cudaEventCreate(&start) != cudaSuccess) return mgt::Status::kCudaFailure;
+    if (cudaEventCreate(&stop) != cudaSuccess) {
+        cudaEventDestroy(start);
+        return mgt::Status::kCudaFailure;
+    }
+
+    const float alpha = 1.0f;
+    const std::size_t workspace_bytes = static_cast<std::size_t>(lt_workspace_bytes);
+    float best_ms = std::numeric_limits<float>::infinity();
+    std::uint32_t best_index = 0;
+    bool selected = false;
+    const std::uint32_t candidate_count = std::min<std::uint32_t>(plan->candidate_count, config.max_candidates);
+    for (std::uint32_t candidate_index = 0; candidate_index < candidate_count; ++candidate_index) {
+        const LtMatmulAlgoCandidate& candidate = plan->candidates[candidate_index];
+        if (candidate.workspace_bytes > workspace_bytes) continue;
+        bool failed = false;
+        for (std::uint32_t iter = 0; iter < config.warmup_iterations; ++iter) {
+            const cublasStatus_t status = cublasLtMatmul(handle, plan->op_desc, &alpha, a, plan->a_desc, b, plan->b_desc, &beta, c, plan->c_desc, c, plan->c_desc, &candidate.algo, lt_workspace, workspace_bytes, stream);
+            if (status != CUBLAS_STATUS_SUCCESS) {
+                failed = true;
+                break;
+            }
+        }
+        if (failed) continue;
+        if (cudaEventRecord(start, stream) != cudaSuccess) {
+            failed = true;
+        }
+        for (std::uint32_t iter = 0; !failed && iter < config.timing_iterations; ++iter) {
+            const cublasStatus_t status = cublasLtMatmul(handle, plan->op_desc, &alpha, a, plan->a_desc, b, plan->b_desc, &beta, c, plan->c_desc, c, plan->c_desc, &candidate.algo, lt_workspace, workspace_bytes, stream);
+            if (status != CUBLAS_STATUS_SUCCESS) failed = true;
+        }
+        if (failed || cudaEventRecord(stop, stream) != cudaSuccess || cudaEventSynchronize(stop) != cudaSuccess) continue;
+        float elapsed_ms = 0.0f;
+        if (cudaEventElapsedTime(&elapsed_ms, start, stop) != cudaSuccess) continue;
+        const float avg_ms = elapsed_ms / static_cast<float>(config.timing_iterations);
+        if (avg_ms < best_ms) {
+            best_ms = avg_ms;
+            best_index = candidate_index;
+            selected = true;
+        }
+    }
+
+    cudaEventDestroy(stop);
+    cudaEventDestroy(start);
+    if (selected) {
+        plan->algo = plan->candidates[best_index].algo;
+        plan->algo_workspace_bytes = plan->candidates[best_index].workspace_bytes;
+        plan->has_algo = true;
+    } else {
+        plan->algo_workspace_bytes = 0;
+        plan->has_algo = false;
+    }
+    return mgt::Status::kOk;
+}
+
 mgt::Status LtMatmulHalfToFloat(cublasLtHandle_t handle,
                                  cudaStream_t stream,
                                  void* lt_workspace,
@@ -581,6 +685,8 @@ mgt::Status LtMatmulHalfToFloat(cublasLtHandle_t handle,
     LtMatmulPlanCacheEntry* plan = nullptr;
     const mgt::Status plan_status = GetLtMatmulPlan(handle, key, &plan);
     if (plan_status != mgt::Status::kOk) return plan_status;
+    const mgt::Status autotune_status = AutotuneLtMatmulPlan(handle, plan, stream, lt_workspace, lt_workspace_bytes, a, b, c, beta);
+    if (autotune_status != mgt::Status::kOk) return autotune_status;
     const cublasLtMatmulAlgo_t* algo = plan->has_algo ? &plan->algo : nullptr;
     void* workspace = plan->has_algo ? lt_workspace : nullptr;
     const std::size_t workspace_bytes = plan->has_algo ? static_cast<std::size_t>(lt_workspace_bytes) : 0;
@@ -1238,6 +1344,14 @@ __global__ void InputGradReducePartialsKernel(CudaMlpShape shape, const float* p
 
 
 }  // namespace
+
+__host__ void ConfigureLtMatmulAutotune(const LtMatmulAutotuneConfig& config) {
+    g_lt_matmul_autotune_config = NormalizeLtMatmulAutotuneConfig(config);
+}
+
+__host__ LtMatmulAutotuneConfig CurrentLtMatmulAutotuneConfig() {
+    return NormalizeLtMatmulAutotuneConfig(g_lt_matmul_autotune_config);
+}
 
 __host__ std::uint64_t MlpLossGradWorkspaceFloats(const CudaMlpShape& shape,
                                                   std::uint32_t sample_count) {

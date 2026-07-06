@@ -18,6 +18,16 @@ struct MlpBackwardProfile {
     float input_grad_ms = 0.0f;
 };
 
+struct LtMatmulAutotuneConfig {
+    bool enabled = false;
+    std::uint32_t max_candidates = 8;
+    std::uint32_t warmup_iterations = 1;
+    std::uint32_t timing_iterations = 2;
+};
+
+__host__ void ConfigureLtMatmulAutotune(const LtMatmulAutotuneConfig& config);
+__host__ LtMatmulAutotuneConfig CurrentLtMatmulAutotuneConfig();
+
 using MlpGradientReadyCallback = mgt::Status (*)(void* user,
                                                  std::uint32_t ready_id,
                                                  std::uint64_t param_offset,

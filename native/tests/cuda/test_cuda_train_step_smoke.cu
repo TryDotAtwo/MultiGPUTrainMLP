@@ -117,6 +117,7 @@ int main() {
     if (Check(cudaMalloc(&d_lt_workspace, 1ULL << 20U)) != 0) return EXIT_FAILURE;
     if (cublasCreate(&blas_fast) != CUBLAS_STATUS_SUCCESS) return EXIT_FAILURE;
     if (cublasLtCreate(&blas_lt) != CUBLAS_STATUS_SUCCESS) return EXIT_FAILURE;
+    mgt_cuda::ConfigureLtMatmulAutotune({true, 4, 1, 1});
     std::vector<__half> weights_half(params);
     for (std::uint64_t i = 0; i < params; ++i) weights_half[i] = __float2half_rn(weights[i]);
     if (Check(cudaMemcpy(d_weights, weights.data(), params * sizeof(float), cudaMemcpyHostToDevice)) != 0) return EXIT_FAILURE;
@@ -143,6 +144,7 @@ int main() {
     if (Check(cudaMemcpy(&fast_loss_after, d_loss, sizeof(float), cudaMemcpyDeviceToHost)) != 0) return EXIT_FAILURE;
     if (!std::isfinite(fast_loss_after) || fast_loss_after > fast_loss_before) return EXIT_FAILURE;
 
+    mgt_cuda::ConfigureLtMatmulAutotune({});
     cublasLtDestroy(blas_lt);
     cublasDestroy(blas_fast);
     cudaFree(d_lt_workspace);
