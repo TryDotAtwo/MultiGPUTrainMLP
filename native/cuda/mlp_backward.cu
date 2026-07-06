@@ -445,7 +445,7 @@ struct LtMatmulPlanCacheEntry {
     bool has_algo = false;
 };
 
-inline constexpr std::uint32_t kLtMatmulPlanCacheCapacity = 64;
+inline constexpr std::uint32_t kLtMatmulPlanCacheCapacity = 256;
 LtMatmulPlanCacheEntry g_lt_matmul_plan_cache[kLtMatmulPlanCacheCapacity]{};
 
 bool SameLtMatmulPlanKey(const LtMatmulPlanKey& lhs, const LtMatmulPlanKey& rhs) {
@@ -504,10 +504,11 @@ mgt::Status InitLtMatmulPlan(cublasLtHandle_t handle, LtMatmulPlanCacheEntry* en
         }
         const std::size_t max_workspace_bytes = static_cast<std::size_t>(key.workspace_bytes);
         cublasStatus_t heuristic_status = cublasLtMatmulPreferenceSetAttribute(preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &max_workspace_bytes, sizeof(max_workspace_bytes));
-        cublasLtMatmulHeuristicResult_t heuristics[8]{};
+        constexpr int kLtMatmulHeuristicCapacity = 8;
+        cublasLtMatmulHeuristicResult_t heuristics[kLtMatmulHeuristicCapacity]{};
         int returned_algorithms = 0;
         if (heuristic_status == CUBLAS_STATUS_SUCCESS) {
-            heuristic_status = cublasLtMatmulAlgoGetHeuristic(handle, op_desc, a_desc, b_desc, c_desc, c_desc, preference, 8, heuristics, &returned_algorithms);
+            heuristic_status = cublasLtMatmulAlgoGetHeuristic(handle, op_desc, a_desc, b_desc, c_desc, c_desc, preference, kLtMatmulHeuristicCapacity, heuristics, &returned_algorithms);
         }
         if (heuristic_status == CUBLAS_STATUS_SUCCESS) {
             for (int i = 0; i < returned_algorithms; ++i) {
@@ -523,10 +524,7 @@ mgt::Status InitLtMatmulPlan(cublasLtHandle_t handle, LtMatmulPlanCacheEntry* en
             }
         }
         cublasLtMatmulPreferenceDestroy(preference);
-        if (!entry->has_algo) {
-            DestroyLtMatmulPlan(op_desc, a_desc, b_desc, c_desc);
-            return heuristic_status == CUBLAS_STATUS_SUCCESS ? mgt::Status::kInvalidConfig : mgt::Status::kCudaFailure;
-        }
+        // Keep the descriptors even without a workspace algorithm; cuBLASLt can still use its default algorithm without workspace.
     }
 
     entry->initialized = true;
