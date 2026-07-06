@@ -9,6 +9,15 @@ build_dir="${MGT_BUILD_DIR:-build-kaggle-2xt4}"
 timestamp=$(date +%Y%m%d_%H%M%S)
 sweep_root="${MGT_SWEEP_ROOT:-runs/kaggle-2xt4-sweep-${timestamp}}"
 mkdir -p "$sweep_root"
+echo "preflight_cuda_visible_devices=${CUDA_VISIBLE_DEVICES:-unset}"
+if command -v nvidia-smi >/dev/null 2>&1; then
+  echo "preflight_nvidia_smi_l"
+  nvidia-smi -L || true
+  echo "preflight_nvidia_smi"
+  nvidia-smi || true
+else
+  echo "preflight_nvidia_smi_missing=1"
+fi
 cmake -S native -B "$build_dir" -DMGT_ENABLE_CUDA=ON -DMGT_ENABLE_NCCL=ON -DCMAKE_CUDA_ARCHITECTURES=${MGT_CUDA_ARCH} -DMGT_CUTLASS_ROOT="${CUTLASS_ROOT:-/opt/cutlass}" -DMGT_AUTO_CUTLASS_HALF_GEMM=${MGT_AUTO_CUTLASS_HALF_GEMM:-ON}
 if [ "${MGT_SWEEP_RUN_CTEST:-1}" = "1" ]; then
   cmake --build "$build_dir" --config Release
