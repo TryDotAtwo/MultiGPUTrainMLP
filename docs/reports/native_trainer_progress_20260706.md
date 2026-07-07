@@ -261,3 +261,22 @@ Local A/B workload: world_size=1, batch=24576, tile=48, workspace=16 MiB, cuBLAS
 | Backward graph | last 6 | 288477.23 | 85.19 | 83.06 | 1 | 291.078827..295.443909 |
 
 Conclusion: plain CUDA Graph capture around the current backward launcher is not worth keeping. It does not remove enough work because the heavy stages are still cuBLASLt GEMMs and memory-heavy activation-gradient kernels. The next useful graph/fusion work should be lower-level: either capture a larger steady-state step with communication constraints solved, or fuse residual-backward kernels so the graph reduces real memory traffic and launch count instead of only wrapping the existing sequence.
+## Rejected half-only residual skip attempt, 2026-07-07
+
+A half-only residual `fc2 dz` path was prototyped to avoid writing the `dzfc2` float matrix in the half-linear path. The prototype added a separate half skip buffer, computed `fc2` bias with a one-owner-per-column half reduction, and performed skip-add from half. It used no atomics and kept owner writes deterministic.
+
+Correctness verification before rejection:
+
+- Docker build target: `test_cuda_mlp_backward_mixed_precision_error`, `test_cuda_train_step_smoke`, `mgt_native_train_smoke` passed.
+- CTest filter `cuda_mlp_backward_mixed_precision_error|cuda_train_step_smoke`: 2/2 passed.
+
+Local A/B workload: world_size=1, batch=24576, tile=48, workspace=16 MiB, cuBLASLt autotune disabled, steps=12.
+
+| Variant | Window | Throughput, states/s | Step ms | Backward ms | Loss range |
+| --- | --- | ---: | ---: | ---: | --- |
+| Baseline | steps 1..11 | 289217.57 | 84.97 | 82.85 | 291.078827..296.814453 |
+| Baseline | last 6 | 289524.53 | 84.88 | 82.75 | 291.078827..295.443909 |
+| Half-only skip prototype | steps 1..11 | 259396.47 | 94.74 | 92.30 | 291.098694..296.816467 |
+| Half-only skip prototype | last 6 | 268169.59 | 91.64 | 89.33 | 291.098694..295.474365 |
+
+Conclusion: replacing the float `dzfc2` path with half-only bias and skip kernels made the residual backward path slower. The likely issue is that the custom bias reduction and extra half buffer cost more than the saved float write/read on this shape. The source change was reverted. The next fusion attempt should avoid adding another reduction kernel; it needs to combine existing elementwise work with a downstream operation or target a larger GEMM-side layout issue.
