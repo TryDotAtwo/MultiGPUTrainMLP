@@ -316,3 +316,43 @@ Profile-mode attribution for the cached path, batch=24576, tile=48, profile enab
 | Input gradient | 26.23 |
 
 Interpretation: the fusion is numerically safe and removes a real residual `fc1` global-memory pass, but the headline local throughput is neutral within noise. It is worth keeping as a structural step toward a fused residual block, not as a claimed throughput win. The next higher-impact fusion target is `fc2 dZ + residual skip/relu state` and/or moving more of the residual block to a controlled CUTLASS epilogue, because input gradient and residual backward still dominate.
+
+## Rejected fused fc2 dZ plus bias owner-column attempt, 2026-07-07
+
+A custom half-linear residual `fc2 dZ + bias` kernel was tested after the fused `fc1` epilogue. The kernel used one owner block per output column, wrote `dzfc2` and `dzfc2_half`, and reduced the column bias gradient in the same launch. It used no atomics and no extra reduction kernel.
+
+Correctness verification before rejection:
+
+- Docker CUDA build passed.
+- CTest filter `cuda_mlp_backward_mixed_precision_error|cuda_train_step_smoke|native_train_profile_smoke`: 3/3 passed.
+
+Local no-profile workload: world_size=1, batch=24576, tile=48, workspace=16 MiB, cuBLASLt autotune enabled, steps=20, steady window steps 1..19.
+
+| Variant | Throughput, states/s | Step ms | Backward ms | Loss range |
+| --- | ---: | ---: | ---: | --- |
+| Fused fc1 epilogue cached baseline | 309358.18 | 79.44 | 77.40 | 291.078827..296.950378 |
+| Owner-column fused fc2 dZ+bias | 195414.20 | 125.76 | 123.64 | 291.078827..296.950378 |
+
+Conclusion: this fusion is numerically correct but structurally wrong for the hot path. The owner-column layout makes writes to `dzfc2`/half `dzfc2` strided by `hd2`, so the saved bias GEMV is overwhelmed by poor memory coalescing. Do not repeat column-owned dZ+bias fusion for this matrix layout. A future `fc2` fusion needs row/tile-coalesced writes and either a separate planned reduction or a GEMM/CUTLASS epilogue that preserves coalescing.
+
+## Local input-gradient tile check after fc1 fusion, 2026-07-07
+
+After the fused `fc1` epilogue, the input-gradient tile size was rechecked locally because input gradient remains the largest single stage. All runs used world_size=1, batch=24576, workspace=16 MiB, cuBLASLt autotune enabled, half input gradients, half linear weights, and finite identical loss range.
+
+Profile-mode sequential checks, steps 1..11:
+
+| Tile positions | Throughput, states/s | Step ms | Backward ms | Profiled input-grad ms |
+| ---: | ---: | ---: | ---: | ---: |
+| 36 | 283056.86 | 86.82 | 84.80 | 27.54 |
+| 48 | 281440.81 | 87.32 | 85.30 | 26.50 |
+| 80 | 267799.14 | 91.77 | 89.66 | 26.52 |
+
+No-profile checks, steps 1..19:
+
+| Tile positions | Throughput, states/s | Step ms | Backward ms |
+| ---: | ---: | ---: | ---: |
+| 36 | 298640.80 | 82.29 | 80.21 |
+| 48 | 309358.18 | 79.44 | 77.40 |
+| 56 | 308733.92 | 79.60 | 77.49 |
+
+Conclusion: local best remains tile 48; tile 56 is effectively tied but slightly lower; tile 80 is not a good local setting even though the padded state length is 80. Keep tile size as a runtime/config parameter and tune per GPU class. Do not hardwire tile 80 into the input-gradient path.
