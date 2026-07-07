@@ -241,3 +241,23 @@ Rejected local variants:
 Correctness verification for the adaptive row-1 variant: CTest filter `cuda_mlp_backward_cpu_compare|cuda_mlp_backward_mixed_precision_error|cuda_train_step_smoke` passed 3/3. The performance result is the blocker, not numerical correctness.
 
 Conclusion: do not continue with naive residual dZ launch tiling. The next higher-probability optimization is either CUDA Graph capture for the repeated residual-backward launch chain, or a real fused residual-backward kernel that removes multiple global-memory round trips instead of only changing the launch geometry.
+## Rejected backward CUDA Graph attempt, 2026-07-07
+
+A local optional `--backward-graph` path was prototyped for the single-GPU, no-profile, no-callback case. The first step used the normal launcher to warm cuBLASLt plans, then later steps captured and replayed the backward graph. Correctness was fine, but throughput did not improve, so the source change was reverted.
+
+Verification before rejection:
+
+- Docker build target: `mgt_native_train_smoke`, `test_cuda_train_step_smoke`, `test_cuda_mlp_backward_mixed_precision_error` passed.
+- CTest filter `cuda_mlp_backward_mixed_precision_error|cuda_train_step_smoke|native_train_backward_graph_smoke`: 3/3 passed.
+- Both A/B runs ended with the same final loss: `295.444`.
+
+Local A/B workload: world_size=1, batch=24576, tile=48, workspace=16 MiB, cuBLASLt autotune disabled, steps=12.
+
+| Variant | Window | Throughput, states/s | Step ms | Backward ms | Graph captured | Loss range |
+| --- | --- | ---: | ---: | ---: | ---: | --- |
+| Baseline | steps 1..11 | 289217.57 | 84.97 | 82.85 | 0 | 291.078827..296.814453 |
+| Baseline | last 6 | 289524.53 | 84.88 | 82.75 | 0 | 291.078827..295.443909 |
+| Backward graph | steps 1..11 | 282123.40 | 87.11 | 85.00 | 1 | 291.078827..296.814453 |
+| Backward graph | last 6 | 288477.23 | 85.19 | 83.06 | 1 | 291.078827..295.443909 |
+
+Conclusion: plain CUDA Graph capture around the current backward launcher is not worth keeping. It does not remove enough work because the heavy stages are still cuBLASLt GEMMs and memory-heavy activation-gradient kernels. The next useful graph/fusion work should be lower-level: either capture a larger steady-state step with communication constraints solved, or fuse residual-backward kernels so the graph reduces real memory traffic and launch count instead of only wrapping the existing sequence.
