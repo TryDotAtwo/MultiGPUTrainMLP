@@ -280,3 +280,39 @@ Local A/B workload: world_size=1, batch=24576, tile=48, workspace=16 MiB, cuBLAS
 | Half-only skip prototype | last 6 | 268169.59 | 91.64 | 89.33 | 291.098694..295.474365 |
 
 Conclusion: replacing the float `dzfc2` path with half-only bias and skip kernels made the residual backward path slower. The likely issue is that the custom bias reduction and extra half buffer cost more than the saved float write/read on this shape. The source change was reverted. The next fusion attempt should avoid adding another reduction kernel; it needs to combine existing elementwise work with a downstream operation or target a larger GEMM-side layout issue.
+
+## Fused residual fc1 epilogue, 2026-07-07
+
+Implemented a first real GEMM-side fusion for the half-linear training path:
+
+- residual `fc1` forward now uses a cached cuBLASLt half-output GEMM with fused `bias + ReLU` epilogue when `hd2` is aligned;
+- the output buffer is written directly as half activation for the following `fc2` GEMM;
+- backward `fc1 dZ` reads the ReLU mask from that half activation, so the fast path no longer needs the residual `fc1` float activation/preactivation write;
+- the cuBLASLt bias epilogue is run through the transposed column-major view of the same row-major buffer, because cuBLASLt broadcasts bias over D rows;
+- plan descriptors are cached by `(m, n, k, workspace_bytes)` and only the per-block bias pointer is updated in the hot path.
+
+Correctness verification:
+
+- Docker CUDA build `build-fused-epilogue-docker`: passed.
+- Focused CTest filter `cuda_mlp_backward_smoke|cuda_mlp_backward_mixed_precision_error|cuda_train_step_smoke|native_train_profile_smoke`: 4/4 passed.
+- Full CTest in the GPU container: 34/34 passed, including `native_train_output_dim3_smoke` and `native_train_output_dim128_smoke`.
+
+Local one-GPU no-profile workload: world_size=1, batch=24576, tile=48, workspace=16 MiB, cuBLASLt autotune enabled, steps=20, steady window steps 1..19.
+
+| Variant | Throughput, states/s | Step ms | Backward ms | Loss range |
+| --- | ---: | ---: | ---: | --- |
+| Previous stable baseline | 309296.17 | 79.60 | 77.37 | 291.078827..296.950378 |
+| Fused fc1 epilogue, uncached descriptors | 310363.87 | 79.18 | 77.15 | 291.078827..296.950378 |
+| Fused fc1 epilogue, cached descriptors | 309358.18 | 79.44 | 77.40 | 291.078827..296.950378 |
+
+Profile-mode attribution for the cached path, batch=24576, tile=48, profile enabled, steps 1..7:
+
+| Stage | Avg ms |
+| --- | ---: |
+| Residual forward | 9.99 |
+| Residual backward total | 28.77 |
+| FC1 dZ | 3.68 |
+| FC1 grad weight | 3.06 |
+| Input gradient | 26.23 |
+
+Interpretation: the fusion is numerically safe and removes a real residual `fc1` global-memory pass, but the headline local throughput is neutral within noise. It is worth keeping as a structural step toward a fused residual block, not as a claimed throughput win. The next higher-impact fusion target is `fc2 dZ + residual skip/relu state` and/or moving more of the residual block to a controlled CUTLASS epilogue, because input gradient and residual backward still dominate.

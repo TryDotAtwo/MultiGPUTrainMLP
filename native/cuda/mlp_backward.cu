@@ -704,6 +704,131 @@ mgt::Status LtMatmulHalfToFloat(cublasLtHandle_t handle,
     return status == CUBLAS_STATUS_SUCCESS ? mgt::Status::kOk : mgt::Status::kCudaFailure;
 }
 
+
+
+struct LtHalfReluBiasPlanKey {
+    std::uint32_t m;
+    std::uint32_t n;
+    std::uint32_t k;
+    std::uint64_t workspace_bytes;
+};
+
+struct LtHalfReluBiasPlanCacheEntry {
+    bool initialized = false;
+    LtHalfReluBiasPlanKey key{};
+    cublasLtMatmulDesc_t op_desc = nullptr;
+    cublasLtMatrixLayout_t a_desc = nullptr;
+    cublasLtMatrixLayout_t b_desc = nullptr;
+    cublasLtMatrixLayout_t d_desc = nullptr;
+    cublasLtMatmulAlgo_t algo{};
+    bool has_algo = false;
+    std::size_t algo_workspace_bytes = 0;
+};
+
+inline constexpr std::uint32_t kLtHalfReluBiasPlanCacheCapacity = 64;
+LtHalfReluBiasPlanCacheEntry g_lt_half_relu_bias_plan_cache[kLtHalfReluBiasPlanCacheCapacity]{};
+
+bool SameLtHalfReluBiasPlanKey(const LtHalfReluBiasPlanKey& lhs, const LtHalfReluBiasPlanKey& rhs) {
+    return lhs.m == rhs.m && lhs.n == rhs.n && lhs.k == rhs.k && lhs.workspace_bytes == rhs.workspace_bytes;
+}
+
+mgt::Status InitLtHalfReluBiasPlan(cublasLtHandle_t handle, LtHalfReluBiasPlanCacheEntry* entry, const LtHalfReluBiasPlanKey& key, const __half* bias) {
+    if (entry == nullptr || handle == nullptr || bias == nullptr) return mgt::Status::kInvalidConfig;
+    cublasLtMatmulDesc_t op_desc = nullptr;
+    cublasLtMatrixLayout_t a_desc = nullptr;
+    cublasLtMatrixLayout_t b_desc = nullptr;
+    cublasLtMatrixLayout_t d_desc = nullptr;
+    cublasLtMatmulPreference_t preference = nullptr;
+    const cublasOperation_t op_n = CUBLAS_OP_N;
+    const cublasLtEpilogue_t epilogue = CUBLASLT_EPILOGUE_RELU_BIAS;
+    cublasStatus_t status = cublasLtMatmulDescCreate(&op_desc, CUBLAS_COMPUTE_32F, CUDA_R_32F);
+    if (status == CUBLAS_STATUS_SUCCESS) status = cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_TRANSA, &op_n, sizeof(op_n));
+    if (status == CUBLAS_STATUS_SUCCESS) status = cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_TRANSB, &op_n, sizeof(op_n));
+    if (status == CUBLAS_STATUS_SUCCESS) status = cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_EPILOGUE, &epilogue, sizeof(epilogue));
+    if (status == CUBLAS_STATUS_SUCCESS) status = cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_BIAS_POINTER, &bias, sizeof(bias));
+    if (status == CUBLAS_STATUS_SUCCESS) status = cublasLtMatrixLayoutCreate(&a_desc, CUDA_R_16F, static_cast<std::uint64_t>(key.n), static_cast<std::uint64_t>(key.k), static_cast<std::int64_t>(key.n));
+    if (status == CUBLAS_STATUS_SUCCESS) status = cublasLtMatrixLayoutCreate(&b_desc, CUDA_R_16F, static_cast<std::uint64_t>(key.k), static_cast<std::uint64_t>(key.m), static_cast<std::int64_t>(key.k));
+    if (status == CUBLAS_STATUS_SUCCESS) status = cublasLtMatrixLayoutCreate(&d_desc, CUDA_R_16F, static_cast<std::uint64_t>(key.n), static_cast<std::uint64_t>(key.m), static_cast<std::int64_t>(key.n));
+    if (status != CUBLAS_STATUS_SUCCESS) {
+        DestroyLtMatmulPlan(op_desc, a_desc, b_desc, d_desc);
+        return mgt::Status::kCudaFailure;
+    }
+
+    entry->key = key;
+    entry->op_desc = op_desc;
+    entry->a_desc = a_desc;
+    entry->b_desc = b_desc;
+    entry->d_desc = d_desc;
+    entry->has_algo = false;
+    entry->algo_workspace_bytes = 0;
+
+    if (key.workspace_bytes > 0U && cublasLtMatmulPreferenceCreate(&preference) == CUBLAS_STATUS_SUCCESS) {
+        const std::size_t max_workspace_bytes = static_cast<std::size_t>(key.workspace_bytes);
+        if (cublasLtMatmulPreferenceSetAttribute(preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &max_workspace_bytes, sizeof(max_workspace_bytes)) == CUBLAS_STATUS_SUCCESS) {
+            cublasLtMatmulHeuristicResult_t heuristic{};
+            int returned = 0;
+            if (cublasLtMatmulAlgoGetHeuristic(handle, op_desc, a_desc, b_desc, d_desc, d_desc, preference, 1, &heuristic, &returned) == CUBLAS_STATUS_SUCCESS && returned > 0 && heuristic.workspaceSize <= max_workspace_bytes) {
+                entry->algo = heuristic.algo;
+                entry->algo_workspace_bytes = heuristic.workspaceSize;
+                entry->has_algo = true;
+            }
+        }
+        cublasLtMatmulPreferenceDestroy(preference);
+    }
+
+    entry->initialized = true;
+    return mgt::Status::kOk;
+}
+
+mgt::Status GetLtHalfReluBiasPlan(cublasLtHandle_t handle, const LtHalfReluBiasPlanKey& key, const __half* bias, LtHalfReluBiasPlanCacheEntry** out) {
+    if (out == nullptr) return mgt::Status::kInvalidConfig;
+    for (std::uint32_t i = 0; i < kLtHalfReluBiasPlanCacheCapacity; ++i) {
+        LtHalfReluBiasPlanCacheEntry& entry = g_lt_half_relu_bias_plan_cache[i];
+        if (entry.initialized && SameLtHalfReluBiasPlanKey(entry.key, key)) {
+            *out = &entry;
+            return mgt::Status::kOk;
+        }
+    }
+    for (std::uint32_t i = 0; i < kLtHalfReluBiasPlanCacheCapacity; ++i) {
+        LtHalfReluBiasPlanCacheEntry& entry = g_lt_half_relu_bias_plan_cache[i];
+        if (!entry.initialized) {
+            const mgt::Status status = InitLtHalfReluBiasPlan(handle, &entry, key, bias);
+            if (status != mgt::Status::kOk) return status;
+            *out = &entry;
+            return mgt::Status::kOk;
+        }
+    }
+    return mgt::Status::kInvalidConfig;
+}
+mgt::Status LtMatmulHalfToHalfReluBias(cublasLtHandle_t handle,
+                                       cudaStream_t stream,
+                                       void* lt_workspace,
+                                       std::uint64_t lt_workspace_bytes,
+                                       const __half* a,
+                                       const __half* b,
+                                       const __half* bias,
+                                       __half* d,
+                                       std::uint32_t m,
+                                       std::uint32_t n,
+                                       std::uint32_t k) {
+    if (handle == nullptr || a == nullptr || b == nullptr || bias == nullptr || d == nullptr || m == 0U || n == 0U || k == 0U) return mgt::Status::kInvalidConfig;
+    if (lt_workspace_bytes > 0U && lt_workspace == nullptr) return mgt::Status::kInvalidConfig;
+
+    const LtHalfReluBiasPlanKey key{m, n, k, lt_workspace_bytes};
+    LtHalfReluBiasPlanCacheEntry* plan = nullptr;
+    const mgt::Status plan_status = GetLtHalfReluBiasPlan(handle, key, bias, &plan);
+    if (plan_status != mgt::Status::kOk) return plan_status;
+    cublasStatus_t status = cublasLtMatmulDescSetAttribute(plan->op_desc, CUBLASLT_MATMUL_DESC_BIAS_POINTER, &bias, sizeof(bias));
+    if (status != CUBLAS_STATUS_SUCCESS) return mgt::Status::kCudaFailure;
+
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+    const cublasLtMatmulAlgo_t* algo = plan->has_algo ? &plan->algo : nullptr;
+    void* workspace = plan->has_algo ? lt_workspace : nullptr;
+    const std::size_t workspace_bytes = plan->has_algo ? plan->algo_workspace_bytes : 0U;
+    status = cublasLtMatmul(handle, plan->op_desc, &alpha, b, plan->a_desc, a, plan->b_desc, &beta, d, plan->d_desc, d, plan->d_desc, algo, workspace, workspace_bytes, stream);
+    return status == CUBLAS_STATUS_SUCCESS ? mgt::Status::kOk : mgt::Status::kCudaFailure;
+}
 mgt::Status GemmRowMajorHalfToFloat(cublasLtHandle_t lt, cudaStream_t stream, void* lt_workspace, std::uint64_t lt_workspace_bytes, const __half* a, const __half* b, float* c, std::uint32_t m, std::uint32_t n, std::uint32_t k, float beta = 0.0f) {
     return LtMatmulHalfToFloat(lt, stream, lt_workspace, lt_workspace_bytes, a, b, c, m, k, k, n, m, n, CUBLAS_OP_N, CUBLAS_OP_N, beta, HalfGemmOpKind::kForward);
 }
@@ -1106,6 +1231,16 @@ __global__ void ResidualDzFc1HalfKernel(CudaMlpShape shape, std::uint32_t sample
     dzfc1[item] = v;
     dzfc1_half[item] = __float2half(v);
 }
+
+__global__ void ResidualDzFc1FromHalfActivationKernel(std::uint32_t samples, std::uint32_t hd2, const __half* activation, const float* dra1, float* dzfc1, __half* dzfc1_half) {
+    const std::uint64_t item = static_cast<std::uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const std::uint64_t total = static_cast<std::uint64_t>(samples) * hd2;
+    if (item >= total) return;
+    const float grad = __half2float(activation[item]) > 0.0f ? 1.0f : 0.0f;
+    const float v = dra1[item] * grad;
+    dzfc1[item] = v;
+    dzfc1_half[item] = __float2half(v);
+}
 __global__ void HiddenDz2Kernel(CudaMlpShape shape, const float* z2, const float* dcur, std::uint32_t samples, float* dz2) {
     const std::uint64_t item = static_cast<std::uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     const std::uint64_t total = static_cast<std::uint64_t>(samples) * shape.hd2;
@@ -1430,6 +1565,7 @@ mgt::Status LaunchMlpLossGradKernelWithWorkspaceInternal(const CudaMlpShape& sha
 
     const DeviceLaunchConfig h1_launch = Build1DLaunchConfig(static_cast<std::uint64_t>(sample_count) * shape.hd1, 128);
     const DeviceLaunchConfig h2_launch = Build1DLaunchConfig(static_cast<std::uint64_t>(sample_count) * shape.hd2, 128);
+    const bool use_residual_fc1_fused_epilogue = use_half_linear && (shape.hd2 % 8U) == 0U;
     if (use_half_linear && external_weights_half == nullptr) {
         const DeviceLaunchConfig weight_half_launch = Build1DLaunchConfig(param_count, 256);
         FloatToHalfKernel<<<weight_half_launch.blocks, weight_half_launch.threads, 0, stream>>>(device_weights, w.weights_half, param_count);
@@ -1467,15 +1603,16 @@ mgt::Status LaunchMlpLossGradKernelWithWorkspaceInternal(const CudaMlpShape& sha
         __half* block_ra1_half = use_half_linear ? w.ra1_half + static_cast<std::uint64_t>(block) * batch_h2 : nullptr;
         __half* block_out_half = use_half_linear ? w.block_inputs_half + static_cast<std::uint64_t>(block + 1U) * batch_h2 : nullptr;
         if (use_half_linear) {
-            if (GemmRowMajorHalfToFloat(blas_lt, stream, lt_workspace_base, lt_workspace_bytes, block_in_half, w.weights_half + ResidualFc1Weight(shape, block), block_rz1, sample_count, shape.hd2, shape.hd2) != mgt::Status::kOk) return mgt::Status::kCudaFailure;
-        } else {
-            if (GemmRowMajor(blas, block_in, device_weights + ResidualFc1Weight(shape, block), block_rz1, sample_count, shape.hd2, shape.hd2) != mgt::Status::kOk) return mgt::Status::kCudaFailure;
-        }
-        if (use_half_linear) {
-            AddBiasReluHalfKernel<<<h2_launch.blocks, h2_launch.threads, 0, stream>>>(block_rz1, device_weights + ResidualFc1Bias(shape, block), sample_count, shape.hd2, block_ra1_half);
-            if (!LaunchOk()) return mgt::Status::kCudaFailure;
+            if (use_residual_fc1_fused_epilogue) {
+                if (LtMatmulHalfToHalfReluBias(blas_lt, stream, lt_workspace_base, lt_workspace_bytes, block_in_half, w.weights_half + ResidualFc1Weight(shape, block), w.weights_half + ResidualFc1Bias(shape, block), block_ra1_half, sample_count, shape.hd2, shape.hd2) != mgt::Status::kOk) return mgt::Status::kCudaFailure;
+            } else {
+                if (GemmRowMajorHalfToFloat(blas_lt, stream, lt_workspace_base, lt_workspace_bytes, block_in_half, w.weights_half + ResidualFc1Weight(shape, block), block_rz1, sample_count, shape.hd2, shape.hd2) != mgt::Status::kOk) return mgt::Status::kCudaFailure;
+                AddBiasReluHalfKernel<<<h2_launch.blocks, h2_launch.threads, 0, stream>>>(block_rz1, device_weights + ResidualFc1Bias(shape, block), sample_count, shape.hd2, block_ra1_half);
+                if (!LaunchOk()) return mgt::Status::kCudaFailure;
+            }
             if (GemmRowMajorHalfToFloat(blas_lt, stream, lt_workspace_base, lt_workspace_bytes, block_ra1_half, w.weights_half + ResidualFc2Weight(shape, block), block_rz2, sample_count, shape.hd2, shape.hd2) != mgt::Status::kOk) return mgt::Status::kCudaFailure;
         } else {
+            if (GemmRowMajor(blas, block_in, device_weights + ResidualFc1Weight(shape, block), block_rz1, sample_count, shape.hd2, shape.hd2) != mgt::Status::kOk) return mgt::Status::kCudaFailure;
             AddBiasReluKernel<<<h2_launch.blocks, h2_launch.threads, 0, stream>>>(block_rz1, device_weights + ResidualFc1Bias(shape, block), sample_count, shape.hd2);
             if (!LaunchOk()) return mgt::Status::kCudaFailure;
             if (GemmRowMajor(blas, block_rz1, device_weights + ResidualFc2Weight(shape, block), block_rz2, sample_count, shape.hd2, shape.hd2) != mgt::Status::kOk) return mgt::Status::kCudaFailure;
@@ -1561,7 +1698,11 @@ mgt::Status LaunchMlpLossGradKernelWithWorkspaceInternal(const CudaMlpShape& sha
         if (profile != nullptr && stage_timer.MarkAdd(&profile->residual_fc2_backprop_ms, &profile->residual_backward_ms) != mgt::Status::kOk) return mgt::Status::kCudaFailure;
 
         if (use_half_linear) {
-            ResidualDzFc1HalfKernel<<<h2_launch.blocks, h2_launch.threads, 0, stream>>>(shape, sample_count, block, w.rz1, w.dra1, w.dzfc1, w.h2_right_half);
+            if (use_residual_fc1_fused_epilogue) {
+                ResidualDzFc1FromHalfActivationKernel<<<h2_launch.blocks, h2_launch.threads, 0, stream>>>(sample_count, shape.hd2, block_ra1_half, w.dra1, w.dzfc1, w.h2_right_half);
+            } else {
+                ResidualDzFc1HalfKernel<<<h2_launch.blocks, h2_launch.threads, 0, stream>>>(shape, sample_count, block, w.rz1, w.dra1, w.dzfc1, w.h2_right_half);
+            }
             if (!LaunchOk()) return mgt::Status::kCudaFailure;
             if (profile != nullptr && stage_timer.MarkAdd(&profile->residual_fc1_dz_ms, &profile->residual_backward_ms) != mgt::Status::kOk) return mgt::Status::kCudaFailure;
             if (GemmGradWeightsHalf(blas_lt, stream, lt_workspace_base, lt_workspace_bytes, block_in_half, w.h2_right_half, device_grad + ResidualFc1Weight(shape, block), sample_count, shape.hd2, shape.hd2) != mgt::Status::kOk) return mgt::Status::kCudaFailure;
