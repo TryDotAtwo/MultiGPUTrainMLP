@@ -924,6 +924,25 @@ __global__ void BuildInputPositionTileOneHotHalfKernel(CudaMlpShape shape, const
     input_one_hot[item] = (pos < shape.state_len && static_cast<std::uint32_t>(states[b].v[pos]) == value) ? __float2half(1.0f) : __float2half(0.0f);
 }
 
+__global__ void BuildInputPositionTileOneHotBinaryHalf2Kernel(
+    CudaMlpShape shape,
+    const mgt::TrainStateStorage* states,
+    std::uint32_t samples,
+    std::uint32_t first_pos,
+    std::uint32_t tile_positions,
+    __half* input_one_hot) {
+    const std::uint64_t total = static_cast<std::uint64_t>(samples) * tile_positions;
+    const std::uint64_t item = static_cast<std::uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (item >= total) return;
+    const std::uint32_t tile_pos = static_cast<std::uint32_t>(item % tile_positions);
+    const std::uint32_t b = static_cast<std::uint32_t>(item / tile_positions);
+    const std::uint32_t pos = first_pos + tile_pos;
+    const std::uint32_t value = pos < shape.state_len ? static_cast<std::uint32_t>(states[b].v[pos]) : 0xffffffffU;
+    // One uint32 store writes the pair [value==0, value==1] as two IEEE half values.
+    const std::uint32_t packed = value == 0U ? 0x00003c00U : (value == 1U ? 0x3c000000U : 0U);
+    reinterpret_cast<std::uint32_t*>(input_one_hot)[item] = packed;
+}
+
 __global__ void FloatToHalfKernel(const float* src, __half* dst, std::uint64_t count) {
     const std::uint64_t item = static_cast<std::uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (item >= count) return;
@@ -1775,7 +1794,12 @@ mgt::Status LaunchMlpLossGradKernelWithWorkspaceInternal(const CudaMlpShape& sha
             float* grad_tile = device_grad + static_cast<std::uint64_t>(first_pos) * shape.state_value_pad * shape.hd1;
             if (use_half_input_grad) {
                 __half* input_one_hot_half = reinterpret_cast<__half*>(w.input_one_hot);
-                BuildInputPositionTileOneHotHalfKernel<<<tile_launch.blocks, tile_launch.threads, 0, stream>>>(shape, device_states, sample_count, first_pos, active_positions, input_one_hot_half);
+                if (shape.state_value_pad == 2U) {
+                    const DeviceLaunchConfig binary_tile_launch = Build1DLaunchConfig(static_cast<std::uint64_t>(sample_count) * active_positions, 256);
+                    BuildInputPositionTileOneHotBinaryHalf2Kernel<<<binary_tile_launch.blocks, binary_tile_launch.threads, 0, stream>>>(shape, device_states, sample_count, first_pos, active_positions, input_one_hot_half);
+                } else {
+                    BuildInputPositionTileOneHotHalfKernel<<<tile_launch.blocks, tile_launch.threads, 0, stream>>>(shape, device_states, sample_count, first_pos, active_positions, input_one_hot_half);
+                }
                 if (!LaunchOk()) return mgt::Status::kCudaFailure;
                 if (GemmGradWeightsHalf(blas_lt, stream, lt_workspace_base, lt_workspace_bytes, input_one_hot_half, w.dz1_half, grad_tile, sample_count, tile_cols, shape.hd1, HalfGemmOpKind::kInputEmbeddingGrad) != mgt::Status::kOk) return mgt::Status::kCudaFailure;
             } else {
