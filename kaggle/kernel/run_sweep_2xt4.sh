@@ -18,7 +18,8 @@ if command -v nvidia-smi >/dev/null 2>&1; then
 else
   echo "preflight_nvidia_smi_missing=1"
 fi
-cmake -S native -B "$build_dir" -DMGT_ENABLE_CUDA=ON -DMGT_ENABLE_NCCL=ON -DCMAKE_CUDA_ARCHITECTURES=${MGT_CUDA_ARCH} -DMGT_CUTLASS_ROOT="${CUTLASS_ROOT:-/opt/cutlass}" -DMGT_AUTO_CUTLASS_HALF_GEMM=${MGT_AUTO_CUTLASS_HALF_GEMM:-ON}
+base_cutlass_kinds="${MGT_CUTLASS_HALF_GEMM_KINDS:-input_embedding_grad}"
+cmake -S native -B "$build_dir" -DMGT_ENABLE_CUDA=ON -DMGT_ENABLE_NCCL=ON -DCMAKE_CUDA_ARCHITECTURES=${MGT_CUDA_ARCH} -DMGT_CUTLASS_ROOT="${CUTLASS_ROOT:-/opt/cutlass}" -DMGT_AUTO_CUTLASS_HALF_GEMM=${MGT_AUTO_CUTLASS_HALF_GEMM:-ON} -DMGT_CUTLASS_HALF_GEMM_KINDS="$base_cutlass_kinds"
 if [ "${MGT_SWEEP_RUN_CTEST:-1}" = "1" ]; then
   cmake --build "$build_dir" --config Release
   ctest --test-dir "$build_dir" -R 'cuda_compile|cuda_random_walk_smoke|cuda_adamw_smoke|cuda_mlp_forward_smoke|cuda_mlp_backward_smoke|cuda_train_step_smoke|nccl_single_rank_smoke|nccl_two_device_smoke|native_train_smoke|native_train_profile_smoke|native_train_input_grad_.*backend|native_train_resume_smoke|native_train_artifacts' --output-on-failure -C Release
@@ -26,7 +27,7 @@ else
   cmake --build "$build_dir" --config Release --target mgt_native_train
 fi
 cat > "$sweep_root/sweep_manifest.tsv" <<'EOF'
-config_id	batch_size	input_grad_position_tile	lt_workspace_bytes	allreduce_bucket_bytes	backward_profile	overlap_allreduce	input_grad_sparse
+config_id	batch_size	input_grad_position_tile	lt_workspace_bytes	allreduce_bucket_bytes	backward_profile	overlap_allreduce	input_grad_sparse	cutlass_half_gemm_kinds
 EOF
 default_configs=$(cat <<'EOF'
 b49152_t36_ws0_bucket4m 49152 36 0 4194304 0 1 0
@@ -59,7 +60,8 @@ b53248_t36_ws32m_profile 53248 36 33554432 4194304 1 1 0
 EOF
 )
 configs_text="${MGT_SWEEP_CONFIGS:-$default_configs}"
-while read -r config_id batch_size position_tile lt_workspace bucket_bytes backward_profile overlap_allreduce input_grad_sparse; do
+configs_text="${configs_text//\\n/$'\n'}"
+while read -r config_id batch_size position_tile lt_workspace bucket_bytes backward_profile overlap_allreduce input_grad_sparse cutlass_kinds; do
   if [ -z "${config_id:-}" ]; then
     continue
   fi
@@ -67,13 +69,25 @@ while read -r config_id batch_size position_tile lt_workspace bucket_bytes backw
     \#*) continue ;;
   esac
   input_grad_sparse="${input_grad_sparse:-0}"
+  cutlass_kinds="${cutlass_kinds:-$base_cutlass_kinds}"
+  cutlass_safe="${cutlass_kinds//,/__}"
+  cutlass_safe="${cutlass_safe//;/__}"
+  cutlass_safe="${cutlass_safe// /}"
+  selector_build_dir="$build_dir"
+  if [ "$cutlass_kinds" != "$base_cutlass_kinds" ]; then
+    selector_build_dir="${build_dir}-cutlass-${cutlass_safe}"
+    if [ ! -x "$selector_build_dir/mgt_native_train" ]; then
+      cmake -S native -B "$selector_build_dir" -DMGT_ENABLE_CUDA=ON -DMGT_ENABLE_NCCL=ON -DCMAKE_CUDA_ARCHITECTURES=${MGT_CUDA_ARCH} -DMGT_CUTLASS_ROOT="${CUTLASS_ROOT:-/opt/cutlass}" -DMGT_AUTO_CUTLASS_HALF_GEMM=${MGT_AUTO_CUTLASS_HALF_GEMM:-ON} -DMGT_CUTLASS_HALF_GEMM_KINDS="$cutlass_kinds"
+      cmake --build "$selector_build_dir" --config Release --target mgt_native_train
+    fi
+  fi
   run_dir="$sweep_root/$config_id"
   mkdir -p "$run_dir"
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$config_id" "$batch_size" "$position_tile" "$lt_workspace" "$bucket_bytes" "$backward_profile" "$overlap_allreduce" "$input_grad_sparse" >> "$sweep_root/sweep_manifest.tsv"
-  echo "sweep_config_start id=${config_id} batch=${batch_size} tile=${position_tile} workspace=${lt_workspace} bucket=${bucket_bytes} profile=${backward_profile} overlap=${overlap_allreduce} sparse=${input_grad_sparse}"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$config_id" "$batch_size" "$position_tile" "$lt_workspace" "$bucket_bytes" "$backward_profile" "$overlap_allreduce" "$input_grad_sparse" "$cutlass_kinds" >> "$sweep_root/sweep_manifest.tsv"
+  echo "sweep_config_start id=${config_id} batch=${batch_size} tile=${position_tile} workspace=${lt_workspace} bucket=${bucket_bytes} profile=${backward_profile} overlap=${overlap_allreduce} sparse=${input_grad_sparse} cutlass=${cutlass_kinds}"
   set +e
   MGT_CONFIG_ID="$config_id" \
-  MGT_BUILD_DIR="$build_dir" \
+  MGT_BUILD_DIR="$selector_build_dir" \
   MGT_RUN_ROOT="$run_dir" \
   MGT_SKIP_BUILD=1 \
   MGT_PERF_RUN=1 \
@@ -94,6 +108,7 @@ while read -r config_id batch_size position_tile lt_workspace bucket_bytes backw
   MGT_LT_AUTOTUNE_WARMUPS="${MGT_LT_AUTOTUNE_WARMUPS:-1}" \
   MGT_LT_AUTOTUNE_ITERS="${MGT_LT_AUTOTUNE_ITERS:-2}" \
   MGT_OUTPUT_DIM="${MGT_OUTPUT_DIM:-1}" \
+  MGT_CUTLASS_HALF_GEMM_KINDS="$cutlass_kinds" \
   bash kaggle/kernel/run_ranks_2xt4.sh > "$run_dir/launch.log" 2>&1
   code=$?
   set -e
@@ -139,10 +154,12 @@ print("sweep_summary=", json.dumps({
     "failed_count": summary["failed_count"],
     "best_config_id": summary["best"].get("config_id") if summary["best"] else None,
     "best_avg_throughput_states_s": summary["best"].get("avg_throughput_states_s") if summary["best"] else None,
+    "best_cutlass_half_gemm_kinds": summary["best"].get("config", {}).get("cutlass_half_gemm_kinds") if summary["best"] else None,
 }, sort_keys=True), flush=True)
 for row in ok_rows:
-    print("sweep_row\t{config_id}\t{avg:.2f}\t{step:.3f}\t{walk:.3f}\t{backward:.3f}\t{allreduce:.3f}\t{adam:.3f}".format(
+    print("sweep_row\t{config_id}\t{cutlass}\t{avg:.2f}\t{step:.3f}\t{walk:.3f}\t{backward:.3f}\t{allreduce:.3f}\t{adam:.3f}".format(
         config_id=row["config_id"],
+        cutlass=row.get("config", {}).get("cutlass_half_gemm_kinds", ""),
         avg=row.get("avg_throughput_states_s", 0.0),
         step=row.get("avg_step_ms", 0.0),
         walk=row.get("avg_walk_ms", 0.0),
