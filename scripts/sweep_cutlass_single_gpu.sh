@@ -64,7 +64,7 @@ while read -r config_id cutlass_kinds; do
   case "$config_id" in
     \#*) continue ;;
   esac
-  cutlass_kinds="${cutlass_kinds:-input_embedding_grad}"
+  cutlass_kinds="${cutlass_kinds:-input_embedding_grad,forward}"
   run_dir="$sweep_root/$config_id"
   mkdir -p "$run_dir"
   build_dir="$(build_for_selector "$cutlass_kinds")"

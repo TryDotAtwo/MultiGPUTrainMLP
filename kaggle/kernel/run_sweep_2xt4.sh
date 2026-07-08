@@ -18,7 +18,7 @@ if command -v nvidia-smi >/dev/null 2>&1; then
 else
   echo "preflight_nvidia_smi_missing=1"
 fi
-base_cutlass_kinds="${MGT_CUTLASS_HALF_GEMM_KINDS:-input_embedding_grad}"
+base_cutlass_kinds="${MGT_CUTLASS_HALF_GEMM_KINDS:-input_embedding_grad,forward}"
 cmake -S native -B "$build_dir" -DMGT_ENABLE_CUDA=ON -DMGT_ENABLE_NCCL=ON -DCMAKE_CUDA_ARCHITECTURES=${MGT_CUDA_ARCH} -DMGT_CUTLASS_ROOT="${CUTLASS_ROOT:-/opt/cutlass}" -DMGT_AUTO_CUTLASS_HALF_GEMM=${MGT_AUTO_CUTLASS_HALF_GEMM:-ON} -DMGT_CUTLASS_HALF_GEMM_KINDS="$base_cutlass_kinds"
 if [ "${MGT_SWEEP_RUN_CTEST:-1}" = "1" ]; then
   cmake --build "$build_dir" --config Release
