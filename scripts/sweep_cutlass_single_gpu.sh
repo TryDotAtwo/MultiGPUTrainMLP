@@ -57,7 +57,7 @@ build_for_selector() {
   printf '%s\n' "$build_dir"
 }
 
-while read -r config_id cutlass_kinds; do
+while read -r config_id cutlass_kinds config_batch_size config_position_tile config_lt_workspace config_backward_profile config_input_grad_sparse; do
   if [ -z "${config_id:-}" ]; then
     continue
   fi
@@ -68,12 +68,12 @@ while read -r config_id cutlass_kinds; do
   run_dir="$sweep_root/$config_id"
   mkdir -p "$run_dir"
   build_dir="$(build_for_selector "$cutlass_kinds")"
-  batch_size="${MGT_BATCH_SIZE:-24576}"
+  batch_size="${config_batch_size:-${MGT_BATCH_SIZE:-24576}}"
   steps="${MGT_SWEEP_STEPS:-8}"
-  position_tile="${MGT_INPUT_GRAD_POSITION_TILE:-48}"
-  lt_workspace="${MGT_LT_WORKSPACE_BYTES:-16777216}"
-  backward_profile="${MGT_BACKWARD_PROFILE:-0}"
-  input_grad_sparse="${MGT_INPUT_GRAD_SPARSE:-0}"
+  position_tile="${config_position_tile:-${MGT_INPUT_GRAD_POSITION_TILE:-32}}"
+  lt_workspace="${config_lt_workspace:-${MGT_LT_WORKSPACE_BYTES:-16777216}}"
+  backward_profile="${config_backward_profile:-${MGT_BACKWARD_PROFILE:-0}}"
+  input_grad_sparse="${config_input_grad_sparse:-${MGT_INPUT_GRAD_SPARSE:-0}}"
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$config_id" "$cutlass_kinds" "$batch_size" "$steps" "$position_tile" "$lt_workspace" "$backward_profile" "$input_grad_sparse" >> "$sweep_root/sweep_manifest.tsv"
   echo "single_cutlass_config_start id=${config_id} cutlass=${cutlass_kinds} batch=${batch_size} steps=${steps} tile=${position_tile} workspace=${lt_workspace} profile=${backward_profile} sparse=${input_grad_sparse}"
   set +e
