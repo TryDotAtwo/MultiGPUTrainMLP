@@ -189,14 +189,26 @@ mgt::Status NotifyGradientReady(MlpGradientReadyCallback callback,
 }
 
 struct BackwardStageTimer {
+    struct Entry {
+        cudaEvent_t begin = nullptr;
+        cudaEvent_t end = nullptr;
+        float* dst = nullptr;
+        float* total = nullptr;
+    };
+
+    static constexpr std::uint32_t kMaxEntries = 512;
+    cudaEvent_t first = nullptr;
     cudaEvent_t last = nullptr;
-    cudaEvent_t now = nullptr;
     cudaStream_t stream = nullptr;
     MlpBackwardProfile* profile = nullptr;
+    Entry entries[kMaxEntries]{};
+    std::uint32_t entry_count = 0;
 
     ~BackwardStageTimer() {
-        if (now != nullptr) cudaEventDestroy(now);
-        if (last != nullptr) cudaEventDestroy(last);
+        for (std::uint32_t i = 0; i < entry_count; ++i) {
+            if (entries[i].end != nullptr) cudaEventDestroy(entries[i].end);
+        }
+        if (first != nullptr) cudaEventDestroy(first);
     }
 
     mgt::Status Start(cudaStream_t target_stream, MlpBackwardProfile* target_profile) {
@@ -204,8 +216,8 @@ struct BackwardStageTimer {
         profile = target_profile;
         if (profile == nullptr) return mgt::Status::kOk;
         *profile = MlpBackwardProfile{};
-        if (cudaEventCreate(&last) != cudaSuccess) return mgt::Status::kCudaFailure;
-        if (cudaEventCreate(&now) != cudaSuccess) return mgt::Status::kCudaFailure;
+        if (cudaEventCreate(&first) != cudaSuccess) return mgt::Status::kCudaFailure;
+        last = first;
         if (cudaEventRecord(last, stream) != cudaSuccess) return mgt::Status::kCudaFailure;
         return mgt::Status::kOk;
     }
@@ -213,22 +225,41 @@ struct BackwardStageTimer {
     mgt::Status Mark(float* dst) {
         if (profile == nullptr) return mgt::Status::kOk;
         if (dst == nullptr) return mgt::Status::kInvalidConfig;
-        if (cudaEventRecord(now, stream) != cudaSuccess) return mgt::Status::kCudaFailure;
-        if (cudaEventSynchronize(now) != cudaSuccess) return mgt::Status::kCudaFailure;
-        if (cudaEventElapsedTime(dst, last, now) != cudaSuccess) return mgt::Status::kCudaFailure;
-        cudaEvent_t tmp = last;
+        if (entry_count >= kMaxEntries) return mgt::Status::kCapacityExceeded;
+        cudaEvent_t now = nullptr;
+        if (cudaEventCreate(&now) != cudaSuccess) return mgt::Status::kCudaFailure;
+        if (cudaEventRecord(now, stream) != cudaSuccess) {
+            cudaEventDestroy(now);
+            return mgt::Status::kCudaFailure;
+        }
+        entries[entry_count++] = Entry{last, now, dst, nullptr};
         last = now;
-        now = tmp;
         return mgt::Status::kOk;
     }
 
     mgt::Status MarkAdd(float* dst, float* total) {
         if (profile == nullptr) return mgt::Status::kOk;
-        float elapsed = 0.0f;
-        const mgt::Status status = Mark(&elapsed);
-        if (status != mgt::Status::kOk) return status;
-        if (dst != nullptr) *dst += elapsed;
-        if (total != nullptr) *total += elapsed;
+        if (entry_count >= kMaxEntries) return mgt::Status::kCapacityExceeded;
+        cudaEvent_t now = nullptr;
+        if (cudaEventCreate(&now) != cudaSuccess) return mgt::Status::kCudaFailure;
+        if (cudaEventRecord(now, stream) != cudaSuccess) {
+            cudaEventDestroy(now);
+            return mgt::Status::kCudaFailure;
+        }
+        entries[entry_count++] = Entry{last, now, dst, total};
+        last = now;
+        return mgt::Status::kOk;
+    }
+
+    mgt::Status Finish() {
+        if (profile == nullptr || entry_count == 0) return mgt::Status::kOk;
+        if (cudaEventSynchronize(last) != cudaSuccess) return mgt::Status::kCudaFailure;
+        for (std::uint32_t i = 0; i < entry_count; ++i) {
+            float elapsed = 0.0f;
+            if (cudaEventElapsedTime(&elapsed, entries[i].begin, entries[i].end) != cudaSuccess) return mgt::Status::kCudaFailure;
+            if (entries[i].dst != nullptr) *entries[i].dst += elapsed;
+            if (entries[i].total != nullptr) *entries[i].total += elapsed;
+        }
         return mgt::Status::kOk;
     }
 };
@@ -1871,6 +1902,7 @@ mgt::Status LaunchMlpLossGradKernelWithWorkspaceInternal(const CudaMlpShape& sha
     if (GemvBiasGrad(blas, w.dz1, w.ones, device_grad + InputBias(shape), sample_count, shape.hd1) != mgt::Status::kOk) return mgt::Status::kCudaFailure;
     if (NotifyGradientReady(gradient_ready, gradient_ready_user, &gradient_ready_id, 0ULL, InputBias(shape) + shape.hd1, stream) != mgt::Status::kOk) return mgt::Status::kCudaFailure;
     if (stage_timer.Mark(profile == nullptr ? nullptr : &profile->input_grad_ms) != mgt::Status::kOk) return mgt::Status::kCudaFailure;
+    if (stage_timer.Finish() != mgt::Status::kOk) return mgt::Status::kCudaFailure;
 
     return mgt::Status::kOk;
 }
