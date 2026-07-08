@@ -157,10 +157,16 @@ for run_dir in sorted(path for path in root.iterdir() if path.is_dir()):
         steady = [item for item in profile_rows if int(item.get("step", 0)) > 0]
         if steady:
             row["status"] = "ok" if code == 0 else "failed"
-            row["avg_step_ms"] = statistics.mean(float(item["milliseconds"]) for item in steady)
-            row["avg_throughput_states_s"] = statistics.mean(float(item["batch_states"]) * 1000.0 / float(item["milliseconds"]) for item in steady)
-            row["min_throughput_states_s"] = min(float(item["batch_states"]) * 1000.0 / float(item["milliseconds"]) for item in steady)
-            row["max_throughput_states_s"] = max(float(item["batch_states"]) * 1000.0 / float(item["milliseconds"]) for item in steady)
+            step_ms_values = [float(item["milliseconds"]) for item in steady]
+            throughput_values = [float(item["batch_states"]) * 1000.0 / float(item["milliseconds"]) for item in steady]
+            row["avg_step_ms"] = statistics.mean(step_ms_values)
+            row["median_step_ms"] = statistics.median(step_ms_values)
+            row["min_step_ms"] = min(step_ms_values)
+            row["max_step_ms"] = max(step_ms_values)
+            row["avg_throughput_states_s"] = statistics.mean(throughput_values)
+            row["median_throughput_states_s"] = statistics.median(throughput_values)
+            row["min_throughput_states_s"] = min(throughput_values)
+            row["max_throughput_states_s"] = max(throughput_values)
             row["input_grad_backend"] = steady[0].get("input_grad_backend")
             row["batch_states"] = int(steady[0].get("batch_states", 0))
             row["steady_steps"] = len(steady)
@@ -176,8 +182,8 @@ for run_dir in sorted(path for path in root.iterdir() if path.is_dir()):
             row["status"] = "failed"
     rows.append(row)
 
-ok_rows = [row for row in rows if row.get("status") == "ok" and "avg_throughput_states_s" in row]
-ok_rows.sort(key=lambda row: row["avg_throughput_states_s"], reverse=True)
+ok_rows = [row for row in rows if row.get("status") == "ok" and "median_throughput_states_s" in row]
+ok_rows.sort(key=lambda row: row["median_throughput_states_s"], reverse=True)
 summary = {
     "format": "mgt_single_gpu_cutlass_selector_sweep_v1",
     "run_root": str(root),
@@ -192,13 +198,16 @@ print("single_cutlass_summary=", json.dumps({
     "failed_count": summary["failed_count"],
     "best_config_id": summary["best"].get("config_id") if summary["best"] else None,
     "best_avg_throughput_states_s": summary["best"].get("avg_throughput_states_s") if summary["best"] else None,
+    "best_median_throughput_states_s": summary["best"].get("median_throughput_states_s") if summary["best"] else None,
     "best_cutlass_half_gemm_kinds": summary["best"].get("cutlass_half_gemm_kinds") if summary["best"] else None,
 }, sort_keys=True), flush=True)
 for row in ok_rows:
-    print("single_cutlass_row\t{config_id}\t{cutlass}\t{avg:.2f}\t{step:.3f}\t{walk:.3f}\t{backward:.3f}\t{input_grad:.3f}\t{adam:.3f}".format(
+    print("single_cutlass_row\t{config_id}\t{cutlass}\tmedian={median:.2f}\tavg={avg:.2f}\tstep_med={step_median:.3f}\tstep_avg={step:.3f}\twalk={walk:.3f}\tbackward={backward:.3f}\tinput_grad={input_grad:.3f}\tadam={adam:.3f}".format(
         config_id=row["config_id"],
         cutlass=row.get("cutlass_half_gemm_kinds", ""),
+        median=row.get("median_throughput_states_s", 0.0),
         avg=row.get("avg_throughput_states_s", 0.0),
+        step_median=row.get("median_step_ms", 0.0),
         step=row.get("avg_step_ms", 0.0),
         walk=row.get("avg_walk_ms", 0.0),
         backward=row.get("avg_backward_ms", 0.0),
