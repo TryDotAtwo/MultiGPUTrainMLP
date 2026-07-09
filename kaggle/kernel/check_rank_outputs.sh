@@ -6,6 +6,15 @@ if [ "$world_size" -lt 1 ]; then
   echo "world_size must be positive" >&2
   exit 1
 fi
+if [ "${MGT_EXPECT_NCCL:-auto}" = "auto" ]; then
+  if [ "$world_size" -gt 1 ]; then
+    expect_nccl=1
+  else
+    expect_nccl=0
+  fi
+else
+  expect_nccl="$MGT_EXPECT_NCCL"
+fi
 seen=""
 for rank in $(seq 0 $((world_size - 1))); do
   run_dir="$root/rank${rank}"
@@ -30,9 +39,11 @@ for rank in $(seq 0 $((world_size - 1))); do
   grep -q "DEVICE_ID=${rank}" "$run_dir/metadata.env"
   grep -q 'MODEL_MODE=MLP2RB' "$run_dir/metadata.env"
   grep -q "OUTPUT_DIM=${MGT_OUTPUT_DIM:-1}" "$run_dir/metadata.env"
-  grep -q 'NCCL_ENABLED=1' "$run_dir/metadata.env"
+  if [ "$expect_nccl" = "1" ]; then
+    grep -q 'NCCL_ENABLED=1' "$run_dir/metadata.env"
+    grep -q 'nccl=1' "$run_dir/train.log"
+  fi
   grep -q 'phase=train' "$run_dir/train.log"
-  grep -q 'nccl=1' "$run_dir/train.log"
   if [ "$artifacts_written" = "1" ]; then
     grep -q '"format": "stream1_weights"' "$run_dir/weights/manifest.json"
     grep -q '"dtype": "fp16"' "$run_dir/weights/manifest.json"
@@ -48,7 +59,7 @@ for rank in $(seq 0 $((world_size - 1))); do
   esac
   seen="$seen $current"
 done
-count=$(find "$root" -maxdepth 1 -type d -name 'rank*' | wc -l)
+count=$(find "$root" -mindepth 1 -maxdepth 1 -type d -name 'rank*' | wc -l)
 if [ "$count" -ne "$world_size" ]; then
   echo "rank directory count ${count} != world_size ${world_size}" >&2
   exit 1

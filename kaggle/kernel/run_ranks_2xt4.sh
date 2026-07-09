@@ -28,6 +28,13 @@ elif [ "$visible_count" -ge 2 ]; then
 else
   world_size=1
 fi
+if [ "${MGT_WAIT_GPU_IDLE:-1}" = "1" ]; then
+  python3 scripts/wait_gpu_idle.py --devices "${CUDA_VISIBLE_DEVICES:-}" \
+    --max-util "${MGT_GPU_IDLE_MAX_UTIL:-15}" \
+    --max-memory-mb "${MGT_GPU_IDLE_MAX_MEMORY_MB:-1536}" \
+    --timeout-sec "${MGT_GPU_IDLE_TIMEOUT_SEC:-900}" \
+    --poll-sec "${MGT_GPU_IDLE_POLL_SEC:-5}"
+fi
 mkdir -p "$run_root"
 rm -f "$run_root/nccl.id"
 if [ "${MGT_PERF_RUN:-0}" = "1" ]; then
@@ -98,7 +105,12 @@ MGT_SUMMARY_ROOT="$run_root" MGT_CONFIG_ID="${MGT_CONFIG_ID:-$(basename "$run_ro
 import json
 import os
 import statistics
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path("scripts").resolve()))
+from estimate_train_flops import estimate_train_flops
+
 root = Path(os.environ["MGT_SUMMARY_ROOT"])
 rank_rows = []
 for path in sorted(root.glob("rank*/profile.jsonl")):
@@ -133,6 +145,15 @@ if rank_rows and rank_rows[0][1]:
     summary["input_grad_backend"] = first.get("input_grad_backend")
     summary["input_grad_position_tile"] = first.get("input_grad_position_tile")
     summary["batch_states_per_rank"] = first.get("batch_states")
+    summary["flop_estimate_per_rank"] = estimate_train_flops(
+        state_len=int(os.environ.get("MGT_STATE_LEN", "80")),
+        state_value_pad=int(os.environ.get("MGT_STATE_VALUE_PAD", "2")),
+        hd1=int(os.environ.get("MGT_PHYSICAL_HD1", os.environ.get("MGT_HD1", "2556"))),
+        hd2=((int(os.environ.get("MGT_HD2", "218")) + 7) // 8) * 8,
+        residual_blocks=int(os.environ.get("MGT_NRD", "16")),
+        output_dim=int(os.environ.get("MGT_OUTPUT_DIM", "1")),
+        batch_size=int(first.get("batch_states", os.environ.get("MGT_BATCH_SIZE", "1"))),
+    ).__dict__
 if rank_rows:
     common_steps = sorted(set.intersection(*(set(row["step"] for row in rows) for _, rows in rank_rows)))
     stage_keys = [
@@ -182,6 +203,20 @@ if summary["steady_steps"]:
     summary["min_throughput_states_s"] = min(values)
     summary["max_throughput_states_s"] = max(values)
     summary["avg_step_ms"] = statistics.mean(row["max_rank_ms"] for row in summary["steady_steps"])
+    flop_estimate = estimate_train_flops(
+        state_len=int(os.environ.get("MGT_STATE_LEN", "80")),
+        state_value_pad=int(os.environ.get("MGT_STATE_VALUE_PAD", "2")),
+        hd1=int(os.environ.get("MGT_PHYSICAL_HD1", os.environ.get("MGT_HD1", "2556"))),
+        hd2=((int(os.environ.get("MGT_HD2", "218")) + 7) // 8) * 8,
+        residual_blocks=int(os.environ.get("MGT_NRD", "16")),
+        output_dim=int(os.environ.get("MGT_OUTPUT_DIM", "1")),
+        batch_size=int(summary.get("batch_states_per_rank", os.environ.get("MGT_BATCH_SIZE", "1"))) * max(1, int(summary.get("world_size", 1))),
+        throughput_states_s=summary["avg_throughput_states_s"],
+        peak_tflops=(float(os.environ["MGT_GPU_PEAK_TFLOPS"]) * max(1, int(summary.get("world_size", 1)))) if os.environ.get("MGT_GPU_PEAK_TFLOPS") else None,
+    )
+    summary["flop_estimate_global"] = flop_estimate.__dict__
+    if os.environ.get("MGT_GPU_PEAK_TFLOPS"):
+        summary["flop_estimate_global"]["peak_tflops_per_gpu"] = float(os.environ["MGT_GPU_PEAK_TFLOPS"])
     for key in [
         "walk_ms",
         "backward_ms",

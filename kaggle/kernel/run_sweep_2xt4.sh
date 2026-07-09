@@ -22,6 +22,13 @@ base_cutlass_kinds="${MGT_CUTLASS_HALF_GEMM_KINDS:-input_embedding_grad,forward}
 cmake -S native -B "$build_dir" -DMGT_ENABLE_CUDA=ON -DMGT_ENABLE_NCCL=ON -DCMAKE_CUDA_ARCHITECTURES=${MGT_CUDA_ARCH} -DMGT_CUTLASS_ROOT="${CUTLASS_ROOT:-/opt/cutlass}" -DMGT_AUTO_CUTLASS_HALF_GEMM=${MGT_AUTO_CUTLASS_HALF_GEMM:-ON} -DMGT_CUTLASS_HALF_GEMM_KINDS="$base_cutlass_kinds"
 if [ "${MGT_SWEEP_RUN_CTEST:-1}" = "1" ]; then
   cmake --build "$build_dir" --config Release
+  if [ "${MGT_WAIT_GPU_IDLE:-1}" = "1" ]; then
+    python3 scripts/wait_gpu_idle.py --devices "${CUDA_VISIBLE_DEVICES:-}" \
+      --max-util "${MGT_GPU_IDLE_MAX_UTIL:-15}" \
+      --max-memory-mb "${MGT_GPU_IDLE_MAX_MEMORY_MB:-1536}" \
+      --timeout-sec "${MGT_GPU_IDLE_TIMEOUT_SEC:-900}" \
+      --poll-sec "${MGT_GPU_IDLE_POLL_SEC:-5}"
+  fi
   ctest --test-dir "$build_dir" -R 'cuda_compile|cuda_random_walk_smoke|cuda_adamw_smoke|cuda_mlp_forward_smoke|cuda_mlp_backward_smoke|cuda_train_step_smoke|nccl_single_rank_smoke|nccl_two_device_smoke|native_train_smoke|native_train_profile_smoke|native_train_input_grad_.*backend|native_train_resume_smoke|native_train_artifacts' --output-on-failure -C Release
 else
   cmake --build "$build_dir" --config Release --target mgt_native_train
@@ -167,4 +174,13 @@ for row in ok_rows:
         allreduce=row.get("avg_allreduce_ms", 0.0),
         adam=row.get("avg_adam_ms", 0.0),
     ), flush=True)
+    flop = row.get("flop_estimate_global", {})
+    if flop:
+        util = "n/a" if flop.get("peak_utilization_percent") is None else f"{float(flop['peak_utilization_percent']):.2f}%"
+        print("sweep_flops\t{config_id}\ttotal_per_sample={per_sample}\tachieved_tflops={achieved:.3f}\tpeak_util={util}".format(
+            config_id=row["config_id"],
+            per_sample=flop.get("total_flops_per_sample", 0),
+            achieved=float(flop.get("achieved_tflops") or 0.0),
+            util=util,
+        ), flush=True)
 PY

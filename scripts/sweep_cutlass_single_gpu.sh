@@ -20,6 +20,13 @@ if command -v nvidia-smi >/dev/null 2>&1; then
 else
   echo "preflight_nvidia_smi_missing=1"
 fi
+if [ "${MGT_WAIT_GPU_IDLE:-1}" = "1" ]; then
+  python3 scripts/wait_gpu_idle.py --devices "${CUDA_VISIBLE_DEVICES:-}" \
+    --max-util "${MGT_GPU_IDLE_MAX_UTIL:-15}" \
+    --max-memory-mb "${MGT_GPU_IDLE_MAX_MEMORY_MB:-1536}" \
+    --timeout-sec "${MGT_GPU_IDLE_TIMEOUT_SEC:-900}" \
+    --poll-sec "${MGT_GPU_IDLE_POLL_SEC:-5}"
+fi
 
 cat > "$sweep_root/sweep_manifest.tsv" <<'EOF'
 config_id	cutlass_half_gemm_kinds	batch_size	steps	input_grad_position_tile	lt_workspace_bytes	backward_profile	input_grad_sparse
@@ -76,6 +83,13 @@ while read -r config_id cutlass_kinds config_batch_size config_position_tile con
   input_grad_sparse="${config_input_grad_sparse:-${MGT_INPUT_GRAD_SPARSE:-0}}"
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$config_id" "$cutlass_kinds" "$batch_size" "$steps" "$position_tile" "$lt_workspace" "$backward_profile" "$input_grad_sparse" >> "$sweep_root/sweep_manifest.tsv"
   echo "single_cutlass_config_start id=${config_id} cutlass=${cutlass_kinds} batch=${batch_size} steps=${steps} tile=${position_tile} workspace=${lt_workspace} profile=${backward_profile} sparse=${input_grad_sparse}"
+  if [ "${MGT_WAIT_GPU_IDLE:-1}" = "1" ]; then
+    python3 scripts/wait_gpu_idle.py --devices "${CUDA_VISIBLE_DEVICES:-}" \
+      --max-util "${MGT_GPU_IDLE_MAX_UTIL:-15}" \
+      --max-memory-mb "${MGT_GPU_IDLE_MAX_MEMORY_MB:-1536}" \
+      --timeout-sec "${MGT_GPU_IDLE_TIMEOUT_SEC:-900}" \
+      --poll-sec "${MGT_GPU_IDLE_POLL_SEC:-5}"
+  fi
   set +e
   "$build_dir/mgt_native_train" \
     --output-dir "$run_dir" \
@@ -115,7 +129,11 @@ MGT_SWEEP_SUMMARY_ROOT="$sweep_root" python3 - <<'PY'
 import json
 import os
 import statistics
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path("scripts").resolve()))
+from estimate_train_flops import estimate_train_flops
 
 root = Path(os.environ["MGT_SWEEP_SUMMARY_ROOT"])
 rows = []
@@ -170,6 +188,18 @@ for run_dir in sorted(path for path in root.iterdir() if path.is_dir()):
             row["input_grad_backend"] = steady[0].get("input_grad_backend")
             row["batch_states"] = int(steady[0].get("batch_states", 0))
             row["steady_steps"] = len(steady)
+            flop_estimate = estimate_train_flops(
+                state_len=int(os.environ.get("MGT_STATE_LEN", "80")),
+                state_value_pad=int(os.environ.get("MGT_STATE_VALUE_PAD", "2")),
+                hd1=int(os.environ.get("MGT_PHYSICAL_HD1", os.environ.get("MGT_HD1", "2556"))),
+                hd2=((int(os.environ.get("MGT_HD2", "218")) + 7) // 8) * 8,
+                residual_blocks=int(os.environ.get("MGT_NRD", "16")),
+                output_dim=int(os.environ.get("MGT_OUTPUT_DIM", "1")),
+                batch_size=row["batch_states"],
+                throughput_states_s=row["median_throughput_states_s"],
+                peak_tflops=float(os.environ["MGT_GPU_PEAK_TFLOPS"]) if os.environ.get("MGT_GPU_PEAK_TFLOPS") else None,
+            )
+            row["flop_estimate"] = flop_estimate.__dict__
             for key in stage_keys:
                 row[f"avg_{key}"] = statistics.mean(float(item.get(key, 0.0)) for item in steady)
         else:
@@ -214,4 +244,12 @@ for row in ok_rows:
         input_grad=row.get("avg_bw_input_grad_ms", 0.0),
         adam=row.get("avg_adam_ms", 0.0),
     ), flush=True)
+    flop = row.get("flop_estimate", {})
+    if flop:
+        print("single_cutlass_flops\t{config_id}\ttotal_per_sample={per_sample}\tachieved_tflops={achieved:.3f}\tpeak_util={util}".format(
+            config_id=row["config_id"],
+            per_sample=flop.get("total_flops_per_sample", 0),
+            achieved=float(flop.get("achieved_tflops") or 0.0),
+            util=("n/a" if flop.get("peak_utilization_percent") is None else f"{float(flop['peak_utilization_percent']):.2f}%"),
+        ), flush=True)
 PY
