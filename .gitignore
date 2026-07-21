@@ -16,3 +16,4 @@
 
 __pycache__/
 /.github_known_hosts
+/.gpu_queue/

@@ -1,5 +1,21 @@
 # Performance measurement rules
 
+## Shared GPU queue
+
+Local GPU jobs must be submitted through the long-running `mgt-gpu-queue` container so multiple agents do not collide on the same card. Start it once:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/start_gpu_queue.ps1
+```
+
+Submit jobs with:
+
+```powershell
+docker exec mgt-gpu-queue python3 scripts/gpu_queue_submit.py --label smoke --wait -- bash -lc "python3 --version"
+```
+
+The queue runs one command at a time inside the GPU container and waits 10 seconds between jobs. Runtime state and logs are under `.gpu_queue/` and are intentionally ignored by git.
+
 ## GPU idle gate
 
 Benchmark scripts wait for an idle GPU by default before running CTest or training sweeps.
