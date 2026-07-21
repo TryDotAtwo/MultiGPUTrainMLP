@@ -17,7 +17,7 @@
 Последние измерения:
 
 - локально, полная p888, одна GPU, `batch=53248`, tiled input gradient: около `256k` кандидатов/с;
-- Kaggle 2xT4, полная p888, `batch=53248` на ранг: около `462k` кандидатов/с.
+- Kaggle 2xT4, полная p888, `batch=53248` на ранг, tile 56: устойчивые повторы около `536k` кандидатов/с; input-gradient-only CUTLASS повторы около `556k` кандидатов/с.
 
 Оценка старого ориентира `30000` эпох за `3` суток при `batch_size=100000`:
 
@@ -59,7 +59,7 @@ ctest --test-dir build-native --output-on-failure
   --hd2 218 \
   --nrd 16 \
   --input-grad-fp16 1 \
-  --input-grad-position-tile 36 \
+  --input-grad-position-tile 56 \
   --linear-fp16 1 \
   --write-artifacts 0
 ```

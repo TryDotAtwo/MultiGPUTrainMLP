@@ -8,7 +8,7 @@ fi
 build_dir="${MGT_BUILD_DIR:-build-kaggle-2xt4}"
 run_root="${MGT_RUN_ROOT:-runs/kaggle-2xt4}"
 if [ "${MGT_SKIP_BUILD:-0}" != "1" ]; then
-  cmake -S native -B "$build_dir" -DMGT_ENABLE_CUDA=ON -DMGT_ENABLE_NCCL=ON -DCMAKE_CUDA_ARCHITECTURES=${MGT_CUDA_ARCH} -DMGT_CUTLASS_ROOT="${CUTLASS_ROOT:-/opt/cutlass}" -DMGT_AUTO_CUTLASS_HALF_GEMM=${MGT_AUTO_CUTLASS_HALF_GEMM:-ON} -DMGT_CUTLASS_HALF_GEMM_KINDS="${MGT_CUTLASS_HALF_GEMM_KINDS:-input_embedding_grad,forward}"
+  cmake -S native -B "$build_dir" -DMGT_ENABLE_CUDA=ON -DMGT_ENABLE_NCCL=ON -DCMAKE_CUDA_ARCHITECTURES=${MGT_CUDA_ARCH} -DMGT_CUTLASS_ROOT="${CUTLASS_ROOT:-/opt/cutlass}" -DMGT_AUTO_CUTLASS_HALF_GEMM=${MGT_AUTO_CUTLASS_HALF_GEMM:-ON} -DMGT_CUTLASS_HALF_GEMM_KINDS="${MGT_CUTLASS_HALF_GEMM_KINDS:-input_embedding_grad}"
   cmake --build "$build_dir" --config Release --target mgt_native_train
 fi
 if command -v nvidia-smi >/dev/null 2>&1; then
@@ -44,7 +44,7 @@ if [ "${MGT_PERF_RUN:-0}" = "1" ]; then
   export MGT_WRITE_ARTIFACTS="${MGT_WRITE_ARTIFACTS:-0}"
   export MGT_BACKWARD_PROFILE="${MGT_BACKWARD_PROFILE:-0}"
   export MGT_INPUT_GRAD_FP16="${MGT_INPUT_GRAD_FP16:-1}"
-  export MGT_INPUT_GRAD_POSITION_TILE="${MGT_INPUT_GRAD_POSITION_TILE:-32}"
+  export MGT_INPUT_GRAD_POSITION_TILE="${MGT_INPUT_GRAD_POSITION_TILE:-56}"
   export MGT_INPUT_GRAD_SPARSE="${MGT_INPUT_GRAD_SPARSE:-0}"
   export MGT_LINEAR_FP16="${MGT_LINEAR_FP16:-1}"
   export MGT_OVERLAP_ALLREDUCE="${MGT_OVERLAP_ALLREDUCE:-1}"
@@ -137,7 +137,7 @@ summary = {
         "lt_autotune_warmups": int(os.environ.get("MGT_LT_AUTOTUNE_WARMUPS", "1")),
         "lt_autotune_iters": int(os.environ.get("MGT_LT_AUTOTUNE_ITERS", "2")),
         "backward_profile": int(os.environ.get("MGT_BACKWARD_PROFILE", "0")),
-        "cutlass_half_gemm_kinds": os.environ.get("MGT_CUTLASS_HALF_GEMM_KINDS", "input_embedding_grad,forward"),
+        "cutlass_half_gemm_kinds": os.environ.get("MGT_CUTLASS_HALF_GEMM_KINDS", "input_embedding_grad"),
     },
 }
 if rank_rows and rank_rows[0][1]:

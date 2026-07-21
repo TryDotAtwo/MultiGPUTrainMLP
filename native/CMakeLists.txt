@@ -8,7 +8,7 @@ option(MGT_ENABLE_CUDA "Build CUDA trainer code" ON)
 option(MGT_ENABLE_NCCL "Build NCCL allreduce code" ON)
 option(MGT_USE_CUTLASS_HALF_GEMM "Route half GEMM wrapper through CUTLASS instead of cuBLASLt" OFF)
 option(MGT_AUTO_CUTLASS_HALF_GEMM "Use CUTLASS only for selected half GEMM shapes where the trainer requests it" ON)
-set(MGT_CUTLASS_HALF_GEMM_KINDS "input_embedding_grad,forward" CACHE STRING "Comma or semicolon separated CUTLASS half GEMM kinds for AUTO mode: forward,grad_weights,backprop_input,input_embedding_grad,all")
+set(MGT_CUTLASS_HALF_GEMM_KINDS "input_embedding_grad" CACHE STRING "Comma or semicolon separated CUTLASS half GEMM kinds for AUTO mode: forward,grad_weights,backprop_input,input_embedding_grad,all")
 set(MGT_CUTLASS_ROOT "/opt/cutlass" CACHE PATH "Path to CUTLASS checkout")
 
 if(MGT_ENABLE_CUDA)
