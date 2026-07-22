@@ -9,7 +9,7 @@ expected_rev = "e049b46"
 work = Path("/tmp/MultiGPUTrainMLP")
 out = Path("/kaggle/working/training-contract-2xt4")
 subprocess.run(["rm", "-rf", str(work)], check=True)
-subprocess.run(["git", "clone", "--depth", "1", "--branch", ref, repo, str(work)], check=True)
+subprocess.run(["git", "clone", "--depth", "10", "--branch", ref, repo, str(work)], check=True)
 rev = subprocess.check_output(["git", "-C", str(work), "rev-parse", "--short", "HEAD"], text=True).strip()
 print(f"git_rev={rev}", flush=True)
 subprocess.run(
