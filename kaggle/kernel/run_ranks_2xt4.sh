@@ -67,6 +67,7 @@ fi
 pids=()
 for rank in $(seq 0 $((world_size - 1))); do
   "$build_dir/mgt_native_train" \
+    --synthetic-benchmark 1 \
     --output-dir "$run_root/rank${rank}" \
     --steps "${MGT_STEPS:-3}" \
     --device-id "$rank" \

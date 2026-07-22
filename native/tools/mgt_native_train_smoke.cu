@@ -1,5 +1,6 @@
 #include "mgt/puzzle_io.hpp"
 #include "mgt/train_plan.hpp"
+#include "mgt/trainer_inputs.hpp"
 #include "mgt_cuda/adamw.cuh"
 #include "mgt_cuda/mlp_backward.cuh"
 #include "mgt_cuda/random_walk_kernel.cuh"
@@ -67,6 +68,9 @@ struct Args {
     bool overlap_allreduce = true;
     std::filesystem::path nccl_id_file;
     std::filesystem::path resume_checkpoint;
+    std::filesystem::path group_json;
+    std::filesystem::path target_bin;
+    bool synthetic_benchmark = false;
 };
 
 int Check(cudaError_t status) { return status == cudaSuccess ? 0 : 1; }
@@ -120,31 +124,6 @@ const char* StatusName(mgt::Status status) {
         case mgt::Status::kIoFailure: return "io_failure";
     }
     return "unknown";
-}
-
-mgt::PuzzleDefinition BuildPuzzle(const mgt::TrainPlan& plan) {
-    mgt::PuzzleDefinition puzzle{};
-    const std::uint32_t state_len = plan.config.puzzle.raw_state_dim;
-    const std::uint32_t move_count = plan.config.puzzle.move_count;
-    const std::uint32_t storage_len = plan.padded_state_dim <= mgt::kStateStorageLen ? plan.padded_state_dim : mgt::kStateStorageLen;
-    for (std::uint32_t move = 0; move < mgt::kMoveCount; ++move) {
-        for (std::uint32_t i = 0; i < state_len; ++i) {
-            puzzle.moves[move].v[i] = static_cast<mgt::StateValue>(move < move_count ? ((i + move + 1) % state_len) : i);
-        }
-        for (std::uint32_t i = state_len; i < storage_len; ++i) {
-            puzzle.moves[move].v[i] = 0;
-        }
-        for (std::uint32_t i = storage_len; i < mgt::kStateStorageLen; ++i) {
-            puzzle.moves[move].v[i] = 0;
-        }
-    }
-    for (std::uint32_t i = 0; i < state_len; ++i) {
-        puzzle.target.v[i] = static_cast<mgt::StateValue>(i);
-    }
-    for (std::uint32_t i = state_len; i < mgt::kStateStorageLen; ++i) {
-        puzzle.target.v[i] = 0;
-    }
-    return puzzle;
 }
 
 std::uint32_t RoundUp(std::uint32_t value, std::uint32_t alignment) {
@@ -622,6 +601,12 @@ bool ParseArgs(int argc, char** argv, Args* args) {
             args->nccl_id_file = value;
         } else if (key == "--resume-checkpoint") {
             args->resume_checkpoint = value;
+        } else if (key == "--group-json") {
+            args->group_json = value;
+        } else if (key == "--target-bin") {
+            args->target_bin = value;
+        } else if (key == "--synthetic-benchmark") {
+            if (!ParseBool(value, &args->synthetic_benchmark)) return false;
         } else {
             return false;
         }
@@ -638,7 +623,7 @@ bool ParseArgs(int argc, char** argv, Args* args) {
 int main(int argc, char** argv) {
     Args args{};
     if (!ParseArgs(argc, argv, &args)) {
-        std::cerr << "usage: mgt_native_train_smoke --output-dir DIR --steps N --device-id ID --world-size N --global-rank R --local-rank R [--batch-size N --k-min N --k-max N --hd1 N --hd2 N --nrd N --write-artifacts 0|1 --backward-profile 0|1 --overlap-allreduce 0|1 --input-grad-partial-chunks N --input-grad-positions-per-block N --input-grad-position-tile N --input-grad-sparse 0|1 --input-grad-fp16 0|1 --linear-fp16 0|1 --persistent-half-weights 0|1 --lt-workspace-bytes N --lt-autotune 0|1 --lt-autotune-candidates N --lt-autotune-warmups N --lt-autotune-iters N --nccl-id-file PATH --resume-checkpoint DIR]\n";
+        std::cerr << "usage: mgt_native_train --output-dir DIR --steps N --device-id ID --world-size N --global-rank R --local-rank R (--group-json PATH --target-bin PATH | --synthetic-benchmark 1) [training options]\n";
         return EXIT_FAILURE;
     }
     int device_count = 0;
@@ -670,7 +655,16 @@ int main(int argc, char** argv) {
     const bool resumed = !args.resume_checkpoint.empty();
     if (resumed && !ReadCheckpoint(args.resume_checkpoint, &weights, &host_adam_m, &host_adam_v)) return EXIT_FAILURE;
 
-    const mgt::PuzzleDefinition puzzle = BuildPuzzle(train_plan);
+    mgt::PuzzleDefinition puzzle{};
+    std::string puzzle_fingerprint;
+    const mgt::TrainerPuzzleInputs puzzle_inputs{
+        args.group_json, args.target_bin, args.synthetic_benchmark};
+    const mgt::Status puzzle_status =
+        mgt::LoadTrainerPuzzle(puzzle_inputs, train_config, &puzzle, &puzzle_fingerprint);
+    if (puzzle_status != mgt::Status::kOk) {
+        std::cerr << "puzzle input error: " << StatusName(puzzle_status) << "\n";
+        return EXIT_FAILURE;
+    }
     float* d_weights = nullptr;
     __half* d_weights_half = nullptr;
     float* d_labels = nullptr;
@@ -927,6 +921,7 @@ int main(int argc, char** argv) {
     meta << "MODEL_MODE=MLP2RB\nOUTPUT_DIM=" << shape.output_dim << "\nWORLD_SIZE=" << args.world_size << "\nGLOBAL_RANK=" << args.global_rank
          << "\nLOCAL_RANK=" << args.local_rank << "\nDEVICE_ID=" << args.device_id << "\nHD1=" << requested_hd1 << "\nPHYSICAL_HD1=" << shape.hd1 << "\nHD2=" << requested_hd2 << "\nPHYSICAL_HD2=" << shape.hd2 << "\nNUM_CLASSES=" << shape.state_value_pad << "\nNRD=" << shape.residual_blocks
          << "\nK_MIN=" << args.k_min << "\nK_MAX=" << args.k_max << "\nBATCH_SIZE=" << kSamples
+         << "\nPUZZLE_FINGERPRINT=" << puzzle_fingerprint
          << "\nGRADIENT_CAROUSEL_SLOTS=" << train_plan.gradient_carousel_slots << "\nLT_WORKSPACE_BYTES=" << args.lt_workspace_bytes << "\nLT_AUTOTUNE=" << (args.lt_autotune ? 1 : 0) << "\nLT_AUTOTUNE_CANDIDATES=" << args.lt_autotune_candidates << "\nLT_AUTOTUNE_WARMUPS=" << args.lt_autotune_warmups << "\nLT_AUTOTUNE_ITERS=" << args.lt_autotune_iters << "\nINPUT_GRAD_PARTIAL_CHUNKS=" << train_plan.config.runtime.input_grad_partial_chunks << "\nINPUT_GRAD_POSITIONS_PER_BLOCK=" << train_plan.config.runtime.input_grad_positions_per_block << "\nINPUT_GRAD_POSITION_TILE=" << train_plan.config.runtime.input_grad_position_tile << "\nINPUT_GRAD_SPARSE=" << (train_plan.config.runtime.input_grad_sparse ? 1 : 0) << "\nINPUT_GRAD_FP16=" << (args.input_grad_fp16 ? 1 : 0) << "\nINPUT_GRAD_BACKEND=" << input_grad_backend << "\nLINEAR_FP16=" << (args.linear_fp16 ? 1 : 0) << "\nPERSISTENT_HALF_WEIGHTS=" << (args.persistent_half_weights ? 1 : 0) << "\nOVERLAP_ALLREDUCE=" << (overlap_allreduce ? 1 : 0) << "\nGRADIENT_BUCKETS=" << train_plan.gradient_buckets.size() << "\nNCCL_ENABLED=" << (nccl_enabled ? 1 : 0) << "\nRESUME_CHECKPOINT=" << (resumed ? 1 : 0) << "\nARTIFACTS_WRITTEN=" << (args.write_artifacts ? 1 : 0) << "\nNUM_PARAMETERS=" << params << "\n";
     std::ofstream layers(args.output_dir / "layers.json");
     layers << "{\n  \"model_mode\": \"MLP2RB\",\n  \"output_dim\": " << train_plan.layout.output_dim << ",\n  \"state_len\": " << shape.state_len << ",\n  \"state_storage_len\": " << train_plan.padded_state_dim << ",\n  \"num_classes\": " << shape.state_value_pad << ",\n  \"hd1\": " << requested_hd1 << ",\n  \"physical_hd1\": " << shape.hd1 << ",\n  \"hd2\": " << requested_hd2 << ",\n  \"physical_hd2\": " << shape.hd2 << ",\n  \"nrd\": " << shape.residual_blocks << ",\n  \"artifacts_written\": " << (args.write_artifacts ? "true" : "false") << ",\n  \"num_parameters\": " << params << "\n}\n";

@@ -92,6 +92,7 @@ while read -r config_id cutlass_kinds config_batch_size config_position_tile con
   fi
   set +e
   "$build_dir/mgt_native_train" \
+    --synthetic-benchmark 1 \
     --output-dir "$run_dir" \
     --steps "$steps" \
     --device-id "${MGT_DEVICE_ID:-0}" \

@@ -46,6 +46,7 @@ ctest --test-dir build-native --output-on-failure
 
 ```bash
 ./build-native/mgt_native_train \
+  --synthetic-benchmark 1 \
   --output-dir runs/local-p888 \
   --steps 8 \
   --device-id 0 \
