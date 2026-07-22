@@ -8,6 +8,7 @@ from autotune_2xt4 import (
     cache_matches,
     drift_is_acceptable,
     select_stable_candidate,
+    select_final_stage_candidate,
     render_selected_env,
     reuse_decision,
 )
@@ -38,6 +39,13 @@ class Autotune2xT4Tests(unittest.TestCase):
              "min_throughput_states_s": 999.0},
         ]
         self.assertEqual(select_stable_candidate(rows)["config_id"], "stable")
+
+    def test_staged_selection_uses_final_combined_stage(self):
+        early = [{"config_id": "early", "status": "ok", "avg_throughput_states_s": 600.0,
+                  "min_throughput_states_s": 590.0}]
+        final = [{"config_id": "combined", "status": "ok", "avg_throughput_states_s": 520.0,
+                  "min_throughput_states_s": 510.0}]
+        self.assertEqual(select_final_stage_candidate([early, final])["config_id"], "combined")
 
     def test_render_selected_env_is_shell_safe_and_complete(self):
         row = {

@@ -96,12 +96,10 @@ ws32m_b4m $batch $tile 33554432 4194304 0 1 0 input_embedding_grad,forward 1" 0
   PYTHONPATH=scripts python3 - "$fingerprint" "$context" "$cache" "$selected_env" \
       "$root/tile/sweep_summary.json" "$root/batch/sweep_summary.json" "$root/transport/sweep_summary.json" <<'PY'
 import json, os, sys, tempfile
-from autotune_2xt4 import CACHE_SCHEMA, render_selected_env, select_stable_candidate
+from autotune_2xt4 import CACHE_SCHEMA, render_selected_env, select_final_stage_candidate
 fingerprint, context_path, cache_path, env_path, *summaries = sys.argv[1:]
-rows = []
-for path in summaries:
-    rows.extend(json.load(open(path, encoding="utf-8"))["rows"])
-winner = select_stable_candidate(rows)
+stages = [json.load(open(path, encoding="utf-8"))["rows"] for path in summaries]
+winner = select_final_stage_candidate(stages)
 payload = {
     "schema": CACHE_SCHEMA,
     "fingerprint": fingerprint,

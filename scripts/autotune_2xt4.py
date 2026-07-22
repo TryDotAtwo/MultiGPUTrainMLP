@@ -33,6 +33,17 @@ def select_stable_candidate(rows: Iterable[Mapping[str, Any]]) -> Mapping[str, A
     return max(valid, key=lambda item: (item[0], item[1], item[2]))[3]
 
 
+def select_final_stage_candidate(stages: Iterable[Iterable[Mapping[str, Any]]]) -> Mapping[str, Any]:
+    final_rows = None
+    for rows in stages:
+        materialized = list(rows)
+        if materialized:
+            final_rows = materialized
+    if final_rows is None:
+        raise ValueError("no autotune stages")
+    return select_stable_candidate(final_rows)
+
+
 def drift_is_acceptable(measured: float, cached: float, minimum_ratio: float = 0.85) -> bool:
     return (
         math.isfinite(measured)
