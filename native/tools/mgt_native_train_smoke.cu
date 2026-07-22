@@ -2,6 +2,7 @@
 #include "mgt/train_plan.hpp"
 #include "mgt/trainer_inputs.hpp"
 #include "mgt/training_artifacts.hpp"
+#include "mgt/training_evaluation.hpp"
 #include "mgt_cuda/adamw.cuh"
 #include "mgt_cuda/finite_check.cuh"
 #include "mgt_cuda/mlp_backward.cuh"
@@ -71,6 +72,8 @@ struct Args {
     float adam_eps = 1.0e-8f;
     std::uint64_t checkpoint_period_steps = 0;
     std::uint64_t weight_export_period_steps = 0;
+    std::uint32_t eval_samples = 0;
+    std::uint64_t eval_period_steps = 0;
     bool write_artifacts = true;
     bool backward_profile = false;
     bool overlap_allreduce = true;
@@ -645,6 +648,10 @@ bool ParseArgs(int argc, char** argv, Args* args) {
             if (!ParseUint64(value, &args->checkpoint_period_steps)) return false;
         } else if (key == "--weight-export-period-steps") {
             if (!ParseUint64(value, &args->weight_export_period_steps)) return false;
+        } else if (key == "--eval-samples") {
+            if (!ParseUint(value, &args->eval_samples)) return false;
+        } else if (key == "--eval-period-steps") {
+            if (!ParseUint64(value, &args->eval_period_steps)) return false;
         } else if (key == "--write-artifacts") {
             if (!ParseBool(value, &args->write_artifacts)) return false;
         } else if (key == "--backward-profile") {
@@ -669,6 +676,8 @@ bool ParseArgs(int argc, char** argv, Args* args) {
     if (args->adam_beta1 < 0.0f || args->adam_beta1 >= 1.0f ||
         args->adam_beta2 < 0.0f || args->adam_beta2 >= 1.0f ||
         args->adam_eps <= 0.0f) return false;
+    if (mgt::ValidateEvaluationSchedule(args->eval_samples, args->batch_size,
+                                        args->eval_period_steps) != mgt::Status::kOk) return false;
     return args->steps > 0 && args->world_size > 0 && args->global_rank < args->world_size &&
            args->batch_size > 0 && mgt::ValidateTrainConfig(config) == mgt::Status::kOk;
 }
@@ -680,7 +689,7 @@ bool ParseArgs(int argc, char** argv, Args* args) {
 int main(int argc, char** argv) {
     Args args{};
     if (!ParseArgs(argc, argv, &args)) {
-        std::cerr << "usage: mgt_native_train --output-dir DIR --steps N --device-id ID --world-size N --global-rank R --local-rank R (--group-json PATH --target-bin PATH | --synthetic-benchmark 1) [--adam-beta1 F --adam-beta2 F --adam-eps F --checkpoint-period-steps N --weight-export-period-steps N] [training options]\n";
+        std::cerr << "usage: mgt_native_train --output-dir DIR --steps N --device-id ID --world-size N --global-rank R --local-rank R (--group-json PATH --target-bin PATH | --synthetic-benchmark 1) [--adam-beta1 F --adam-beta2 F --adam-eps F --checkpoint-period-steps N --weight-export-period-steps N --eval-samples N --eval-period-steps N] [training options]\n";
         return EXIT_FAILURE;
     }
     int device_count = 0;
@@ -824,6 +833,7 @@ int main(int argc, char** argv) {
     std::filesystem::create_directories(args.output_dir);
     std::ofstream log(args.output_dir / "train.log");
     std::ofstream profile(args.output_dir / "profile.jsonl");
+    std::ofstream evaluation(args.output_dir / "evaluation.jsonl");
     cudaEvent_t step_start = nullptr;
     cudaEvent_t walk_stop = nullptr;
     cudaEvent_t backward_stop = nullptr;
@@ -875,6 +885,67 @@ int main(int argc, char** argv) {
         << " nccl=" << (nccl_enabled ? 1 : 0) << " resumed=" << (resumed ? 1 : 0) << "\n";
 
     float last_loss = 0.0f;
+    auto evaluate_heldout = [&](std::uint64_t completed_steps) -> bool {
+        if (args.eval_samples == 0) return true;
+        const mgt_cuda::RandomWalkKernelConfig eval_walks{
+            args.eval_samples, train_plan.config.train.k_min, train_plan.config.train.k_max,
+            train_plan.config.puzzle.move_count, train_plan.config.puzzle.raw_state_dim,
+            train_plan.padded_state_dim};
+        float* eval_walk_labels = shape.output_dim == 1U ? d_labels : d_walk_labels;
+        if (mgt_cuda::LaunchRandomWalkKernel(
+                eval_walks, mgt::HeldoutSeed(train_plan.config.train.seed),
+                0x484f4c444f5554ULL, 0, 0xffffffffU, d_moves, d_target,
+                d_states, eval_walk_labels, d_meta, compute_stream) != mgt::Status::kOk) {
+            return false;
+        }
+        if (shape.output_dim > 1U) {
+            const std::uint64_t label_items =
+                static_cast<std::uint64_t>(args.eval_samples) * shape.output_dim;
+            constexpr std::uint32_t threads = 128;
+            const std::uint32_t blocks =
+                static_cast<std::uint32_t>((label_items + threads - 1ULL) / threads);
+            ExpandScalarLabelsKernel<<<blocks, threads, 0, compute_stream>>>(
+                d_walk_labels, args.eval_samples, shape.output_dim, d_labels);
+            if (Check(cudaGetLastError()) != 0) return false;
+        }
+        if (mgt_cuda::LaunchMlpLossGradKernelWithWorkspaceLtExternalHalf(
+                shape, d_weights, d_weights_half, d_states, d_labels,
+                args.eval_samples, d_loss, d_grad, d_backward_workspace,
+                backward_workspace_floats, backward_blas, backward_blas_lt,
+                train_plan.config.runtime.input_grad_partial_chunks,
+                train_plan.config.runtime.input_grad_positions_per_block,
+                args.input_grad_fp16, args.linear_fp16, compute_stream,
+                d_lt_workspace, args.lt_workspace_bytes,
+                train_plan.config.runtime.input_grad_position_tile,
+                train_plan.config.runtime.input_grad_sparse) != mgt::Status::kOk) {
+            return false;
+        }
+        if (mgt_cuda::LaunchFiniteTrainingCheck(
+                d_loss, d_grad, d_weights, params, d_nonfinite,
+                compute_stream) != mgt::Status::kOk) return false;
+        float heldout_mse = 0.0f;
+        int nonfinite = 0;
+        if (Check(cudaMemcpyAsync(&heldout_mse, d_loss, sizeof(float),
+                                  cudaMemcpyDeviceToHost, compute_stream)) != 0 ||
+            Check(cudaMemcpyAsync(&nonfinite, d_nonfinite, sizeof(int),
+                                  cudaMemcpyDeviceToHost, compute_stream)) != 0 ||
+            Check(cudaStreamSynchronize(compute_stream)) != 0 ||
+            nonfinite != 0 || !std::isfinite(heldout_mse)) {
+            return false;
+        }
+        evaluation << "{\"rank\":" << args.global_rank
+                   << ",\"completed_steps\":" << completed_steps
+                   << ",\"samples\":" << args.eval_samples
+                   << ",\"seed\":" << mgt::HeldoutSeed(train_plan.config.train.seed)
+                   << ",\"mse\":" << std::setprecision(9) << heldout_mse
+                   << ",\"status\":\"ok\"}\n";
+        evaluation.flush();
+        return static_cast<bool>(evaluation);
+    };
+    if (!evaluate_heldout(resume_completed_steps)) {
+        std::cerr << "initial held-out evaluation failed\n";
+        return EXIT_FAILURE;
+    }
     for (std::uint32_t step = 0; step < args.steps; ++step) {
         const std::uint64_t global_step = mgt::GlobalStep(resume_completed_steps, step);
 #ifdef MGT_HAS_NVTX
@@ -1038,6 +1109,13 @@ int main(int argc, char** argv) {
                 << ",\"bw_residual_skip_add_ms\":" << backward_profile.residual_skip_add_ms
                 << ",\"bw_hidden_backward_ms\":" << backward_profile.hidden_backward_ms
                 << ",\"bw_input_grad_ms\":" << backward_profile.input_grad_ms << ",\"status\":\"ok\"}\n";
+        const bool final_step = completed_steps == resume_completed_steps + args.steps;
+        if (args.eval_samples != 0 &&
+            (completed_steps % args.eval_period_steps == 0 || final_step) &&
+            !evaluate_heldout(completed_steps)) {
+            std::cerr << "held-out evaluation failed at completed_steps=" << completed_steps << "\n";
+            return EXIT_FAILURE;
+        }
     }
 
     if (args.write_artifacts) {
@@ -1053,7 +1131,7 @@ int main(int argc, char** argv) {
          << "\nLOCAL_RANK=" << args.local_rank << "\nDEVICE_ID=" << args.device_id << "\nHD1=" << requested_hd1 << "\nPHYSICAL_HD1=" << shape.hd1 << "\nHD2=" << requested_hd2 << "\nPHYSICAL_HD2=" << shape.hd2 << "\nNUM_CLASSES=" << shape.state_value_pad << "\nNRD=" << shape.residual_blocks
          << "\nK_MIN=" << args.k_min << "\nK_MAX=" << args.k_max << "\nBATCH_SIZE=" << kSamples
          << "\nPUZZLE_FINGERPRINT=" << training_fingerprint
-         << "\nRESUME_COMPLETED_STEPS=" << resume_completed_steps << "\nADAM_BETA1=" << args.adam_beta1 << "\nADAM_BETA2=" << args.adam_beta2 << "\nADAM_EPS=" << args.adam_eps << "\nCHECKPOINT_PERIOD_STEPS=" << args.checkpoint_period_steps << "\nWEIGHT_EXPORT_PERIOD_STEPS=" << args.weight_export_period_steps << "\nGRADIENT_CAROUSEL_SLOTS=" << train_plan.gradient_carousel_slots << "\nLT_WORKSPACE_BYTES=" << args.lt_workspace_bytes << "\nLT_AUTOTUNE=" << (args.lt_autotune ? 1 : 0) << "\nLT_AUTOTUNE_CANDIDATES=" << args.lt_autotune_candidates << "\nLT_AUTOTUNE_WARMUPS=" << args.lt_autotune_warmups << "\nLT_AUTOTUNE_ITERS=" << args.lt_autotune_iters << "\nINPUT_GRAD_PARTIAL_CHUNKS=" << train_plan.config.runtime.input_grad_partial_chunks << "\nINPUT_GRAD_POSITIONS_PER_BLOCK=" << train_plan.config.runtime.input_grad_positions_per_block << "\nINPUT_GRAD_POSITION_TILE=" << train_plan.config.runtime.input_grad_position_tile << "\nINPUT_GRAD_SPARSE=" << (train_plan.config.runtime.input_grad_sparse ? 1 : 0) << "\nINPUT_GRAD_FP16=" << (args.input_grad_fp16 ? 1 : 0) << "\nINPUT_GRAD_BACKEND=" << input_grad_backend << "\nLINEAR_FP16=" << (args.linear_fp16 ? 1 : 0) << "\nPERSISTENT_HALF_WEIGHTS=" << (args.persistent_half_weights ? 1 : 0) << "\nOVERLAP_ALLREDUCE=" << (overlap_allreduce ? 1 : 0) << "\nGRADIENT_BUCKETS=" << train_plan.gradient_buckets.size() << "\nNCCL_ENABLED=" << (nccl_enabled ? 1 : 0) << "\nRESUME_CHECKPOINT=" << (resumed ? 1 : 0) << "\nARTIFACTS_WRITTEN=" << (args.write_artifacts ? 1 : 0) << "\nNUM_PARAMETERS=" << params << "\n";
+         << "\nRESUME_COMPLETED_STEPS=" << resume_completed_steps << "\nADAM_BETA1=" << args.adam_beta1 << "\nADAM_BETA2=" << args.adam_beta2 << "\nADAM_EPS=" << args.adam_eps << "\nCHECKPOINT_PERIOD_STEPS=" << args.checkpoint_period_steps << "\nEVAL_SAMPLES=" << args.eval_samples << "\nEVAL_PERIOD_STEPS=" << args.eval_period_steps << "\nWEIGHT_EXPORT_PERIOD_STEPS=" << args.weight_export_period_steps << "\nGRADIENT_CAROUSEL_SLOTS=" << train_plan.gradient_carousel_slots << "\nLT_WORKSPACE_BYTES=" << args.lt_workspace_bytes << "\nLT_AUTOTUNE=" << (args.lt_autotune ? 1 : 0) << "\nLT_AUTOTUNE_CANDIDATES=" << args.lt_autotune_candidates << "\nLT_AUTOTUNE_WARMUPS=" << args.lt_autotune_warmups << "\nLT_AUTOTUNE_ITERS=" << args.lt_autotune_iters << "\nINPUT_GRAD_PARTIAL_CHUNKS=" << train_plan.config.runtime.input_grad_partial_chunks << "\nINPUT_GRAD_POSITIONS_PER_BLOCK=" << train_plan.config.runtime.input_grad_positions_per_block << "\nINPUT_GRAD_POSITION_TILE=" << train_plan.config.runtime.input_grad_position_tile << "\nINPUT_GRAD_SPARSE=" << (train_plan.config.runtime.input_grad_sparse ? 1 : 0) << "\nINPUT_GRAD_FP16=" << (args.input_grad_fp16 ? 1 : 0) << "\nINPUT_GRAD_BACKEND=" << input_grad_backend << "\nLINEAR_FP16=" << (args.linear_fp16 ? 1 : 0) << "\nPERSISTENT_HALF_WEIGHTS=" << (args.persistent_half_weights ? 1 : 0) << "\nOVERLAP_ALLREDUCE=" << (overlap_allreduce ? 1 : 0) << "\nGRADIENT_BUCKETS=" << train_plan.gradient_buckets.size() << "\nNCCL_ENABLED=" << (nccl_enabled ? 1 : 0) << "\nRESUME_CHECKPOINT=" << (resumed ? 1 : 0) << "\nARTIFACTS_WRITTEN=" << (args.write_artifacts ? 1 : 0) << "\nNUM_PARAMETERS=" << params << "\n";
     std::ofstream layers(args.output_dir / "layers.json");
     layers << "{\n  \"model_mode\": \"MLP2RB\",\n  \"output_dim\": " << train_plan.layout.output_dim << ",\n  \"state_len\": " << shape.state_len << ",\n  \"state_storage_len\": " << train_plan.padded_state_dim << ",\n  \"num_classes\": " << shape.state_value_pad << ",\n  \"hd1\": " << requested_hd1 << ",\n  \"physical_hd1\": " << shape.hd1 << ",\n  \"hd2\": " << requested_hd2 << ",\n  \"physical_hd2\": " << shape.hd2 << ",\n  \"nrd\": " << shape.residual_blocks << ",\n  \"artifacts_written\": " << (args.write_artifacts ? "true" : "false") << ",\n  \"num_parameters\": " << params << "\n}\n";
     if (!WriteLinearOpsManifest(args.output_dir, train_plan)) return EXIT_FAILURE;

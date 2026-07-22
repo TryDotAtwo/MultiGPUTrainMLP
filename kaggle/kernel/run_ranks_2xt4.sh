@@ -98,6 +98,8 @@ for rank in $(seq 0 $((world_size - 1))); do
     --write-artifacts "${MGT_WRITE_ARTIFACTS:-1}" \
     --checkpoint-period-steps "${MGT_CHECKPOINT_PERIOD_STEPS:-0}" \
     --weight-export-period-steps "${MGT_WEIGHT_EXPORT_PERIOD_STEPS:-0}" \
+    --eval-samples "${MGT_EVAL_SAMPLES:-0}" \
+    --eval-period-steps "${MGT_EVAL_PERIOD_STEPS:-0}" \
     --backward-profile "${MGT_BACKWARD_PROFILE:-0}" \
     --input-grad-fp16 "${MGT_INPUT_GRAD_FP16:-0}" \
     --input-grad-position-tile "${MGT_INPUT_GRAD_POSITION_TILE:-0}" \

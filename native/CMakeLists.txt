@@ -31,6 +31,7 @@ add_library(mgt_core STATIC
     src/allreduce.cpp
     src/training_artifacts.cpp
     src/trainer_inputs.cpp
+    src/training_evaluation.cpp
 )
 
 target_include_directories(mgt_core PUBLIC include)
@@ -80,6 +81,9 @@ set_tests_properties(trainer_inputs PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE
 add_executable(test_resume_contract tests/test_resume_contract.cpp)
 target_link_libraries(test_resume_contract PRIVATE mgt_core)
 add_test(NAME resume_contract COMMAND test_resume_contract)
+add_executable(test_training_evaluation tests/test_training_evaluation.cpp)
+target_link_libraries(test_training_evaluation PRIVATE mgt_core)
+add_test(NAME training_evaluation COMMAND test_training_evaluation)
 add_executable(test_optimizer_contract tests/test_optimizer_contract.cpp)
 target_link_libraries(test_optimizer_contract PRIVATE mgt_core)
 add_test(NAME optimizer_contract COMMAND test_optimizer_contract)
