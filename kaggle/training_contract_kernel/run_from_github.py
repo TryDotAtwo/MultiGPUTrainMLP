@@ -24,6 +24,8 @@ env.update({
     "MGT_CONTRACT_ROOT": str(out),
     "MGT_BUILD_DIR": "/tmp/build-kaggle-2xt4",
     "MGT_WAIT_GPU_IDLE": "1",
+    "MGT_EVAL_SAMPLES": "32",
+    "MGT_EVAL_PERIOD_STEPS": "2",
 })
 result = subprocess.run(
     ["bash", "kaggle/kernel/check_training_contract_2xt4.sh"],

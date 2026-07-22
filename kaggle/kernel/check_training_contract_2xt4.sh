@@ -51,5 +51,24 @@ cmp "$root/continuous/rank0/checkpoint/state.f32.bin" \
     "$root/continuous/rank1/checkpoint/state.f32.bin"
 cmp "$root/split-b/rank0/checkpoint/state.f32.bin" \
     "$root/split-b/rank1/checkpoint/state.f32.bin"
+python3 - "$root" <<'PY'
+import json, math, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+def rows(run, rank):
+    path = root / run / f"rank{rank}" / "evaluation.jsonl"
+    values = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    if not values or any(row.get("status") != "ok" or not math.isfinite(float(row["mse"])) for row in values):
+        raise SystemExit(f"invalid held-out evaluation: {path}")
+    return {int(row["completed_steps"]): float(row["mse"]) for row in values}
+continuous0, continuous1 = rows("continuous", 0), rows("continuous", 1)
+resumed0, resumed1 = rows("split-b", 0), rows("split-b", 1)
+if continuous0 != continuous1 or resumed0 != resumed1:
+    raise SystemExit("held-out metrics differ between ranks")
+if set((0, 2, 4)) - continuous0.keys() or set((2, 4)) - resumed0.keys():
+    raise SystemExit("held-out schedule is incomplete")
+if continuous0[4] != resumed0[4]:
+    raise SystemExit("held-out final MSE differs after resume")
+print(f"heldout_contract_ok baseline={continuous0[0]} final={continuous0[4]}")
+PY
 
 echo "training_contract_2xt4_ok root=$root"
