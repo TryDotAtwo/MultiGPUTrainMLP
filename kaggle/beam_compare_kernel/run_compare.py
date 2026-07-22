@@ -92,7 +92,7 @@ for model_name in ("native_step600", "ihes_e32692", "ihes_e40960"):
             rank_env.update({"RANK": str(rank), "LOCAL_RANK": str(rank)})
             handle = open(OUT / f"{model_name}_p{puzzle_id}_rank{rank}.log", "w")
             handles.append(handle)
-            command = [str(BUILD / "production_runner"), str(puzzle_id), str(DEPTH), str(BEAM)]
+            command = ["stdbuf", "-oL", "-eL", str(BUILD / "production_runner"), str(puzzle_id), str(DEPTH), str(BEAM)]
             if rank == 0:
                 proc = subprocess.Popen(command, env=rank_env, stdout=subprocess.PIPE,
                                         stderr=subprocess.STDOUT, text=True, bufsize=1)
