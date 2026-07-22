@@ -29,6 +29,7 @@ add_library(mgt_core STATIC
     src/train_plan.cpp
     src/gradient_carousel.cpp
     src/allreduce.cpp
+    src/training_artifacts.cpp
 )
 
 target_include_directories(mgt_core PUBLIC include)
@@ -68,6 +69,9 @@ add_test(NAME gradient_carousel COMMAND test_gradient_carousel)
 add_executable(test_allreduce tests/test_allreduce.cpp)
 target_link_libraries(test_allreduce PRIVATE mgt_core)
 add_test(NAME allreduce COMMAND test_allreduce)
+add_executable(test_training_artifacts tests/test_training_artifacts.cpp)
+target_link_libraries(test_training_artifacts PRIVATE mgt_core)
+add_test(NAME training_artifacts COMMAND test_training_artifacts)
 if(MGT_ENABLE_CUDA)
     add_library(mgt_cuda STATIC
         cuda/device_context.cu
