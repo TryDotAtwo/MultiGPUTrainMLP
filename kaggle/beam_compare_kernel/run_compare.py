@@ -14,7 +14,7 @@ BUILD = Path("/tmp/beam-build-t4")
 DATA = Path("/tmp/ihes-data")
 MODELS = Path("/tmp/models")
 OUT = ROOT / "beam-model-comparison"
-PUZZLES = [7, 11]
+PUZZLES = [7]
 DEPTH = 12
 BEAM = 262_144
 
