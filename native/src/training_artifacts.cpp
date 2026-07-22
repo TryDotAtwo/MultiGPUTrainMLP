@@ -2,6 +2,7 @@
 
 #include <array>
 #include <charconv>
+#include <cmath>
 #include <fstream>
 #include <iomanip>
 #include <limits>
@@ -68,6 +69,14 @@ bool SameOptimizer(const CheckpointMetadata& lhs, const CheckpointMetadata& rhs)
 std::uint64_t Fnv1a64(const void* data, std::size_t size) {
     if (data == nullptr && size != 0) return 0;
     return UpdateFnv(kFnvOffset, data, size);
+}
+
+bool AllFinite(const float* values, std::size_t count) {
+    if (values == nullptr && count != 0) return false;
+    for (std::size_t i = 0; i < count; ++i) {
+        if (!std::isfinite(values[i])) return false;
+    }
+    return true;
 }
 
 Status WriteCheckpointMetadata(const std::filesystem::path& path,

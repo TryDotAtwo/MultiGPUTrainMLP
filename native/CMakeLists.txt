@@ -90,6 +90,7 @@ if(MGT_ENABLE_CUDA)
         cuda/mlp_forward.cu
         cuda/mlp_backward.cu
         cuda/adamw.cu
+        cuda/finite_check.cu
     )
     target_include_directories(mgt_cuda PUBLIC include cuda)
     target_link_libraries(mgt_cuda PUBLIC mgt_core CUDA::cublas CUDA::cublasLt)

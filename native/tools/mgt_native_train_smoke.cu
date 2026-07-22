@@ -3,6 +3,7 @@
 #include "mgt/trainer_inputs.hpp"
 #include "mgt/training_artifacts.hpp"
 #include "mgt_cuda/adamw.cuh"
+#include "mgt_cuda/finite_check.cuh"
 #include "mgt_cuda/mlp_backward.cuh"
 #include "mgt_cuda/random_walk_kernel.cuh"
 #ifdef MGT_HAS_NCCL
@@ -20,6 +21,7 @@
 #include <iomanip>
 #include <iostream>
 #include <cstring>
+#include <cmath>
 #include <string>
 #include <vector>
 
@@ -755,6 +757,7 @@ int main(int argc, char** argv) {
     float* d_labels = nullptr;
     float* d_walk_labels = nullptr;
     float* d_loss = nullptr;
+    int* d_nonfinite = nullptr;
     float* d_grad_carousel = nullptr;
     float* d_grad = nullptr;
     float* d_backward_workspace = nullptr;
@@ -774,6 +777,7 @@ int main(int argc, char** argv) {
     if (Check(cudaMalloc(&d_labels, static_cast<std::uint64_t>(kSamples) * shape.output_dim * sizeof(float))) != 0) return EXIT_FAILURE;
     if (shape.output_dim > 1U && Check(cudaMalloc(&d_walk_labels, kSamples * sizeof(float))) != 0) return EXIT_FAILURE;
     if (Check(cudaMalloc(&d_loss, sizeof(float))) != 0) return EXIT_FAILURE;
+    if (Check(cudaMalloc(&d_nonfinite, sizeof(int))) != 0) return EXIT_FAILURE;
     if (Check(cudaMalloc(&d_grad_carousel, params * train_plan.gradient_carousel_slots * sizeof(float))) != 0) return EXIT_FAILURE;
     d_grad = d_grad_carousel;
     const std::uint64_t backward_workspace_floats = mgt_cuda::MlpLossGradWorkspaceFloats(shape, kSamples, train_plan.config.runtime.input_grad_partial_chunks, args.input_grad_fp16, args.linear_fp16);
@@ -943,6 +947,10 @@ int main(int argc, char** argv) {
         } else {
             if (mgt_cuda::LaunchAdamWKernel(adam, d_weights, d_grad, d_m, d_v, compute_stream) != mgt::Status::kOk) return EXIT_FAILURE;
         }
+        if (mgt_cuda::LaunchFiniteTrainingCheck(
+                d_loss, d_grad, d_weights, params, d_nonfinite, compute_stream) != mgt::Status::kOk) {
+            return EXIT_FAILURE;
+        }
         if (Check(cudaEventRecord(step_stop, compute_stream)) != 0) return EXIT_FAILURE;
         if (Check(cudaEventSynchronize(step_stop)) != 0) return EXIT_FAILURE;
 #ifdef MGT_HAS_NVTX
@@ -958,7 +966,15 @@ int main(int argc, char** argv) {
         if (Check(cudaEventElapsedTime(&backward_ms, walk_stop, backward_stop)) != 0) return EXIT_FAILURE;
         if (Check(cudaEventElapsedTime(&allreduce_ms, backward_stop, allreduce_stop)) != 0) return EXIT_FAILURE;
         if (Check(cudaEventElapsedTime(&adam_ms, allreduce_stop, step_stop)) != 0) return EXIT_FAILURE;
-        if (Check(cudaMemcpy(&last_loss, d_loss, sizeof(float), cudaMemcpyDeviceToHost)) != 0) return EXIT_FAILURE;
+        int nonfinite = 0;
+        if (Check(cudaMemcpy(&last_loss, d_loss, sizeof(float), cudaMemcpyDeviceToHost)) != 0 ||
+            Check(cudaMemcpy(&nonfinite, d_nonfinite, sizeof(int), cudaMemcpyDeviceToHost)) != 0) {
+            return EXIT_FAILURE;
+        }
+        if (nonfinite != 0 || !std::isfinite(last_loss)) {
+            std::cerr << "non-finite training state at global_step=" << global_step << "\n";
+            return EXIT_FAILURE;
+        }
         const std::uint64_t completed_steps = global_step + 1ULL;
         const bool write_periodic_checkpoint =
             args.write_artifacts &&
@@ -1069,6 +1085,7 @@ int main(int argc, char** argv) {
     if (d_lt_workspace != nullptr) cudaFree(d_lt_workspace);
     cudaFree(d_backward_workspace);
     cudaFree(d_grad_carousel);
+    cudaFree(d_nonfinite);
     cudaFree(d_loss);
     cudaFree(d_labels);
     if (d_weights_half != nullptr) cudaFree(d_weights_half);

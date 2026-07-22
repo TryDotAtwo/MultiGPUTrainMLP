@@ -29,7 +29,7 @@ if [ "${MGT_SWEEP_RUN_CTEST:-1}" = "1" ]; then
       --timeout-sec "${MGT_GPU_IDLE_TIMEOUT_SEC:-900}" \
       --poll-sec "${MGT_GPU_IDLE_POLL_SEC:-5}"
   fi
-  ctest --test-dir "$build_dir" -R 'cuda_compile|cuda_random_walk_smoke|cuda_adamw_smoke|cuda_mlp_forward_smoke|cuda_mlp_backward_smoke|cuda_train_step_smoke|nccl_single_rank_smoke|nccl_two_device_smoke|native_train_smoke|native_train_profile_smoke|native_train_input_grad_.*backend|native_train_resume_smoke|native_train_artifacts' --output-on-failure -C Release
+  ctest --test-dir "$build_dir" -R 'cuda_compile|cuda_random_walk_smoke|cuda_adamw_smoke|cuda_mlp_forward_smoke|cuda_mlp_backward_smoke|cuda_train_step_smoke|nccl_single_rank_smoke|nccl_two_device_smoke|native_train_smoke|native_train_profile_smoke|native_train_input_grad_.*backend|native_train_resume_smoke|native_train_periodic_smoke|native_train_periodic_artifacts|native_train_artifacts|cuda_mlp_backward_cpu_compare|cuda_mlp_backward_mixed_precision_error' --output-on-failure -C Release
 else
   cmake --build "$build_dir" --config Release --target mgt_native_train
 fi
@@ -109,6 +109,7 @@ while read -r config_id batch_size position_tile lt_workspace bucket_bytes backw
   MGT_BACKWARD_PROFILE="$backward_profile" \
   MGT_OVERLAP_ALLREDUCE="$overlap_allreduce" \
   MGT_WRITE_ARTIFACTS=0 \
+  MGT_SYNTHETIC_BENCHMARK=1 \
   MGT_INPUT_GRAD_FP16="${MGT_INPUT_GRAD_FP16:-1}" \
   MGT_LINEAR_FP16="${MGT_LINEAR_FP16:-1}" \
   MGT_LT_AUTOTUNE="$config_lt_autotune" \

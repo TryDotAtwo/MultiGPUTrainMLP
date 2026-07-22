@@ -84,6 +84,14 @@ int main() {
         changed_fingerprint == first_fingerprint) {
         return EXIT_FAILURE;
     }
+    mgt::TrainerPuzzleInputs production{};
+    production.group_json = "native/production_inputs/p888.json";
+    production.target_bin = fixtures / "p888-target.bin";
+    if (mgt::LoadTrainerPuzzle(production, config, &puzzle, &fingerprint) != mgt::Status::kOk ||
+        puzzle.moves[0].v[0] == 0 || puzzle.moves[0].v[1] == 1) {
+        return EXIT_FAILURE;
+    }
+
     std::filesystem::remove(changed_target);
     return EXIT_SUCCESS;
 }

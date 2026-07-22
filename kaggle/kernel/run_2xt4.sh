@@ -29,8 +29,8 @@ if [ "${MGT_WAIT_GPU_IDLE:-1}" = "1" ]; then
     --timeout-sec "${MGT_GPU_IDLE_TIMEOUT_SEC:-900}" \
     --poll-sec "${MGT_GPU_IDLE_POLL_SEC:-5}"
 fi
-ctest --test-dir build-kaggle-2xt4 -R 'cuda_compile|cuda_random_walk_smoke|cuda_adamw_smoke|cuda_mlp_forward_smoke|cuda_mlp_backward_smoke|cuda_train_step_smoke|nccl_single_rank_smoke|nccl_two_device_smoke|native_train_smoke|native_train_profile_smoke|native_train_resume_smoke|native_train_artifacts' --output-on-failure -C Release
-MGT_SKIP_BUILD=1 MGT_BUILD_DIR=build-kaggle-2xt4 bash kaggle/kernel/run_ranks_2xt4.sh
+ctest --test-dir build-kaggle-2xt4 -R 'cuda_compile|cuda_random_walk_smoke|cuda_adamw_smoke|cuda_mlp_forward_smoke|cuda_mlp_backward_smoke|cuda_train_step_smoke|nccl_single_rank_smoke|nccl_two_device_smoke|native_train_smoke|native_train_profile_smoke|native_train_resume_smoke|native_train_periodic_smoke|native_train_periodic_artifacts|native_train_artifacts|cuda_mlp_backward_cpu_compare|cuda_mlp_backward_mixed_precision_error' --output-on-failure -C Release
+MGT_SYNTHETIC_BENCHMARK=1 MGT_SKIP_BUILD=1 MGT_BUILD_DIR=build-kaggle-2xt4 bash kaggle/kernel/run_ranks_2xt4.sh
 if [ "${MGT_CLEAN_BUILD_OUTPUT:-0}" = "1" ]; then
   rm -rf build-kaggle-2xt4 payload.zip
 fi

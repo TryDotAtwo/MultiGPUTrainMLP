@@ -64,10 +64,24 @@ if [ "${MGT_FULL_MODEL:-0}" = "1" ]; then
   export MGT_HD2="${MGT_HD2:-218}"
   export MGT_NRD="${MGT_NRD:-16}"
 fi
+input_args=()
+if [ -n "${MGT_GROUP_JSON:-}" ] || [ -n "${MGT_TARGET_BIN:-}" ]; then
+  test -n "${MGT_GROUP_JSON:-}" && test -n "${MGT_TARGET_BIN:-}"
+  input_args=(--group-json "$MGT_GROUP_JSON" --target-bin "$MGT_TARGET_BIN")
+elif [ "${MGT_SYNTHETIC_BENCHMARK:-0}" = "1" ]; then
+  input_args=(--synthetic-benchmark 1)
+else
+  echo "production run requires MGT_GROUP_JSON and MGT_TARGET_BIN; set MGT_SYNTHETIC_BENCHMARK=1 only for benchmarks" >&2
+  exit 2
+fi
 pids=()
 for rank in $(seq 0 $((world_size - 1))); do
+  resume_args=()
+  if [ -n "${MGT_RESUME_ROOT:-}" ]; then
+    resume_args=(--resume-checkpoint "$MGT_RESUME_ROOT/rank${rank}/checkpoint")
+  fi
   "$build_dir/mgt_native_train" \
-    --synthetic-benchmark 1 \
+    "${input_args[@]}" \
     --output-dir "$run_root/rank${rank}" \
     --steps "${MGT_STEPS:-3}" \
     --device-id "$rank" \
@@ -82,6 +96,8 @@ for rank in $(seq 0 $((world_size - 1))); do
     --nrd "${MGT_NRD:-1}" \
     --output-dim "${MGT_OUTPUT_DIM:-1}" \
     --write-artifacts "${MGT_WRITE_ARTIFACTS:-1}" \
+    --checkpoint-period-steps "${MGT_CHECKPOINT_PERIOD_STEPS:-0}" \
+    --weight-export-period-steps "${MGT_WEIGHT_EXPORT_PERIOD_STEPS:-0}" \
     --backward-profile "${MGT_BACKWARD_PROFILE:-0}" \
     --input-grad-fp16 "${MGT_INPUT_GRAD_FP16:-0}" \
     --input-grad-position-tile "${MGT_INPUT_GRAD_POSITION_TILE:-0}" \
@@ -94,6 +110,7 @@ for rank in $(seq 0 $((world_size - 1))); do
     --lt-autotune-iters "${MGT_LT_AUTOTUNE_ITERS:-2}" \
     --overlap-allreduce "${MGT_OVERLAP_ALLREDUCE:-1}" \
     --allreduce-bucket-bytes "${MGT_ALLREDUCE_BUCKET_BYTES:-4194304}" \
+    "${resume_args[@]}" \
     --nccl-id-file "$run_root/nccl.id" > "$run_root/rank${rank}.stdout" 2>&1 &
   pids+=("$!")
 done

@@ -30,6 +30,8 @@ std::uint64_t Fnv1a64(const void* data, std::size_t size);
 Status WriteCheckpointMetadata(const std::filesystem::path& path,
                                const CheckpointMetadata& metadata);
 
+bool AllFinite(const float* values, std::size_t count);
+
 Status ReadCheckpointMetadata(const std::filesystem::path& path,
                               CheckpointMetadata* metadata);
 

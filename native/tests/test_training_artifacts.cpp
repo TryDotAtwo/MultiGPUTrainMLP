@@ -59,6 +59,14 @@ int main() {
     if (mgt::ShouldWritePeriodicArtifact(17, 0, false)) return EXIT_FAILURE;
     if (!mgt::ShouldWritePeriodicArtifact(17, 0, true)) return EXIT_FAILURE;
 
+    const float finite_values[] = {0.0f, -1.0f, 3.5f};
+    if (!mgt::AllFinite(finite_values, 3)) return EXIT_FAILURE;
+    const float nan_values[] = {0.0f, std::numeric_limits<float>::quiet_NaN()};
+    if (mgt::AllFinite(nan_values, 2)) return EXIT_FAILURE;
+    const float inf_values[] = {std::numeric_limits<float>::infinity()};
+    if (mgt::AllFinite(inf_values, 1)) return EXIT_FAILURE;
+    if (mgt::AllFinite(nullptr, 1)) return EXIT_FAILURE;
+
     const std::filesystem::path current = root / "latest";
     const std::filesystem::path staged = root / "latest.tmp";
     std::filesystem::create_directories(current);
