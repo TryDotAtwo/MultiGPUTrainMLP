@@ -1,0 +1,19 @@
+{
+  "id": "trydotatwo/p888-model-beam-compare-2xt4",
+  "title": "p888-model-beam-compare-2xt4",
+  "code_file": "run_compare.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "machine_shape": "NvidiaTeslaT4",
+  "dataset_sources": [
+    "arabidopsisthalian/ihes-model-1778521793",
+    "arabidopsisthalian/model-ihes-1780290207-e40960"
+  ],
+  "competition_sources": [],
+  "kernel_sources": ["trydotatwo/native-multigpu-mlp-beam-export-2xt4"],
+  "model_sources": []
+}
