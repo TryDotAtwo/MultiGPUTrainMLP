@@ -34,7 +34,7 @@ else
   cmake --build "$build_dir" --config Release --target mgt_native_train
 fi
 cat > "$sweep_root/sweep_manifest.tsv" <<'EOF'
-config_id	batch_size	input_grad_position_tile	lt_workspace_bytes	allreduce_bucket_bytes	backward_profile	overlap_allreduce	input_grad_sparse	cutlass_half_gemm_kinds
+config_id	batch_size	input_grad_position_tile	lt_workspace_bytes	allreduce_bucket_bytes	backward_profile	overlap_allreduce	input_grad_sparse	cutlass_half_gemm_kinds	lt_autotune
 EOF
 default_configs=$(cat <<'EOF'
 b49152_t36_ws0_bucket4m 49152 36 0 4194304 0 1 0
@@ -68,7 +68,7 @@ EOF
 )
 configs_text="${MGT_SWEEP_CONFIGS:-$default_configs}"
 configs_text="${configs_text//\\n/$'\n'}"
-while read -r config_id batch_size position_tile lt_workspace bucket_bytes backward_profile overlap_allreduce input_grad_sparse cutlass_kinds; do
+while read -r config_id batch_size position_tile lt_workspace bucket_bytes backward_profile overlap_allreduce input_grad_sparse cutlass_kinds config_lt_autotune; do
   if [ -z "${config_id:-}" ]; then
     continue
   fi
@@ -77,6 +77,7 @@ while read -r config_id batch_size position_tile lt_workspace bucket_bytes backw
   esac
   input_grad_sparse="${input_grad_sparse:-0}"
   cutlass_kinds="${cutlass_kinds:-$base_cutlass_kinds}"
+  config_lt_autotune="${config_lt_autotune:-${MGT_LT_AUTOTUNE:-0}}"
   cutlass_safe="${cutlass_kinds//,/__}"
   cutlass_safe="${cutlass_safe//;/__}"
   cutlass_safe="${cutlass_safe// /}"
@@ -90,8 +91,8 @@ while read -r config_id batch_size position_tile lt_workspace bucket_bytes backw
   fi
   run_dir="$sweep_root/$config_id"
   mkdir -p "$run_dir"
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$config_id" "$batch_size" "$position_tile" "$lt_workspace" "$bucket_bytes" "$backward_profile" "$overlap_allreduce" "$input_grad_sparse" "$cutlass_kinds" >> "$sweep_root/sweep_manifest.tsv"
-  echo "sweep_config_start id=${config_id} batch=${batch_size} tile=${position_tile} workspace=${lt_workspace} bucket=${bucket_bytes} profile=${backward_profile} overlap=${overlap_allreduce} sparse=${input_grad_sparse} cutlass=${cutlass_kinds}"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$config_id" "$batch_size" "$position_tile" "$lt_workspace" "$bucket_bytes" "$backward_profile" "$overlap_allreduce" "$input_grad_sparse" "$cutlass_kinds" "$config_lt_autotune" >> "$sweep_root/sweep_manifest.tsv"
+  echo "sweep_config_start id=${config_id} batch=${batch_size} tile=${position_tile} workspace=${lt_workspace} bucket=${bucket_bytes} profile=${backward_profile} overlap=${overlap_allreduce} sparse=${input_grad_sparse} cutlass=${cutlass_kinds} lt_autotune=${config_lt_autotune}"
   set +e
   MGT_CONFIG_ID="$config_id" \
   MGT_BUILD_DIR="$selector_build_dir" \
@@ -110,7 +111,7 @@ while read -r config_id batch_size position_tile lt_workspace bucket_bytes backw
   MGT_WRITE_ARTIFACTS=0 \
   MGT_INPUT_GRAD_FP16="${MGT_INPUT_GRAD_FP16:-1}" \
   MGT_LINEAR_FP16="${MGT_LINEAR_FP16:-1}" \
-  MGT_LT_AUTOTUNE="${MGT_LT_AUTOTUNE:-0}" \
+  MGT_LT_AUTOTUNE="$config_lt_autotune" \
   MGT_LT_AUTOTUNE_CANDIDATES="${MGT_LT_AUTOTUNE_CANDIDATES:-8}" \
   MGT_LT_AUTOTUNE_WARMUPS="${MGT_LT_AUTOTUNE_WARMUPS:-1}" \
   MGT_LT_AUTOTUNE_ITERS="${MGT_LT_AUTOTUNE_ITERS:-2}" \
