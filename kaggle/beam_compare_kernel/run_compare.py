@@ -65,6 +65,7 @@ shutil.copytree(native_manifests[0].parent, new_dir)
 subprocess.run([
     "cmake", "-S", str(REPO), "-B", str(BUILD), "-G", "Ninja",
     "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_CUDA_ARCHITECTURES=75", "-DCUTLASS_DIR=/tmp/cutlass",
+    f"-DBEAM_PUZZLE_INFO_JSON={DATA / 'puzzle_info.json'}",
 ], check=True)
 subprocess.run(["cmake", "--build", str(BUILD), "--target", "production_runner", "-j", "2"], check=True)
 
