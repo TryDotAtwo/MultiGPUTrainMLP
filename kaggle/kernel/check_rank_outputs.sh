@@ -30,7 +30,7 @@ for rank in $(seq 0 $((world_size - 1))); do
     test -s "$run_dir/weights/input_weight_hxk.fp16"
     test -s "$run_dir/weights/hidden_weight_hxk.fp16"
     test -s "$run_dir/weights/output_weight_hxk.fp16"
-    test -s "$run_dir/checkpoint/manifest.json"
+    test -s "$run_dir/checkpoint/manifest.env"
     test -s "$run_dir/checkpoint/state.f32.bin"
   fi
   grep -q "WORLD_SIZE=${world_size}" "$run_dir/metadata.env"
@@ -51,7 +51,7 @@ for rank in $(seq 0 $((world_size - 1))); do
     grep -q "\"nrd\": ${MGT_NRD:-1}" "$run_dir/weights/manifest.json"
     grep -q "\"original_hd1\": ${MGT_HD1:-5}" "$run_dir/weights/manifest.json"
     grep -q "\"original_hd2\": ${MGT_HD2:-3}" "$run_dir/weights/manifest.json"
-    grep -q '"format": "mgt_train_checkpoint"' "$run_dir/checkpoint/manifest.json"
+    grep -q 'format=mgt_train_checkpoint' "$run_dir/checkpoint/manifest.env"
   fi
   current=$(grep '^GLOBAL_RANK=' "$run_dir/metadata.env" | cut -d= -f2)
   case " $seen " in

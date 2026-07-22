@@ -91,6 +91,6 @@ kaggle kernels push -p test_results/mgt_kaggle_kernel --accelerator NvidiaTeslaT
 - `layers.json` с раскладкой слоев;
 - `profile.jsonl` с таймингами шагов;
 - `weights/manifest.json` и файлы весов при `--write-artifacts 1`;
-- `checkpoint/manifest.json` и состояние оптимизатора при включенном checkpoint.
+- `checkpoint/manifest.env` и состояние оптимизатора при включенном checkpoint.
 
 Быстрый путь не делает динамических аллокаций внутри training step после построения плана. Паддинг, размеры слоев, gradient buckets, carousel slots и `output_dim` берутся из конфига и расчетной раскладки, а не из hard-coded чисел в ядрах.

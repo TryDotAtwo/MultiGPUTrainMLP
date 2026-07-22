@@ -1,6 +1,7 @@
 #include "mgt/puzzle_io.hpp"
 #include "mgt/train_plan.hpp"
 #include "mgt/trainer_inputs.hpp"
+#include "mgt/training_artifacts.hpp"
 #include "mgt_cuda/adamw.cuh"
 #include "mgt_cuda/mlp_backward.cuh"
 #include "mgt_cuda/random_walk_kernel.cuh"
@@ -337,57 +338,50 @@ bool WriteCheckpoint(const std::filesystem::path& output_dir,
                      const std::vector<float>& weights,
                      const std::vector<float>& adam_m,
                      const std::vector<float>& adam_v,
-                     std::uint32_t steps,
-                     const mgt_cuda::CudaMlpShape& shape,
-                     std::uint32_t requested_hd1,
-                     std::uint32_t requested_hd2,
+                     std::uint64_t completed_steps,
+                     const std::string& fingerprint,
                      const mgt::TrainPlan& train_plan) {
     if (weights.size() != adam_m.size() || weights.size() != adam_v.size()) return false;
     std::filesystem::create_directories(output_dir / "checkpoint");
-    std::ofstream data(output_dir / "checkpoint" / "state.f32.bin", std::ios::binary);
-    if (!data) return false;
-    data.write(reinterpret_cast<const char*>(weights.data()), static_cast<std::streamsize>(weights.size() * sizeof(float)));
-    data.write(reinterpret_cast<const char*>(adam_m.data()), static_cast<std::streamsize>(adam_m.size() * sizeof(float)));
-    data.write(reinterpret_cast<const char*>(adam_v.data()), static_cast<std::streamsize>(adam_v.size() * sizeof(float)));
-    if (!data) return false;
-    std::ofstream manifest(output_dir / "checkpoint" / "manifest.json", std::ios::binary);
-    if (!manifest) return false;
-    manifest << "{\n"
-             << "  \"format\": \"mgt_train_checkpoint\",\n"
-             << "  \"version\": 1,\n"
-             << "  \"step\": " << steps << ",\n"
-             << "  \"model_mode\": \"MLP2RB\",\n"
-             << "  \"output_dim\": " << shape.output_dim << ",\n"
-             << "  \"state_len\": " << shape.state_len << ",\n"
-             << "  \"state_storage_len\": " << train_plan.padded_state_dim << ",\n"
-             << "  \"num_classes\": " << shape.state_value_pad << ",\n"
-             << "  \"hd1\": " << requested_hd1 << ",\n"
-             << "  \"physical_hd1\": " << shape.hd1 << ",\n"
-             << "  \"hd2\": " << requested_hd2 << ",\n"
-             << "  \"physical_hd2\": " << shape.hd2 << ",\n"
-             << "  \"nrd\": " << shape.residual_blocks << ",\n"
-             << "  \"optimizer\": \"AdamW\",\n"
-             << "  \"weight_decay\": " << train_plan.config.train.weight_decay << ",\n"
-             << "  \"dtype\": \"float32\",\n"
-             << "  \"data\": \"state.f32.bin\",\n"
-             << "  \"sections\": [\"weights\", \"adam_m\", \"adam_v\"],\n"
-             << "  \"params_per_section\": " << weights.size() << "\n"
-             << "}\n";
-    return static_cast<bool>(manifest);
+    mgt::CheckpointMetadata metadata{};
+    metadata.completed_steps = completed_steps;
+    metadata.param_count = weights.size();
+    metadata.fingerprint = fingerprint;
+    metadata.seed = train_plan.config.train.seed;
+    metadata.learning_rate = train_plan.config.train.lr;
+    metadata.weight_decay = train_plan.config.train.weight_decay;
+    metadata.adam_beta1 = 0.9f;
+    metadata.adam_beta2 = 0.999f;
+    metadata.adam_eps = 1.0e-8f;
+    if (mgt::WriteCheckpointPayload(
+            output_dir / "checkpoint" / "state.f32.bin",
+            weights, adam_m, adam_v, &metadata) != mgt::Status::kOk) {
+        return false;
+    }
+    return mgt::WriteCheckpointMetadata(
+               output_dir / "checkpoint" / "manifest.env", metadata) ==
+           mgt::Status::kOk;
 }
 
 bool ReadCheckpoint(const std::filesystem::path& checkpoint_dir,
+                    const mgt::CheckpointMetadata& expected,
                     std::vector<float>* weights,
                     std::vector<float>* adam_m,
-                    std::vector<float>* adam_v) {
-    if (weights == nullptr || adam_m == nullptr || adam_v == nullptr) return false;
-    if (weights->size() != adam_m->size() || weights->size() != adam_v->size()) return false;
-    std::ifstream data(checkpoint_dir / "state.f32.bin", std::ios::binary);
-    if (!data) return false;
-    data.read(reinterpret_cast<char*>(weights->data()), static_cast<std::streamsize>(weights->size() * sizeof(float)));
-    data.read(reinterpret_cast<char*>(adam_m->data()), static_cast<std::streamsize>(adam_m->size() * sizeof(float)));
-    data.read(reinterpret_cast<char*>(adam_v->data()), static_cast<std::streamsize>(adam_v->size() * sizeof(float)));
-    return static_cast<bool>(data);
+                    std::vector<float>* adam_v,
+                    std::uint64_t* completed_steps) {
+    if (completed_steps == nullptr) return false;
+    mgt::CheckpointMetadata actual{};
+    if (mgt::ReadCheckpointMetadata(
+            checkpoint_dir / "manifest.env", &actual) != mgt::Status::kOk ||
+        mgt::ValidateCheckpointCompatibility(actual, expected) !=
+            mgt::Status::kOk ||
+        mgt::ReadCheckpointPayload(
+            checkpoint_dir / "state.f32.bin", actual,
+            weights, adam_m, adam_v) != mgt::Status::kOk) {
+        return false;
+    }
+    *completed_steps = actual.completed_steps;
+    return true;
 }
 bool ParseUint(const char* text, std::uint32_t* out) {
     try {
@@ -469,7 +463,7 @@ struct GradientCommContext {
     bool enabled = false;
     std::uint32_t world_size = 1;
     std::uint32_t global_rank = 0;
-    std::uint32_t step = 0;
+    std::uint64_t step = 0;
     std::uint64_t bucket_params = 0;
     float* gradients = nullptr;
     mgt_cuda::NcclRankContext* nccl_context = nullptr;
@@ -653,8 +647,6 @@ int main(int argc, char** argv) {
         weights[i] = static_cast<float>((static_cast<int>(i % 29) - 14) * 0.0001);
     }
     const bool resumed = !args.resume_checkpoint.empty();
-    if (resumed && !ReadCheckpoint(args.resume_checkpoint, &weights, &host_adam_m, &host_adam_v)) return EXIT_FAILURE;
-
     mgt::PuzzleDefinition puzzle{};
     std::string puzzle_fingerprint;
     const mgt::TrainerPuzzleInputs puzzle_inputs{
@@ -663,6 +655,38 @@ int main(int argc, char** argv) {
         mgt::LoadTrainerPuzzle(puzzle_inputs, train_config, &puzzle, &puzzle_fingerprint);
     if (puzzle_status != mgt::Status::kOk) {
         std::cerr << "puzzle input error: " << StatusName(puzzle_status) << "\n";
+        return EXIT_FAILURE;
+    }
+    const std::string training_fingerprint =
+        puzzle_fingerprint +
+        ":state=" + std::to_string(shape.state_len) +
+        ":classes=" + std::to_string(shape.state_value_pad) +
+        ":hd1=" + std::to_string(shape.hd1) +
+        ":hd2=" + std::to_string(shape.hd2) +
+        ":nrd=" + std::to_string(shape.residual_blocks) +
+        ":out=" + std::to_string(shape.output_dim) +
+        ":batch=" + std::to_string(kSamples) +
+        ":kmin=" + std::to_string(args.k_min) +
+        ":kmax=" + std::to_string(args.k_max) +
+        ":world=" + std::to_string(args.world_size) +
+        ":inputfp16=" + std::to_string(args.input_grad_fp16 ? 1 : 0) +
+        ":linearfp16=" + std::to_string(args.linear_fp16 ? 1 : 0);
+    mgt::CheckpointMetadata expected_checkpoint{};
+    expected_checkpoint.param_count = params;
+    expected_checkpoint.payload_bytes = 3ULL * params * sizeof(float);
+    expected_checkpoint.fingerprint = training_fingerprint;
+    expected_checkpoint.seed = train_plan.config.train.seed;
+    expected_checkpoint.learning_rate = train_plan.config.train.lr;
+    expected_checkpoint.weight_decay = train_plan.config.train.weight_decay;
+    expected_checkpoint.adam_beta1 = 0.9f;
+    expected_checkpoint.adam_beta2 = 0.999f;
+    expected_checkpoint.adam_eps = 1.0e-8f;
+    std::uint64_t resume_completed_steps = 0;
+    if (resumed &&
+        !ReadCheckpoint(args.resume_checkpoint, expected_checkpoint,
+                        &weights, &host_adam_m, &host_adam_v,
+                        &resume_completed_steps)) {
+        std::cerr << "checkpoint is missing, corrupt, or incompatible\n";
         return EXIT_FAILURE;
     }
     float* d_weights = nullptr;
@@ -782,13 +806,14 @@ int main(int argc, char** argv) {
 
     float last_loss = 0.0f;
     for (std::uint32_t step = 0; step < args.steps; ++step) {
+        const std::uint64_t global_step = mgt::GlobalStep(resume_completed_steps, step);
 #ifdef MGT_HAS_NVTX
         nvtxRangePushA("mgt_train_step");
 #endif
         if (Check(cudaEventRecord(step_start, compute_stream)) != 0) return EXIT_FAILURE;
         const mgt_cuda::RandomWalkKernelConfig walks{kSamples, train_plan.config.train.k_min, train_plan.config.train.k_max, train_plan.config.puzzle.move_count, train_plan.config.puzzle.raw_state_dim, train_plan.padded_state_dim};
         float* walk_labels = shape.output_dim == 1U ? d_labels : d_walk_labels;
-        if (mgt_cuda::LaunchRandomWalkKernel(walks, train_plan.config.train.seed, 0, step, args.global_rank, d_moves, d_target, d_states, walk_labels, d_meta, compute_stream) != mgt::Status::kOk) return EXIT_FAILURE;
+        if (mgt_cuda::LaunchRandomWalkKernel(walks, train_plan.config.train.seed, 0, global_step, args.global_rank, d_moves, d_target, d_states, walk_labels, d_meta, compute_stream) != mgt::Status::kOk) return EXIT_FAILURE;
         if (shape.output_dim > 1U) {
             const std::uint64_t label_items = static_cast<std::uint64_t>(kSamples) * shape.output_dim;
             const std::uint32_t threads = 128;
@@ -806,7 +831,7 @@ int main(int argc, char** argv) {
             comm_context.enabled = true;
             comm_context.world_size = args.world_size;
             comm_context.global_rank = args.global_rank;
-            comm_context.step = step;
+            comm_context.step = global_step;
             comm_context.bucket_params = std::max<std::uint64_t>(1ULL, train_plan.config.runtime.allreduce_bucket_bytes / sizeof(float));
             comm_context.gradients = d_grad;
             comm_context.nccl_context = nccl_context;
@@ -824,7 +849,7 @@ int main(int argc, char** argv) {
                 ? mgt_cuda::LaunchMlpLossGradKernelProfiledWithWorkspaceLtExternalHalf(shape, d_weights, d_weights_half, d_states, d_labels, kSamples, d_loss, d_grad, d_backward_workspace, backward_workspace_floats, backward_blas, backward_blas_lt, train_plan.config.runtime.input_grad_partial_chunks, train_plan.config.runtime.input_grad_positions_per_block, args.input_grad_fp16, args.linear_fp16, &backward_profile, compute_stream, d_lt_workspace, args.lt_workspace_bytes, train_plan.config.runtime.input_grad_position_tile, train_plan.config.runtime.input_grad_sparse)
                 : mgt_cuda::LaunchMlpLossGradKernelWithWorkspaceLtExternalHalf(shape, d_weights, d_weights_half, d_states, d_labels, kSamples, d_loss, d_grad, d_backward_workspace, backward_workspace_floats, backward_blas, backward_blas_lt, train_plan.config.runtime.input_grad_partial_chunks, train_plan.config.runtime.input_grad_positions_per_block, args.input_grad_fp16, args.linear_fp16, compute_stream, d_lt_workspace, args.lt_workspace_bytes, train_plan.config.runtime.input_grad_position_tile, train_plan.config.runtime.input_grad_sparse));
         if (backward_status != mgt::Status::kOk) {
-            log << "rank=" << args.global_rank << " step=" << step << " phase=backward status=" << StatusName(backward_status)
+            log << "rank=" << args.global_rank << " step=" << global_step << " phase=backward status=" << StatusName(backward_status)
                 << " status_code=" << static_cast<int>(backward_status) << "\n";
             std::cerr << "backward failed: " << StatusName(backward_status) << " (" << static_cast<int>(backward_status) << ")\n";
             return EXIT_FAILURE;
@@ -839,14 +864,14 @@ int main(int argc, char** argv) {
                 if (Check(cudaEventRecord(comm_done_event, comm_stream)) != 0) return EXIT_FAILURE;
                 if (Check(cudaStreamWaitEvent(compute_stream, comm_done_event, 0)) != 0) return EXIT_FAILURE;
             } else {
-                const mgt::AllreduceConfig allreduce{args.world_size, args.global_rank, step, static_cast<std::size_t>(params)};
+                const mgt::AllreduceConfig allreduce{args.world_size, args.global_rank, global_step, static_cast<std::size_t>(params)};
                 if (mgt_cuda::NcclAllreduceAverageFloat(allreduce, d_grad, nccl_context, compute_stream) != mgt::Status::kOk) return EXIT_FAILURE;
                 overlap_chunks = args.world_size > 1 ? 1U : 0U;
             }
         }
 #endif
         if (Check(cudaEventRecord(allreduce_stop, compute_stream)) != 0) return EXIT_FAILURE;
-        const mgt_cuda::AdamWKernelConfig adam{params, static_cast<std::uint64_t>(step) + 1ULL, train_plan.config.train.lr, 0.9f, 0.999f, 1.0e-8f, train_plan.config.train.weight_decay};
+        const mgt_cuda::AdamWKernelConfig adam{params, global_step + 1ULL, train_plan.config.train.lr, 0.9f, 0.999f, 1.0e-8f, train_plan.config.train.weight_decay};
         if (d_weights_half != nullptr) {
             if (mgt_cuda::LaunchAdamWKernelWithHalfMirror(adam, d_weights, d_weights_half, d_grad, d_m, d_v, compute_stream) != mgt::Status::kOk) return EXIT_FAILURE;
         } else {
@@ -872,10 +897,10 @@ int main(int argc, char** argv) {
         std::size_t total_bytes = 0;
         if (Check(cudaMemGetInfo(&free_bytes, &total_bytes)) != 0) return EXIT_FAILURE;
         const std::size_t used_bytes = total_bytes - free_bytes;
-        log << "rank=" << args.global_rank << " step=" << step << " phase=train loss=" << last_loss << " step_ms=" << step_ms
+        log << "rank=" << args.global_rank << " step=" << global_step << " phase=train loss=" << last_loss << " step_ms=" << step_ms
             << " walk_ms=" << walk_ms << " backward_ms=" << backward_ms << " allreduce_ms=" << allreduce_ms
             << " adam_ms=" << adam_ms << " memory_bytes=" << used_bytes << "\n";
-        profile << "{\"rank\":" << args.global_rank << ",\"device\":" << args.device_id << ",\"step\":" << step
+        profile << "{\"rank\":" << args.global_rank << ",\"device\":" << args.device_id << ",\"step\":" << global_step
                 << ",\"phase\":\"train\",\"milliseconds\":" << std::fixed << std::setprecision(3) << step_ms
                 << ",\"walk_ms\":" << walk_ms << ",\"backward_ms\":" << backward_ms
                 << ",\"allreduce_ms\":" << allreduce_ms << ",\"adam_ms\":" << adam_ms
@@ -914,15 +939,15 @@ int main(int argc, char** argv) {
         if (Check(cudaMemcpy(adam_m.data(), d_m, params * sizeof(float), cudaMemcpyDeviceToHost)) != 0) return EXIT_FAILURE;
         if (Check(cudaMemcpy(adam_v.data(), d_v, params * sizeof(float), cudaMemcpyDeviceToHost)) != 0) return EXIT_FAILURE;
         if (!WriteStream1Weights(args.output_dir, weights, shape, requested_hd1, requested_hd2)) return EXIT_FAILURE;
-        if (!WriteCheckpoint(args.output_dir, weights, adam_m, adam_v, args.steps, shape, requested_hd1, requested_hd2, train_plan)) return EXIT_FAILURE;
+        if (!WriteCheckpoint(args.output_dir, weights, adam_m, adam_v, resume_completed_steps + args.steps, training_fingerprint, train_plan)) return EXIT_FAILURE;
     }
 
     std::ofstream meta(args.output_dir / "metadata.env");
     meta << "MODEL_MODE=MLP2RB\nOUTPUT_DIM=" << shape.output_dim << "\nWORLD_SIZE=" << args.world_size << "\nGLOBAL_RANK=" << args.global_rank
          << "\nLOCAL_RANK=" << args.local_rank << "\nDEVICE_ID=" << args.device_id << "\nHD1=" << requested_hd1 << "\nPHYSICAL_HD1=" << shape.hd1 << "\nHD2=" << requested_hd2 << "\nPHYSICAL_HD2=" << shape.hd2 << "\nNUM_CLASSES=" << shape.state_value_pad << "\nNRD=" << shape.residual_blocks
          << "\nK_MIN=" << args.k_min << "\nK_MAX=" << args.k_max << "\nBATCH_SIZE=" << kSamples
-         << "\nPUZZLE_FINGERPRINT=" << puzzle_fingerprint
-         << "\nGRADIENT_CAROUSEL_SLOTS=" << train_plan.gradient_carousel_slots << "\nLT_WORKSPACE_BYTES=" << args.lt_workspace_bytes << "\nLT_AUTOTUNE=" << (args.lt_autotune ? 1 : 0) << "\nLT_AUTOTUNE_CANDIDATES=" << args.lt_autotune_candidates << "\nLT_AUTOTUNE_WARMUPS=" << args.lt_autotune_warmups << "\nLT_AUTOTUNE_ITERS=" << args.lt_autotune_iters << "\nINPUT_GRAD_PARTIAL_CHUNKS=" << train_plan.config.runtime.input_grad_partial_chunks << "\nINPUT_GRAD_POSITIONS_PER_BLOCK=" << train_plan.config.runtime.input_grad_positions_per_block << "\nINPUT_GRAD_POSITION_TILE=" << train_plan.config.runtime.input_grad_position_tile << "\nINPUT_GRAD_SPARSE=" << (train_plan.config.runtime.input_grad_sparse ? 1 : 0) << "\nINPUT_GRAD_FP16=" << (args.input_grad_fp16 ? 1 : 0) << "\nINPUT_GRAD_BACKEND=" << input_grad_backend << "\nLINEAR_FP16=" << (args.linear_fp16 ? 1 : 0) << "\nPERSISTENT_HALF_WEIGHTS=" << (args.persistent_half_weights ? 1 : 0) << "\nOVERLAP_ALLREDUCE=" << (overlap_allreduce ? 1 : 0) << "\nGRADIENT_BUCKETS=" << train_plan.gradient_buckets.size() << "\nNCCL_ENABLED=" << (nccl_enabled ? 1 : 0) << "\nRESUME_CHECKPOINT=" << (resumed ? 1 : 0) << "\nARTIFACTS_WRITTEN=" << (args.write_artifacts ? 1 : 0) << "\nNUM_PARAMETERS=" << params << "\n";
+         << "\nPUZZLE_FINGERPRINT=" << training_fingerprint
+         << "\nRESUME_COMPLETED_STEPS=" << resume_completed_steps << "\nGRADIENT_CAROUSEL_SLOTS=" << train_plan.gradient_carousel_slots << "\nLT_WORKSPACE_BYTES=" << args.lt_workspace_bytes << "\nLT_AUTOTUNE=" << (args.lt_autotune ? 1 : 0) << "\nLT_AUTOTUNE_CANDIDATES=" << args.lt_autotune_candidates << "\nLT_AUTOTUNE_WARMUPS=" << args.lt_autotune_warmups << "\nLT_AUTOTUNE_ITERS=" << args.lt_autotune_iters << "\nINPUT_GRAD_PARTIAL_CHUNKS=" << train_plan.config.runtime.input_grad_partial_chunks << "\nINPUT_GRAD_POSITIONS_PER_BLOCK=" << train_plan.config.runtime.input_grad_positions_per_block << "\nINPUT_GRAD_POSITION_TILE=" << train_plan.config.runtime.input_grad_position_tile << "\nINPUT_GRAD_SPARSE=" << (train_plan.config.runtime.input_grad_sparse ? 1 : 0) << "\nINPUT_GRAD_FP16=" << (args.input_grad_fp16 ? 1 : 0) << "\nINPUT_GRAD_BACKEND=" << input_grad_backend << "\nLINEAR_FP16=" << (args.linear_fp16 ? 1 : 0) << "\nPERSISTENT_HALF_WEIGHTS=" << (args.persistent_half_weights ? 1 : 0) << "\nOVERLAP_ALLREDUCE=" << (overlap_allreduce ? 1 : 0) << "\nGRADIENT_BUCKETS=" << train_plan.gradient_buckets.size() << "\nNCCL_ENABLED=" << (nccl_enabled ? 1 : 0) << "\nRESUME_CHECKPOINT=" << (resumed ? 1 : 0) << "\nARTIFACTS_WRITTEN=" << (args.write_artifacts ? 1 : 0) << "\nNUM_PARAMETERS=" << params << "\n";
     std::ofstream layers(args.output_dir / "layers.json");
     layers << "{\n  \"model_mode\": \"MLP2RB\",\n  \"output_dim\": " << train_plan.layout.output_dim << ",\n  \"state_len\": " << shape.state_len << ",\n  \"state_storage_len\": " << train_plan.padded_state_dim << ",\n  \"num_classes\": " << shape.state_value_pad << ",\n  \"hd1\": " << requested_hd1 << ",\n  \"physical_hd1\": " << shape.hd1 << ",\n  \"hd2\": " << requested_hd2 << ",\n  \"physical_hd2\": " << shape.hd2 << ",\n  \"nrd\": " << shape.residual_blocks << ",\n  \"artifacts_written\": " << (args.write_artifacts ? "true" : "false") << ",\n  \"num_parameters\": " << params << "\n}\n";
     if (!WriteLinearOpsManifest(args.output_dir, train_plan)) return EXIT_FAILURE;

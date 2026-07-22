@@ -38,6 +38,7 @@ input_grad_fp16=""
 linear_fp16=""
 overlap_allreduce=""
 allreduce_bucket_bytes=""
+synthetic_benchmark=""
 lr=""
 weight_decay=""
 while [ "$#" -gt 0 ]; do
@@ -59,6 +60,7 @@ while [ "$#" -gt 0 ]; do
     --linear-fp16) linear_fp16="$2"; shift 2 ;;
     --overlap-allreduce) overlap_allreduce="$2"; shift 2 ;;
     --allreduce-bucket-bytes) allreduce_bucket_bytes="$2"; shift 2 ;;
+    --synthetic-benchmark) synthetic_benchmark="$2"; shift 2 ;;
     --lr) lr="$2"; shift 2 ;;
     --weight-decay) weight_decay="$2"; shift 2 ;;
     *) shift 2 ;;
@@ -83,8 +85,9 @@ INPUT_GRAD_FP16=%s
 LINEAR_FP16=%s
 OVERLAP_ALLREDUCE=%s
 ALLREDUCE_BUCKET_BYTES=%s
+SYNTHETIC_BENCHMARK=%s
 LR=%s
-' "$weight_decay" "$hd1" "$hd2" "$state_len" "$state_value_count" "$move_count" "$state_alignment" "$hidden_alignment" "$batch_size" "$gradient_slots" "$input_grad_partial_chunks" "$input_grad_sparse" "$input_grad_fp16" "$linear_fp16" "$overlap_allreduce" "$allreduce_bucket_bytes" "$lr" > "$out/metadata.env"
+' "$weight_decay" "$hd1" "$hd2" "$state_len" "$state_value_count" "$move_count" "$state_alignment" "$hidden_alignment" "$batch_size" "$gradient_slots" "$input_grad_partial_chunks" "$input_grad_sparse" "$input_grad_fp16" "$linear_fp16" "$overlap_allreduce" "$allreduce_bucket_bytes" "$synthetic_benchmark" "$lr" > "$out/metadata.env"
 printf '{"hd1": %s, "hd2": %s, "output_dim": 1}
 ' "$hd1" "$hd2" > "$out/layers.json"
 printf 'rank=0 phase=train steps=%s
@@ -94,8 +97,8 @@ printf '{"milliseconds":1.0,"memory_bytes":1024,"status":"ok"}
 printf '{"format":"stream1_weights"}
 ' > "$out/weights/manifest.json"
 printf 'weights' > "$out/weights/weights.f32.bin"
-printf '{"format":"mgt_train_checkpoint"}
-' > "$out/checkpoint/manifest.json"
+printf 'format=mgt_train_checkpoint
+' > "$out/checkpoint/manifest.env"
 printf 'checkpoint' > "$out/checkpoint/state.f32.bin"
 printf 'fake native ok
 '
@@ -130,12 +133,14 @@ printf 'fake native ok
     std::env::set_var("MGT_TRAIN_BATCH_SIZE", "17");
     std::env::set_var("MGT_TRAIN_HD1", "7");
     std::env::set_var("MGT_TRAIN_HD2", "4");
+    std::env::set_var("MGT_SYNTHETIC_BENCHMARK", "1");
     native::run_training(&cfg, &output).unwrap();
     std::env::remove_var("MGT_NATIVE_TRAIN_BIN");
     std::env::remove_var("MGT_TRAIN_STEPS");
     std::env::remove_var("MGT_TRAIN_BATCH_SIZE");
     std::env::remove_var("MGT_TRAIN_HD1");
     std::env::remove_var("MGT_TRAIN_HD2");
+    std::env::remove_var("MGT_SYNTHETIC_BENCHMARK");
 
     let metadata = fs::read_to_string(output.join("metadata.env")).unwrap();
     assert!(metadata.contains("MODEL_MODE=MLP2RB"));
@@ -155,6 +160,7 @@ printf 'fake native ok
     assert!(metadata.contains("OVERLAP_ALLREDUCE=1"));
     assert!(metadata.contains("GRADIENT_CAROUSEL_SLOTS=4"));
     assert!(metadata.contains("ALLREDUCE_BUCKET_BYTES=1048576"));
+    assert!(metadata.contains("SYNTHETIC_BENCHMARK=1"));
     assert!(metadata.contains("LR=0.0003"));
     assert!(metadata.contains("WEIGHT_DECAY=0"));
 

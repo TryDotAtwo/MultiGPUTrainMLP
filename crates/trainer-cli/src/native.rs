@@ -52,6 +52,9 @@ pub fn run_training(cfg: &TrainerConfig, output_dir: &Path) -> Result<()> {
     let write_artifacts = read_env_bool("MGT_WRITE_ARTIFACTS", true)?;
     let nccl_id_file = std::env::var_os("MGT_NCCL_ID_FILE").map(PathBuf::from);
     let resume_checkpoint = std::env::var_os("MGT_RESUME_CHECKPOINT").map(PathBuf::from);
+    let group_json = std::env::var_os("MGT_GROUP_JSON").map(PathBuf::from);
+    let target_bin = std::env::var_os("MGT_TARGET_BIN").map(PathBuf::from);
+    let synthetic_benchmark = read_env_bool("MGT_SYNTHETIC_BENCHMARK", false)?;
     let bin = resolve_native_binary()?;
 
     if steps == 0 || steps > u32::MAX as u64 || batch_size == 0 || batch_size > u32::MAX as u64 {
@@ -59,6 +62,13 @@ pub fn run_training(cfg: &TrainerConfig, output_dir: &Path) -> Result<()> {
     }
     if k_min == 0 || k_min > k_max {
         bail!("invalid MGT_TRAIN_K_MIN/MGT_TRAIN_K_MAX range");
+    }
+    if synthetic_benchmark {
+        if group_json.is_some() || target_bin.is_some() {
+            bail!("synthetic benchmark mode cannot use MGT_GROUP_JSON or MGT_TARGET_BIN");
+        }
+    } else if group_json.is_none() || target_bin.is_none() {
+        bail!("production training requires MGT_GROUP_JSON and MGT_TARGET_BIN");
     }
 
     let mut command = Command::new(&bin);
@@ -129,6 +139,12 @@ pub fn run_training(cfg: &TrainerConfig, output_dir: &Path) -> Result<()> {
         .arg(weight_decay.to_string())
         .arg("--write-artifacts")
         .arg(if write_artifacts { "1" } else { "0" });
+    if synthetic_benchmark {
+        command.arg("--synthetic-benchmark").arg("1");
+    } else {
+        command.arg("--group-json").arg(group_json.unwrap());
+        command.arg("--target-bin").arg(target_bin.unwrap());
+    }
     if let Some(path) = nccl_id_file {
         command.arg("--nccl-id-file").arg(path);
     }
@@ -151,7 +167,7 @@ pub fn run_training(cfg: &TrainerConfig, output_dir: &Path) -> Result<()> {
     if write_artifacts {
         require_file(output_dir.join("weights").join("manifest.json"))?;
         require_file(output_dir.join("weights").join("weights.f32.bin"))?;
-        require_file(output_dir.join("checkpoint").join("manifest.json"))?;
+        require_file(output_dir.join("checkpoint").join("manifest.env"))?;
         require_file(output_dir.join("checkpoint").join("state.f32.bin"))?;
     }
     println!("native_training_ok");

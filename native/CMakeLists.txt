@@ -77,6 +77,9 @@ add_executable(test_trainer_inputs tests/test_trainer_inputs.cpp)
 target_link_libraries(test_trainer_inputs PRIVATE mgt_core)
 add_test(NAME trainer_inputs COMMAND test_trainer_inputs)
 set_tests_properties(trainer_inputs PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/..")
+add_executable(test_resume_contract tests/test_resume_contract.cpp)
+target_link_libraries(test_resume_contract PRIVATE mgt_core)
+add_test(NAME resume_contract COMMAND test_resume_contract)
 if(MGT_ENABLE_CUDA)
     add_library(mgt_cuda STATIC
         cuda/device_context.cu

@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <vector>
 
 namespace mgt {
 
@@ -34,6 +35,21 @@ Status ReadCheckpointMetadata(const std::filesystem::path& path,
 
 Status ValidateCheckpointMetadata(const CheckpointMetadata& actual,
                                   const CheckpointMetadata& expected);
+
+Status ValidateCheckpointCompatibility(const CheckpointMetadata& actual,
+                                       const CheckpointMetadata& expected);
+std::uint64_t GlobalStep(std::uint64_t completed_steps,
+                         std::uint64_t local_step);
+Status WriteCheckpointPayload(const std::filesystem::path& path,
+                              const std::vector<float>& weights,
+                              const std::vector<float>& adam_m,
+                              const std::vector<float>& adam_v,
+                              CheckpointMetadata* metadata);
+Status ReadCheckpointPayload(const std::filesystem::path& path,
+                             const CheckpointMetadata& metadata,
+                             std::vector<float>* weights,
+                             std::vector<float>* adam_m,
+                             std::vector<float>* adam_v);
 
 bool ShouldWritePeriodicArtifact(std::uint64_t completed_steps,
                                  std::uint64_t period_steps,
