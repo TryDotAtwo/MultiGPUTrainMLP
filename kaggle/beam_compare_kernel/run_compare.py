@@ -52,44 +52,15 @@ for name, checkpoint in old_checkpoints.items():
         "--format", "batchnorm-folded", "--dtype", "bf16", "--num-classes", "72",
     ], check=True)
 
-new_src = find_one("weights.f32.bin")
-new_manifest = json.loads((new_src.parent / "manifest.json").read_text())
 new_dir = MODELS / "native_step600"
-new_dir.mkdir()
-import numpy as np
-import torch
-flat = np.fromfile(new_src, dtype=np.float32)
-cursor = 0
-ph1, ph2 = int(new_manifest["physical_hd1"]), int(new_manifest["physical_hd2"])
-state_len, classes = int(new_manifest["state_len"]), int(new_manifest["state_value_pad"])
-nrd, output_dim = int(new_manifest["residual_blocks"]), int(new_manifest["output_dim"])
-
-def emit(name, count):
-    global cursor
-    values = torch.from_numpy(flat[cursor:cursor + count].copy()).to(torch.bfloat16)
-    values.view(torch.int16).numpy().tofile(new_dir / f"{name}.bf16")
-    cursor += count
-
-emit("input_weight_hxk", state_len * classes * ph1)
-emit("input_bias", ph1)
-emit("hidden_weight_hxk", ph1 * ph2)
-emit("hidden_bias", ph2)
-for block in range(nrd):
-    emit(f"residual{block}_fc1_weight_hxk", ph2 * ph2)
-    emit(f"residual{block}_fc1_bias", ph2)
-    emit(f"residual{block}_fc2_weight_hxk", ph2 * ph2)
-    emit(f"residual{block}_fc2_bias", ph2)
-emit("output_weight_hxk", ph2 * output_dim)
-emit("output_bias", output_dim)
-if cursor != flat.size:
-    raise RuntimeError(f"native export cursor mismatch {cursor} != {flat.size}")
-(new_dir / "manifest.json").write_text(json.dumps({
-    "state_len": state_len, "num_classes": classes, "hd1": ph1, "hd2": ph2,
-    "original_hd1": int(new_manifest["hd1"]), "original_hd2": int(new_manifest["hd2"]),
-    "nrd": nrd, "output_dim": output_dim, "dtype": "bf16", "normalization": "none",
-    "layout": "row-major input activations times weight_hxk",
-    "source_weights": "native MultiGPUTrainMLP step 600",
-}, indent=2) + "\n")
+native_manifests = []
+for candidate in Path("/kaggle/input").rglob("manifest.json"):
+    manifest = json.loads(candidate.read_text())
+    if manifest.get("flat_debug_weights") == "weights.f32.bin" and manifest.get("normalization") == "none":
+        native_manifests.append(candidate)
+if len(native_manifests) != 1:
+    raise RuntimeError(f"expected one native inference manifest, got {native_manifests}")
+shutil.copytree(native_manifests[0].parent, new_dir)
 
 subprocess.run([
     "cmake", "-S", str(REPO), "-B", str(BUILD), "-G", "Ninja",
