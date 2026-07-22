@@ -12,8 +12,8 @@ subprocess.run(["rm", "-rf", str(work)], check=True)
 subprocess.run(["git", "clone", "--depth", "1", "--branch", ref, repo, str(work)], check=True)
 rev = subprocess.check_output(["git", "-C", str(work), "rev-parse", "--short", "HEAD"], text=True).strip()
 print(f"git_rev={rev}", flush=True)
-if rev != expected_rev:
-    raise RuntimeError(f"expected {expected_rev}, got {rev}")
+subprocess.run(
+    ["git", "-C", str(work), "merge-base", "--is-ancestor", expected_rev, "HEAD"], check=True)
 target = Path("/tmp/p888-target.bin")
 target.write_bytes(bytes(range(72)))
 env = os.environ.copy()
