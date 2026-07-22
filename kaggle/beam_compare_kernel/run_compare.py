@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -16,7 +17,7 @@ MODELS = Path("/tmp/models")
 OUT = ROOT / "beam-model-comparison"
 PUZZLES = [1000]
 DEPTH = 30
-BEAM = 10_000_000
+BEAM = 4_000_000
 
 for path in (REPO, BUILD, DATA, MODELS, OUT):
     shutil.rmtree(path, ignore_errors=True)
@@ -85,13 +86,31 @@ for model_name in ("native_step600", "ihes_e32692", "ihes_e40960"):
         })
         procs = []
         handles = []
+        pumps = []
         for rank in (0, 1):
             rank_env = env.copy()
             rank_env.update({"RANK": str(rank), "LOCAL_RANK": str(rank)})
             handle = open(OUT / f"{model_name}_p{puzzle_id}_rank{rank}.log", "w")
             handles.append(handle)
-            procs.append(subprocess.Popen([str(BUILD / "production_runner"), str(puzzle_id), str(DEPTH), str(BEAM)], env=rank_env, stdout=handle, stderr=subprocess.STDOUT, text=True))
+            command = [str(BUILD / "production_runner"), str(puzzle_id), str(DEPTH), str(BEAM)]
+            if rank == 0:
+                proc = subprocess.Popen(command, env=rank_env, stdout=subprocess.PIPE,
+                                        stderr=subprocess.STDOUT, text=True, bufsize=1)
+                def pump_rank0(stream=proc.stdout, sink=handle):
+                    for line in stream:
+                        print(line, end="", flush=True)
+                        sink.write(line)
+                        sink.flush()
+                pump = threading.Thread(target=pump_rank0, daemon=True)
+                pump.start()
+                pumps.append(pump)
+            else:
+                proc = subprocess.Popen(command, env=rank_env, stdout=handle,
+                                        stderr=subprocess.STDOUT, text=True)
+            procs.append(proc)
         codes = [p.wait() for p in procs]
+        for pump in pumps:
+            pump.join()
         for handle in handles:
             handle.close()
         text = (OUT / f"{model_name}_p{puzzle_id}_rank0.log").read_text(errors="replace")
