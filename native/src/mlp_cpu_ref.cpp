@@ -265,12 +265,11 @@ Status CpuAdamWStep(float* weights,
     const float bias1 = 1.0f - std::pow(beta1, static_cast<float>(step));
     const float bias2 = 1.0f - std::pow(beta2, static_cast<float>(step));
     for (std::uint64_t i = 0; i < param_count; ++i) {
-        const float decayed_grad = grad[i] + weight_decay * weights[i];
-        m[i] = beta1 * m[i] + (1.0f - beta1) * decayed_grad;
-        v[i] = beta2 * v[i] + (1.0f - beta2) * decayed_grad * decayed_grad;
+        m[i] = beta1 * m[i] + (1.0f - beta1) * grad[i];
+        v[i] = beta2 * v[i] + (1.0f - beta2) * grad[i] * grad[i];
         const float m_hat = m[i] / bias1;
         const float v_hat = v[i] / bias2;
-        weights[i] -= lr * m_hat / (std::sqrt(v_hat) + eps);
+        weights[i] -= lr * (m_hat / (std::sqrt(v_hat) + eps) + weight_decay * weights[i]);
     }
     return Status::kOk;
 }

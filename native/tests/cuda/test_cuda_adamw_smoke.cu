@@ -25,12 +25,11 @@ void CpuAdamWStepLocal(float* weights,
     const float bias1 = 1.0f - std::pow(beta1, static_cast<float>(step));
     const float bias2 = 1.0f - std::pow(beta2, static_cast<float>(step));
     for (std::uint64_t i = 0; i < param_count; ++i) {
-        const float decayed_grad = grad[i] + weight_decay * weights[i];
-        m[i] = beta1 * m[i] + (1.0f - beta1) * decayed_grad;
-        v[i] = beta2 * v[i] + (1.0f - beta2) * decayed_grad * decayed_grad;
+        m[i] = beta1 * m[i] + (1.0f - beta1) * grad[i];
+        v[i] = beta2 * v[i] + (1.0f - beta2) * grad[i] * grad[i];
         const float m_hat = m[i] / bias1;
         const float v_hat = v[i] / bias2;
-        weights[i] -= lr * m_hat / (std::sqrt(v_hat) + eps);
+        weights[i] -= lr * (m_hat / (std::sqrt(v_hat) + eps) + weight_decay * weights[i]);
     }
 }
 }  // namespace
@@ -48,7 +47,7 @@ int main() {
     }
     cpu_weights = weights;
     CpuAdamWStepLocal(cpu_weights.data(), grad.data(), cpu_m.data(), cpu_v.data(), kParams,
-                       1, 0.001f, 0.9f, 0.999f, 1.0e-8f, 0.0f);
+                       1, 0.001f, 0.9f, 0.999f, 1.0e-8f, 0.01f);
 
     float* d_weights = nullptr;
     float* d_grad = nullptr;
@@ -63,7 +62,7 @@ int main() {
     if (Check(cudaMemset(d_m, 0, kParams * sizeof(float))) != 0) return EXIT_FAILURE;
     if (Check(cudaMemset(d_v, 0, kParams * sizeof(float))) != 0) return EXIT_FAILURE;
 
-    const mgt_cuda::AdamWKernelConfig config{kParams, 1, 0.001f, 0.9f, 0.999f, 1.0e-8f, 0.0f};
+    const mgt_cuda::AdamWKernelConfig config{kParams, 1, 0.001f, 0.9f, 0.999f, 1.0e-8f, 0.01f};
     if (mgt_cuda::LaunchAdamWKernel(config, d_weights, d_grad, d_m, d_v, 0) != mgt::Status::kOk) {
         return EXIT_FAILURE;
     }

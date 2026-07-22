@@ -80,6 +80,9 @@ set_tests_properties(trainer_inputs PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE
 add_executable(test_resume_contract tests/test_resume_contract.cpp)
 target_link_libraries(test_resume_contract PRIVATE mgt_core)
 add_test(NAME resume_contract COMMAND test_resume_contract)
+add_executable(test_optimizer_contract tests/test_optimizer_contract.cpp)
+target_link_libraries(test_optimizer_contract PRIVATE mgt_core)
+add_test(NAME optimizer_contract COMMAND test_optimizer_contract)
 if(MGT_ENABLE_CUDA)
     add_library(mgt_cuda STATIC
         cuda/device_context.cu

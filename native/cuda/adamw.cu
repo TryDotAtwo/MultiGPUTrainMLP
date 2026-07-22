@@ -10,16 +10,15 @@ __device__ float AdamWUpdateOne(AdamWKernelConfig config,
                                float grad_value,
                                float* m_value,
                                float* v_value) {
-    const float decayed_grad = grad_value + config.weight_decay * weight;
-    const float next_m = config.beta1 * *m_value + (1.0f - config.beta1) * decayed_grad;
-    const float next_v = config.beta2 * *v_value + (1.0f - config.beta2) * decayed_grad * decayed_grad;
+    const float next_m = config.beta1 * *m_value + (1.0f - config.beta1) * grad_value;
+    const float next_v = config.beta2 * *v_value + (1.0f - config.beta2) * grad_value * grad_value;
     *m_value = next_m;
     *v_value = next_v;
     const float bias1 = 1.0f - powf(config.beta1, static_cast<float>(config.step));
     const float bias2 = 1.0f - powf(config.beta2, static_cast<float>(config.step));
     const float m_hat = next_m / bias1;
     const float v_hat = next_v / bias2;
-    return weight - config.learning_rate * m_hat / (sqrtf(v_hat) + config.eps);
+    return weight - config.learning_rate * (m_hat / (sqrtf(v_hat) + config.eps) + config.weight_decay * weight);
 }
 
 __global__ void AdamWKernel(AdamWKernelConfig config,
