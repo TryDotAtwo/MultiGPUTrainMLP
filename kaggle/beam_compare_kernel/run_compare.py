@@ -14,9 +14,9 @@ BUILD = Path("/tmp/beam-build-t4")
 DATA = Path("/tmp/ihes-data")
 MODELS = Path("/tmp/models")
 OUT = ROOT / "beam-model-comparison"
-PUZZLES = [7]
-DEPTH = 12
-BEAM = 262_144
+PUZZLES = [1000]
+DEPTH = 30
+BEAM = 10_000_000
 
 for path in (REPO, BUILD, DATA, MODELS, OUT):
     shutil.rmtree(path, ignore_errors=True)
@@ -91,7 +91,7 @@ for model_name in ("native_step600", "ihes_e32692", "ihes_e40960"):
             handle = open(OUT / f"{model_name}_p{puzzle_id}_rank{rank}.log", "w")
             handles.append(handle)
             procs.append(subprocess.Popen([str(BUILD / "production_runner"), str(puzzle_id), str(DEPTH), str(BEAM)], env=rank_env, stdout=handle, stderr=subprocess.STDOUT, text=True))
-        codes = [p.wait(timeout=180) for p in procs]
+        codes = [p.wait() for p in procs]
         for handle in handles:
             handle.close()
         text = (OUT / f"{model_name}_p{puzzle_id}_rank0.log").read_text(errors="replace")
