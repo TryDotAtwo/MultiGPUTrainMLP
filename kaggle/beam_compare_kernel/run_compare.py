@@ -49,7 +49,7 @@ for name, checkpoint in old_checkpoints.items():
     subprocess.run([
         "python", str(REPO / "tools/export_stream1_mlp.py"),
         "--weights", str(checkpoint), "--out", str(MODELS / name),
-        "--format", "batchnorm-folded", "--dtype", "bf16", "--num-classes", "72",
+        "--format", "batchnorm-folded", "--dtype", "fp16", "--num-classes", "72",
     ], check=True)
 
 new_dir = MODELS / "native_step600"
