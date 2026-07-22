@@ -354,8 +354,20 @@ mgt::Status CutlassGemmHalfToFloat(cudaStream_t stream,
 #endif
     static_assert(sizeof(ElementInput) == sizeof(__half));
 
-    using ThreadblockShape = cutlass::gemm::GemmShape<128, 128, 32>;
-    using WarpShape = cutlass::gemm::GemmShape<64, 64, 32>;
+#if (MGT_CUTLASS_HALF_GEMM_KIND_MASK & 32)
+    constexpr int kThreadblockM = 64;
+    constexpr int kWarpM = 32;
+#else
+    constexpr int kThreadblockM = 128;
+    constexpr int kWarpM = 64;
+#endif
+#if (MGT_CUTLASS_HALF_GEMM_KIND_MASK & 64)
+    constexpr int kThreadblockN = 64;
+#else
+    constexpr int kThreadblockN = 128;
+#endif
+    using ThreadblockShape = cutlass::gemm::GemmShape<kThreadblockM, kThreadblockN, 32>;
+    using WarpShape = cutlass::gemm::GemmShape<kWarpM, 64, 32>;
     using InstructionShape = cutlass::gemm::GemmShape<16, 8, 8>;
     using EpilogueOp = cutlass::epilogue::thread::LinearCombination<
         ElementOutput,
