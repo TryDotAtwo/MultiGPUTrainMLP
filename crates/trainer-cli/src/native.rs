@@ -49,6 +49,17 @@ pub fn run_training(cfg: &TrainerConfig, output_dir: &Path) -> Result<()> {
     let seed = read_env_u64("MGT_SEED", cfg.base_seed)?;
     let learning_rate = read_env_f32("MGT_LR", cfg.learning_rate)?;
     let weight_decay = read_env_f32("MGT_WEIGHT_DECAY", cfg.weight_decay)?;
+    let checkpoint_period_steps = read_env_u64(
+        "MGT_CHECKPOINT_PERIOD_STEPS",
+        cfg.checkpoint_period_steps,
+    )?;
+    let weight_export_period_steps = read_env_u64(
+        "MGT_WEIGHT_EXPORT_PERIOD_STEPS",
+        cfg.weight_export_period_steps,
+    )?;
+    let adam_beta1 = read_env_f32("MGT_ADAM_BETA1", cfg.adam_beta1)?;
+    let adam_beta2 = read_env_f32("MGT_ADAM_BETA2", cfg.adam_beta2)?;
+    let adam_eps = read_env_f32("MGT_ADAM_EPS", cfg.adam_eps)?;
     let write_artifacts = read_env_bool("MGT_WRITE_ARTIFACTS", true)?;
     let nccl_id_file = std::env::var_os("MGT_NCCL_ID_FILE").map(PathBuf::from);
     let resume_checkpoint = std::env::var_os("MGT_RESUME_CHECKPOINT").map(PathBuf::from);
@@ -137,6 +148,16 @@ pub fn run_training(cfg: &TrainerConfig, output_dir: &Path) -> Result<()> {
         .arg(learning_rate.to_string())
         .arg("--weight-decay")
         .arg(weight_decay.to_string())
+        .arg("--checkpoint-period-steps")
+        .arg(checkpoint_period_steps.to_string())
+        .arg("--weight-export-period-steps")
+        .arg(weight_export_period_steps.to_string())
+        .arg("--adam-beta1")
+        .arg(adam_beta1.to_string())
+        .arg("--adam-beta2")
+        .arg(adam_beta2.to_string())
+        .arg("--adam-eps")
+        .arg(adam_eps.to_string())
         .arg("--write-artifacts")
         .arg(if write_artifacts { "1" } else { "0" });
     if synthetic_benchmark {

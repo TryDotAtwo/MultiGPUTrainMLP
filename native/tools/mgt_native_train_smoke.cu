@@ -64,6 +64,11 @@ struct Args {
     std::uint64_t seed = 1234;
     float lr = 0.0001f;
     float weight_decay = 0.0f;
+    float adam_beta1 = 0.9f;
+    float adam_beta2 = 0.999f;
+    float adam_eps = 1.0e-8f;
+    std::uint64_t checkpoint_period_steps = 0;
+    std::uint64_t weight_export_period_steps = 0;
     bool write_artifacts = true;
     bool backward_profile = false;
     bool overlap_allreduce = true;
@@ -226,13 +231,13 @@ bool WriteFp16File(const std::filesystem::path& path, const std::vector<float>& 
     return static_cast<bool>(data);
 }
 
-bool WriteStream1Weights(const std::filesystem::path& output_dir,
+bool WriteStream1WeightsDirectory(const std::filesystem::path& weights_dir,
                          const std::vector<float>& weights,
                          const mgt_cuda::CudaMlpShape& shape,
                          std::uint32_t requested_hd1,
                          std::uint32_t requested_hd2) {
-    std::filesystem::create_directories(output_dir / "weights");
-    std::ofstream flat(output_dir / "weights" / "weights.f32.bin", std::ios::binary);
+    std::filesystem::create_directories(weights_dir);
+    std::ofstream flat(weights_dir / "weights.f32.bin", std::ios::binary);
     if (!flat) return false;
     flat.write(reinterpret_cast<const char*>(weights.data()), static_cast<std::streamsize>(weights.size() * sizeof(float)));
     if (!flat) return false;
@@ -258,11 +263,11 @@ bool WriteStream1Weights(const std::filesystem::path& output_dir,
             for (std::uint32_t h = 0; h < shape.hd1; ++h) buffer[dst_row + h] = weights[src_row + h];
         }
     }
-    if (!WriteFp16File(output_dir / "weights" / "input_weight_hxk.fp16", buffer)) return false;
+    if (!WriteFp16File(weights_dir / "input_weight_hxk.fp16", buffer)) return false;
 
     buffer.assign(hidden1, 0.0f);
     for (std::uint32_t h = 0; h < shape.hd1; ++h) buffer[h] = weights[input_bias + h];
-    if (!WriteFp16File(output_dir / "weights" / "input_bias.fp16", buffer)) return false;
+    if (!WriteFp16File(weights_dir / "input_bias.fp16", buffer)) return false;
 
     buffer.assign(static_cast<std::uint64_t>(hidden1) * hidden2, 0.0f);
     for (std::uint32_t h = 0; h < shape.hd1; ++h) {
@@ -270,11 +275,11 @@ bool WriteStream1Weights(const std::filesystem::path& output_dir,
             buffer[static_cast<std::uint64_t>(h) * hidden2 + j] = weights[hidden_weight + static_cast<std::uint64_t>(h) * shape.hd2 + j];
         }
     }
-    if (!WriteFp16File(output_dir / "weights" / "hidden_weight_hxk.fp16", buffer)) return false;
+    if (!WriteFp16File(weights_dir / "hidden_weight_hxk.fp16", buffer)) return false;
 
     buffer.assign(hidden2, 0.0f);
     for (std::uint32_t j = 0; j < shape.hd2; ++j) buffer[j] = weights[hidden_bias + j];
-    if (!WriteFp16File(output_dir / "weights" / "hidden_bias.fp16", buffer)) return false;
+    if (!WriteFp16File(weights_dir / "hidden_bias.fp16", buffer)) return false;
 
     for (std::uint32_t block = 0; block < residual_count; ++block) {
         const std::uint64_t block_base = residual_base + static_cast<std::uint64_t>(block) * ResidualBlockParams(shape);
@@ -286,18 +291,18 @@ bool WriteStream1Weights(const std::filesystem::path& output_dir,
         for (std::uint32_t i = 0; i < shape.hd2; ++i) {
             for (std::uint32_t j = 0; j < shape.hd2; ++j) buffer[static_cast<std::uint64_t>(i) * hidden2 + j] = weights[fc1w + static_cast<std::uint64_t>(i) * shape.hd2 + j];
         }
-        if (!WriteFp16File(output_dir / "weights" / ("residual" + std::to_string(block) + "_fc1_weight_hxk.fp16"), buffer)) return false;
+        if (!WriteFp16File(weights_dir / ("residual" + std::to_string(block) + "_fc1_weight_hxk.fp16"), buffer)) return false;
         buffer.assign(hidden2, 0.0f);
         for (std::uint32_t j = 0; j < shape.hd2; ++j) buffer[j] = weights[fc1b + j];
-        if (!WriteFp16File(output_dir / "weights" / ("residual" + std::to_string(block) + "_fc1_bias.fp16"), buffer)) return false;
+        if (!WriteFp16File(weights_dir / ("residual" + std::to_string(block) + "_fc1_bias.fp16"), buffer)) return false;
         buffer.assign(static_cast<std::uint64_t>(hidden2) * hidden2, 0.0f);
         for (std::uint32_t i = 0; i < shape.hd2; ++i) {
             for (std::uint32_t j = 0; j < shape.hd2; ++j) buffer[static_cast<std::uint64_t>(i) * hidden2 + j] = weights[fc2w + static_cast<std::uint64_t>(i) * shape.hd2 + j];
         }
-        if (!WriteFp16File(output_dir / "weights" / ("residual" + std::to_string(block) + "_fc2_weight_hxk.fp16"), buffer)) return false;
+        if (!WriteFp16File(weights_dir / ("residual" + std::to_string(block) + "_fc2_weight_hxk.fp16"), buffer)) return false;
         buffer.assign(hidden2, 0.0f);
         for (std::uint32_t j = 0; j < shape.hd2; ++j) buffer[j] = weights[fc2b + j];
-        if (!WriteFp16File(output_dir / "weights" / ("residual" + std::to_string(block) + "_fc2_bias.fp16"), buffer)) return false;
+        if (!WriteFp16File(weights_dir / ("residual" + std::to_string(block) + "_fc2_bias.fp16"), buffer)) return false;
     }
 
     buffer.assign(static_cast<std::uint64_t>(hidden2) * shape.output_dim, 0.0f);
@@ -306,13 +311,13 @@ bool WriteStream1Weights(const std::filesystem::path& output_dir,
             buffer[static_cast<std::uint64_t>(j) * shape.output_dim + out] = weights[output_weight + static_cast<std::uint64_t>(j) * shape.output_dim + out];
         }
     }
-    if (!WriteFp16File(output_dir / "weights" / "output_weight_hxk.fp16", buffer)) return false;
+    if (!WriteFp16File(weights_dir / "output_weight_hxk.fp16", buffer)) return false;
 
     buffer.assign(shape.output_dim, 0.0f);
     for (std::uint32_t out = 0; out < shape.output_dim; ++out) buffer[out] = weights[output_bias + out];
-    if (!WriteFp16File(output_dir / "weights" / "output_bias.fp16", buffer)) return false;
+    if (!WriteFp16File(weights_dir / "output_bias.fp16", buffer)) return false;
 
-    std::ofstream manifest(output_dir / "weights" / "manifest.json", std::ios::binary);
+    std::ofstream manifest(weights_dir / "manifest.json", std::ios::binary);
     if (!manifest) return false;
     manifest << "{\n"
              << "  \"format\": \"stream1_weights\",\n"
@@ -334,15 +339,16 @@ bool WriteStream1Weights(const std::filesystem::path& output_dir,
              << "}\n";
     return static_cast<bool>(manifest);
 }
-bool WriteCheckpoint(const std::filesystem::path& output_dir,
+bool WriteCheckpointDirectory(const std::filesystem::path& checkpoint_dir,
                      const std::vector<float>& weights,
                      const std::vector<float>& adam_m,
                      const std::vector<float>& adam_v,
                      std::uint64_t completed_steps,
                      const std::string& fingerprint,
-                     const mgt::TrainPlan& train_plan) {
+                     const mgt::TrainPlan& train_plan,
+                     const Args& args) {
     if (weights.size() != adam_m.size() || weights.size() != adam_v.size()) return false;
-    std::filesystem::create_directories(output_dir / "checkpoint");
+    std::filesystem::create_directories(checkpoint_dir);
     mgt::CheckpointMetadata metadata{};
     metadata.completed_steps = completed_steps;
     metadata.param_count = weights.size();
@@ -350,17 +356,59 @@ bool WriteCheckpoint(const std::filesystem::path& output_dir,
     metadata.seed = train_plan.config.train.seed;
     metadata.learning_rate = train_plan.config.train.lr;
     metadata.weight_decay = train_plan.config.train.weight_decay;
-    metadata.adam_beta1 = 0.9f;
-    metadata.adam_beta2 = 0.999f;
-    metadata.adam_eps = 1.0e-8f;
+    metadata.adam_beta1 = args.adam_beta1;
+    metadata.adam_beta2 = args.adam_beta2;
+    metadata.adam_eps = args.adam_eps;
     if (mgt::WriteCheckpointPayload(
-            output_dir / "checkpoint" / "state.f32.bin",
+            checkpoint_dir / "state.f32.bin",
             weights, adam_m, adam_v, &metadata) != mgt::Status::kOk) {
         return false;
     }
     return mgt::WriteCheckpointMetadata(
-               output_dir / "checkpoint" / "manifest.env", metadata) ==
+               checkpoint_dir / "manifest.env", metadata) ==
            mgt::Status::kOk;
+}
+
+bool PrepareStagedDirectory(const std::filesystem::path& current,
+                            std::filesystem::path* staged) {
+    if (staged == nullptr || current.empty() || current.filename().empty()) return false;
+    std::filesystem::create_directories(current.parent_path());
+    *staged = current.parent_path() / (current.filename().string() + ".tmp");
+    std::error_code ec;
+    std::filesystem::remove_all(*staged, ec);
+    return !ec && std::filesystem::create_directories(*staged, ec) && !ec;
+}
+
+bool WriteWeightsAtomically(const std::filesystem::path& current,
+                            const std::vector<float>& weights,
+                            const mgt_cuda::CudaMlpShape& shape,
+                            std::uint32_t requested_hd1,
+                            std::uint32_t requested_hd2) {
+    std::filesystem::path staged;
+    if (!PrepareStagedDirectory(current, &staged) ||
+        !WriteStream1WeightsDirectory(
+            staged, weights, shape, requested_hd1, requested_hd2)) {
+        return false;
+    }
+    return mgt::PublishDirectoryAtomically(staged, current) == mgt::Status::kOk;
+}
+
+bool WriteCheckpointAtomically(const std::filesystem::path& current,
+                               const std::vector<float>& weights,
+                               const std::vector<float>& adam_m,
+                               const std::vector<float>& adam_v,
+                               std::uint64_t completed_steps,
+                               const std::string& fingerprint,
+                               const mgt::TrainPlan& train_plan,
+                               const Args& args) {
+    std::filesystem::path staged;
+    if (!PrepareStagedDirectory(current, &staged) ||
+        !WriteCheckpointDirectory(
+            staged, weights, adam_m, adam_v, completed_steps,
+            fingerprint, train_plan, args)) {
+        return false;
+    }
+    return mgt::PublishDirectoryAtomically(staged, current) == mgt::Status::kOk;
 }
 
 bool ReadCheckpoint(const std::filesystem::path& checkpoint_dir,
@@ -585,6 +633,16 @@ bool ParseArgs(int argc, char** argv, Args* args) {
             if (!ParseFloat(value, &args->lr)) return false;
         } else if (key == "--weight-decay") {
             if (!ParseFloat(value, &args->weight_decay)) return false;
+        } else if (key == "--adam-beta1") {
+            if (!ParseFloat(value, &args->adam_beta1)) return false;
+        } else if (key == "--adam-beta2") {
+            if (!ParseFloat(value, &args->adam_beta2)) return false;
+        } else if (key == "--adam-eps") {
+            if (!ParseFloat(value, &args->adam_eps)) return false;
+        } else if (key == "--checkpoint-period-steps") {
+            if (!ParseUint64(value, &args->checkpoint_period_steps)) return false;
+        } else if (key == "--weight-export-period-steps") {
+            if (!ParseUint64(value, &args->weight_export_period_steps)) return false;
         } else if (key == "--write-artifacts") {
             if (!ParseBool(value, &args->write_artifacts)) return false;
         } else if (key == "--backward-profile") {
@@ -606,6 +664,9 @@ bool ParseArgs(int argc, char** argv, Args* args) {
         }
     }
     const mgt::TrainConfig config = BuildTrainConfig(*args);
+    if (args->adam_beta1 < 0.0f || args->adam_beta1 >= 1.0f ||
+        args->adam_beta2 < 0.0f || args->adam_beta2 >= 1.0f ||
+        args->adam_eps <= 0.0f) return false;
     return args->steps > 0 && args->world_size > 0 && args->global_rank < args->world_size &&
            args->batch_size > 0 && mgt::ValidateTrainConfig(config) == mgt::Status::kOk;
 }
@@ -617,7 +678,7 @@ bool ParseArgs(int argc, char** argv, Args* args) {
 int main(int argc, char** argv) {
     Args args{};
     if (!ParseArgs(argc, argv, &args)) {
-        std::cerr << "usage: mgt_native_train --output-dir DIR --steps N --device-id ID --world-size N --global-rank R --local-rank R (--group-json PATH --target-bin PATH | --synthetic-benchmark 1) [training options]\n";
+        std::cerr << "usage: mgt_native_train --output-dir DIR --steps N --device-id ID --world-size N --global-rank R --local-rank R (--group-json PATH --target-bin PATH | --synthetic-benchmark 1) [--adam-beta1 F --adam-beta2 F --adam-eps F --checkpoint-period-steps N --weight-export-period-steps N] [training options]\n";
         return EXIT_FAILURE;
     }
     int device_count = 0;
@@ -678,9 +739,9 @@ int main(int argc, char** argv) {
     expected_checkpoint.seed = train_plan.config.train.seed;
     expected_checkpoint.learning_rate = train_plan.config.train.lr;
     expected_checkpoint.weight_decay = train_plan.config.train.weight_decay;
-    expected_checkpoint.adam_beta1 = 0.9f;
-    expected_checkpoint.adam_beta2 = 0.999f;
-    expected_checkpoint.adam_eps = 1.0e-8f;
+    expected_checkpoint.adam_beta1 = args.adam_beta1;
+    expected_checkpoint.adam_beta2 = args.adam_beta2;
+    expected_checkpoint.adam_eps = args.adam_eps;
     std::uint64_t resume_completed_steps = 0;
     if (resumed &&
         !ReadCheckpoint(args.resume_checkpoint, expected_checkpoint,
@@ -801,6 +862,11 @@ int main(int argc, char** argv) {
         << " lt_autotune_candidates=" << args.lt_autotune_candidates
         << " lt_autotune_warmups=" << args.lt_autotune_warmups
         << " lt_autotune_iters=" << args.lt_autotune_iters
+        << " adam_beta1=" << args.adam_beta1
+        << " adam_beta2=" << args.adam_beta2
+        << " adam_eps=" << args.adam_eps
+        << " checkpoint_period_steps=" << args.checkpoint_period_steps
+        << " weight_export_period_steps=" << args.weight_export_period_steps
         << " overlap_allreduce=" << (overlap_allreduce ? 1 : 0)
         << " nccl=" << (nccl_enabled ? 1 : 0) << " resumed=" << (resumed ? 1 : 0) << "\n";
 
@@ -871,7 +937,7 @@ int main(int argc, char** argv) {
         }
 #endif
         if (Check(cudaEventRecord(allreduce_stop, compute_stream)) != 0) return EXIT_FAILURE;
-        const mgt_cuda::AdamWKernelConfig adam{params, global_step + 1ULL, train_plan.config.train.lr, 0.9f, 0.999f, 1.0e-8f, train_plan.config.train.weight_decay};
+        const mgt_cuda::AdamWKernelConfig adam{params, global_step + 1ULL, train_plan.config.train.lr, args.adam_beta1, args.adam_beta2, args.adam_eps, train_plan.config.train.weight_decay};
         if (d_weights_half != nullptr) {
             if (mgt_cuda::LaunchAdamWKernelWithHalfMirror(adam, d_weights, d_weights_half, d_grad, d_m, d_v, compute_stream) != mgt::Status::kOk) return EXIT_FAILURE;
         } else {
@@ -893,6 +959,32 @@ int main(int argc, char** argv) {
         if (Check(cudaEventElapsedTime(&allreduce_ms, backward_stop, allreduce_stop)) != 0) return EXIT_FAILURE;
         if (Check(cudaEventElapsedTime(&adam_ms, allreduce_stop, step_stop)) != 0) return EXIT_FAILURE;
         if (Check(cudaMemcpy(&last_loss, d_loss, sizeof(float), cudaMemcpyDeviceToHost)) != 0) return EXIT_FAILURE;
+        const std::uint64_t completed_steps = global_step + 1ULL;
+        const bool write_periodic_checkpoint =
+            args.write_artifacts &&
+            mgt::ShouldWritePeriodicArtifact(
+                completed_steps, args.checkpoint_period_steps, false);
+        const bool write_periodic_weights =
+            args.write_artifacts &&
+            mgt::ShouldWritePeriodicArtifact(
+                completed_steps, args.weight_export_period_steps, false);
+        if (write_periodic_checkpoint || write_periodic_weights) {
+            if (Check(cudaMemcpy(weights.data(), d_weights, params * sizeof(float), cudaMemcpyDeviceToHost)) != 0 ||
+                Check(cudaMemcpy(host_adam_m.data(), d_m, params * sizeof(float), cudaMemcpyDeviceToHost)) != 0 ||
+                Check(cudaMemcpy(host_adam_v.data(), d_v, params * sizeof(float), cudaMemcpyDeviceToHost)) != 0) {
+                return EXIT_FAILURE;
+            }
+            const std::string step_name = "step-" + std::to_string(completed_steps);
+            if (write_periodic_checkpoint &&
+                !WriteCheckpointAtomically(
+                    args.output_dir / "checkpoints" / step_name,
+                    weights, host_adam_m, host_adam_v, completed_steps,
+                    training_fingerprint, train_plan, args)) return EXIT_FAILURE;
+            if (write_periodic_weights &&
+                !WriteWeightsAtomically(
+                    args.output_dir / "weight_exports" / step_name,
+                    weights, shape, requested_hd1, requested_hd2)) return EXIT_FAILURE;
+        }
         std::size_t free_bytes = 0;
         std::size_t total_bytes = 0;
         if (Check(cudaMemGetInfo(&free_bytes, &total_bytes)) != 0) return EXIT_FAILURE;
@@ -933,13 +1025,11 @@ int main(int argc, char** argv) {
     }
 
     if (args.write_artifacts) {
-        std::vector<float> adam_m(params);
-        std::vector<float> adam_v(params);
         if (Check(cudaMemcpy(weights.data(), d_weights, params * sizeof(float), cudaMemcpyDeviceToHost)) != 0) return EXIT_FAILURE;
-        if (Check(cudaMemcpy(adam_m.data(), d_m, params * sizeof(float), cudaMemcpyDeviceToHost)) != 0) return EXIT_FAILURE;
-        if (Check(cudaMemcpy(adam_v.data(), d_v, params * sizeof(float), cudaMemcpyDeviceToHost)) != 0) return EXIT_FAILURE;
-        if (!WriteStream1Weights(args.output_dir, weights, shape, requested_hd1, requested_hd2)) return EXIT_FAILURE;
-        if (!WriteCheckpoint(args.output_dir, weights, adam_m, adam_v, resume_completed_steps + args.steps, training_fingerprint, train_plan)) return EXIT_FAILURE;
+        if (Check(cudaMemcpy(host_adam_m.data(), d_m, params * sizeof(float), cudaMemcpyDeviceToHost)) != 0) return EXIT_FAILURE;
+        if (Check(cudaMemcpy(host_adam_v.data(), d_v, params * sizeof(float), cudaMemcpyDeviceToHost)) != 0) return EXIT_FAILURE;
+        if (!WriteWeightsAtomically(args.output_dir / "weights", weights, shape, requested_hd1, requested_hd2)) return EXIT_FAILURE;
+        if (!WriteCheckpointAtomically(args.output_dir / "checkpoint", weights, host_adam_m, host_adam_v, resume_completed_steps + args.steps, training_fingerprint, train_plan, args)) return EXIT_FAILURE;
     }
 
     std::ofstream meta(args.output_dir / "metadata.env");
@@ -947,7 +1037,7 @@ int main(int argc, char** argv) {
          << "\nLOCAL_RANK=" << args.local_rank << "\nDEVICE_ID=" << args.device_id << "\nHD1=" << requested_hd1 << "\nPHYSICAL_HD1=" << shape.hd1 << "\nHD2=" << requested_hd2 << "\nPHYSICAL_HD2=" << shape.hd2 << "\nNUM_CLASSES=" << shape.state_value_pad << "\nNRD=" << shape.residual_blocks
          << "\nK_MIN=" << args.k_min << "\nK_MAX=" << args.k_max << "\nBATCH_SIZE=" << kSamples
          << "\nPUZZLE_FINGERPRINT=" << training_fingerprint
-         << "\nRESUME_COMPLETED_STEPS=" << resume_completed_steps << "\nGRADIENT_CAROUSEL_SLOTS=" << train_plan.gradient_carousel_slots << "\nLT_WORKSPACE_BYTES=" << args.lt_workspace_bytes << "\nLT_AUTOTUNE=" << (args.lt_autotune ? 1 : 0) << "\nLT_AUTOTUNE_CANDIDATES=" << args.lt_autotune_candidates << "\nLT_AUTOTUNE_WARMUPS=" << args.lt_autotune_warmups << "\nLT_AUTOTUNE_ITERS=" << args.lt_autotune_iters << "\nINPUT_GRAD_PARTIAL_CHUNKS=" << train_plan.config.runtime.input_grad_partial_chunks << "\nINPUT_GRAD_POSITIONS_PER_BLOCK=" << train_plan.config.runtime.input_grad_positions_per_block << "\nINPUT_GRAD_POSITION_TILE=" << train_plan.config.runtime.input_grad_position_tile << "\nINPUT_GRAD_SPARSE=" << (train_plan.config.runtime.input_grad_sparse ? 1 : 0) << "\nINPUT_GRAD_FP16=" << (args.input_grad_fp16 ? 1 : 0) << "\nINPUT_GRAD_BACKEND=" << input_grad_backend << "\nLINEAR_FP16=" << (args.linear_fp16 ? 1 : 0) << "\nPERSISTENT_HALF_WEIGHTS=" << (args.persistent_half_weights ? 1 : 0) << "\nOVERLAP_ALLREDUCE=" << (overlap_allreduce ? 1 : 0) << "\nGRADIENT_BUCKETS=" << train_plan.gradient_buckets.size() << "\nNCCL_ENABLED=" << (nccl_enabled ? 1 : 0) << "\nRESUME_CHECKPOINT=" << (resumed ? 1 : 0) << "\nARTIFACTS_WRITTEN=" << (args.write_artifacts ? 1 : 0) << "\nNUM_PARAMETERS=" << params << "\n";
+         << "\nRESUME_COMPLETED_STEPS=" << resume_completed_steps << "\nADAM_BETA1=" << args.adam_beta1 << "\nADAM_BETA2=" << args.adam_beta2 << "\nADAM_EPS=" << args.adam_eps << "\nCHECKPOINT_PERIOD_STEPS=" << args.checkpoint_period_steps << "\nWEIGHT_EXPORT_PERIOD_STEPS=" << args.weight_export_period_steps << "\nGRADIENT_CAROUSEL_SLOTS=" << train_plan.gradient_carousel_slots << "\nLT_WORKSPACE_BYTES=" << args.lt_workspace_bytes << "\nLT_AUTOTUNE=" << (args.lt_autotune ? 1 : 0) << "\nLT_AUTOTUNE_CANDIDATES=" << args.lt_autotune_candidates << "\nLT_AUTOTUNE_WARMUPS=" << args.lt_autotune_warmups << "\nLT_AUTOTUNE_ITERS=" << args.lt_autotune_iters << "\nINPUT_GRAD_PARTIAL_CHUNKS=" << train_plan.config.runtime.input_grad_partial_chunks << "\nINPUT_GRAD_POSITIONS_PER_BLOCK=" << train_plan.config.runtime.input_grad_positions_per_block << "\nINPUT_GRAD_POSITION_TILE=" << train_plan.config.runtime.input_grad_position_tile << "\nINPUT_GRAD_SPARSE=" << (train_plan.config.runtime.input_grad_sparse ? 1 : 0) << "\nINPUT_GRAD_FP16=" << (args.input_grad_fp16 ? 1 : 0) << "\nINPUT_GRAD_BACKEND=" << input_grad_backend << "\nLINEAR_FP16=" << (args.linear_fp16 ? 1 : 0) << "\nPERSISTENT_HALF_WEIGHTS=" << (args.persistent_half_weights ? 1 : 0) << "\nOVERLAP_ALLREDUCE=" << (overlap_allreduce ? 1 : 0) << "\nGRADIENT_BUCKETS=" << train_plan.gradient_buckets.size() << "\nNCCL_ENABLED=" << (nccl_enabled ? 1 : 0) << "\nRESUME_CHECKPOINT=" << (resumed ? 1 : 0) << "\nARTIFACTS_WRITTEN=" << (args.write_artifacts ? 1 : 0) << "\nNUM_PARAMETERS=" << params << "\n";
     std::ofstream layers(args.output_dir / "layers.json");
     layers << "{\n  \"model_mode\": \"MLP2RB\",\n  \"output_dim\": " << train_plan.layout.output_dim << ",\n  \"state_len\": " << shape.state_len << ",\n  \"state_storage_len\": " << train_plan.padded_state_dim << ",\n  \"num_classes\": " << shape.state_value_pad << ",\n  \"hd1\": " << requested_hd1 << ",\n  \"physical_hd1\": " << shape.hd1 << ",\n  \"hd2\": " << requested_hd2 << ",\n  \"physical_hd2\": " << shape.hd2 << ",\n  \"nrd\": " << shape.residual_blocks << ",\n  \"artifacts_written\": " << (args.write_artifacts ? "true" : "false") << ",\n  \"num_parameters\": " << params << "\n}\n";
     if (!WriteLinearOpsManifest(args.output_dir, train_plan)) return EXIT_FAILURE;

@@ -39,6 +39,11 @@ linear_fp16=""
 overlap_allreduce=""
 allreduce_bucket_bytes=""
 synthetic_benchmark=""
+checkpoint_period_steps=""
+weight_export_period_steps=""
+adam_beta1=""
+adam_beta2=""
+adam_eps=""
 lr=""
 weight_decay=""
 while [ "$#" -gt 0 ]; do
@@ -61,6 +66,11 @@ while [ "$#" -gt 0 ]; do
     --overlap-allreduce) overlap_allreduce="$2"; shift 2 ;;
     --allreduce-bucket-bytes) allreduce_bucket_bytes="$2"; shift 2 ;;
     --synthetic-benchmark) synthetic_benchmark="$2"; shift 2 ;;
+    --checkpoint-period-steps) checkpoint_period_steps="$2"; shift 2 ;;
+    --weight-export-period-steps) weight_export_period_steps="$2"; shift 2 ;;
+    --adam-beta1) adam_beta1="$2"; shift 2 ;;
+    --adam-beta2) adam_beta2="$2"; shift 2 ;;
+    --adam-eps) adam_eps="$2"; shift 2 ;;
     --lr) lr="$2"; shift 2 ;;
     --weight-decay) weight_decay="$2"; shift 2 ;;
     *) shift 2 ;;
@@ -86,8 +96,13 @@ LINEAR_FP16=%s
 OVERLAP_ALLREDUCE=%s
 ALLREDUCE_BUCKET_BYTES=%s
 SYNTHETIC_BENCHMARK=%s
+CHECKPOINT_PERIOD_STEPS=%s
+WEIGHT_EXPORT_PERIOD_STEPS=%s
+ADAM_BETA1=%s
+ADAM_BETA2=%s
+ADAM_EPS=%s
 LR=%s
-' "$weight_decay" "$hd1" "$hd2" "$state_len" "$state_value_count" "$move_count" "$state_alignment" "$hidden_alignment" "$batch_size" "$gradient_slots" "$input_grad_partial_chunks" "$input_grad_sparse" "$input_grad_fp16" "$linear_fp16" "$overlap_allreduce" "$allreduce_bucket_bytes" "$synthetic_benchmark" "$lr" > "$out/metadata.env"
+' "$weight_decay" "$hd1" "$hd2" "$state_len" "$state_value_count" "$move_count" "$state_alignment" "$hidden_alignment" "$batch_size" "$gradient_slots" "$input_grad_partial_chunks" "$input_grad_sparse" "$input_grad_fp16" "$linear_fp16" "$overlap_allreduce" "$allreduce_bucket_bytes" "$synthetic_benchmark" "$checkpoint_period_steps" "$weight_export_period_steps" "$adam_beta1" "$adam_beta2" "$adam_eps" "$lr" > "$out/metadata.env"
 printf '{"hd1": %s, "hd2": %s, "output_dim": 1}
 ' "$hd1" "$hd2" > "$out/layers.json"
 printf 'rank=0 phase=train steps=%s
@@ -161,6 +176,11 @@ printf 'fake native ok
     assert!(metadata.contains("GRADIENT_CAROUSEL_SLOTS=4"));
     assert!(metadata.contains("ALLREDUCE_BUCKET_BYTES=1048576"));
     assert!(metadata.contains("SYNTHETIC_BENCHMARK=1"));
+    assert!(metadata.contains("CHECKPOINT_PERIOD_STEPS=4096"));
+    assert!(metadata.contains("WEIGHT_EXPORT_PERIOD_STEPS=4096"));
+    assert!(metadata.contains("ADAM_BETA1=0.9"));
+    assert!(metadata.contains("ADAM_BETA2=0.999"));
+    assert!(metadata.contains("ADAM_EPS=0.00000001"));
     assert!(metadata.contains("LR=0.0003"));
     assert!(metadata.contains("WEIGHT_DECAY=0"));
 
