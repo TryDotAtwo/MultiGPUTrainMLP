@@ -436,22 +436,26 @@ enum class HalfGemmOpKind : std::uint32_t {
     kInputEmbeddingGrad = 4
 };
 
+constexpr std::uint32_t kCutlassInputEmbeddingGradBit = 8U;
+constexpr std::uint32_t kCutlassInputEmbeddingGradAllShapesBit = 16U;
+
 #ifndef MGT_CUTLASS_HALF_GEMM_KIND_MASK
 #define MGT_CUTLASS_HALF_GEMM_KIND_MASK 8
 #endif
-
 constexpr std::uint32_t CutlassHalfGemmKindBit(HalfGemmOpKind kind) {
     switch (kind) {
         case HalfGemmOpKind::kForward: return 1U;
         case HalfGemmOpKind::kGradWeights: return 2U;
         case HalfGemmOpKind::kBackpropInput: return 4U;
-        case HalfGemmOpKind::kInputEmbeddingGrad: return 8U;
+        case HalfGemmOpKind::kInputEmbeddingGrad: return kCutlassInputEmbeddingGradBit;
     }
     return 0U;
 }
 
 bool CutlassHalfGemmKindEnabled(HalfGemmOpKind kind) {
-    return (static_cast<std::uint32_t>(MGT_CUTLASS_HALF_GEMM_KIND_MASK) & CutlassHalfGemmKindBit(kind)) != 0U;
+    const std::uint32_t mask = static_cast<std::uint32_t>(MGT_CUTLASS_HALF_GEMM_KIND_MASK);
+    if (kind == HalfGemmOpKind::kInputEmbeddingGrad) return (mask & (kCutlassInputEmbeddingGradBit | kCutlassInputEmbeddingGradAllShapesBit)) != 0U;
+    return (mask & CutlassHalfGemmKindBit(kind)) != 0U;
 }
 
 bool ShouldUseCutlassHalfGemm(HalfGemmOpKind kind,
@@ -470,6 +474,10 @@ bool ShouldUseCutlassHalfGemm(HalfGemmOpKind kind,
     return true;
 #elif defined(MGT_AUTO_CUTLASS_HALF_GEMM)
     if (!CutlassHalfGemmKindEnabled(kind)) return false;
+    const std::uint32_t mask = static_cast<std::uint32_t>(MGT_CUTLASS_HALF_GEMM_KIND_MASK);
+    if (kind == HalfGemmOpKind::kInputEmbeddingGrad && (mask & kCutlassInputEmbeddingGradAllShapesBit) != 0U) {
+        return op_a == CUBLAS_OP_T && op_b == CUBLAS_OP_N;
+    }
     if (kind == HalfGemmOpKind::kInputEmbeddingGrad) {
         return op_a == CUBLAS_OP_T && op_b == CUBLAS_OP_N && c_rows >= 4096U && c_cols >= 4096U && k >= 8192U;
     }
