@@ -1289,6 +1289,22 @@ __global__ void ResidualDzFc2HalfKernel(CudaMlpShape shape, std::uint32_t sample
     dskip[item] = v;
 }
 
+__global__ void ResidualDzFc2HalfVec4Kernel(std::uint64_t total, std::uint64_t block_offset, const float* block_inputs, const float* rz2, const float* dcur, float* dzfc2, __half* dzfc2_half, float* dskip) {
+    const std::uint64_t item = (static_cast<std::uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x) * 4U;
+    if (item >= total) return;
+    const float4 input = *reinterpret_cast<const float4*>(block_inputs + block_offset + item);
+    const float4 z2 = *reinterpret_cast<const float4*>(rz2 + block_offset + item);
+    const float4 grad = *reinterpret_cast<const float4*>(dcur + item);
+    const float4 value{
+        grad.x * ReluGradFromPreactivation(input.x + z2.x), grad.y * ReluGradFromPreactivation(input.y + z2.y),
+        grad.z * ReluGradFromPreactivation(input.z + z2.z), grad.w * ReluGradFromPreactivation(input.w + z2.w),
+    };
+    *reinterpret_cast<float4*>(dzfc2 + item) = value;
+    *reinterpret_cast<__half2*>(dzfc2_half + item) = __floats2half2_rn(value.x, value.y);
+    *reinterpret_cast<__half2*>(dzfc2_half + item + 2U) = __floats2half2_rn(value.z, value.w);
+    *reinterpret_cast<float4*>(dskip + item) = value;
+}
+
 __global__ void ResidualDzFc1HalfKernel(CudaMlpShape shape, std::uint32_t samples, std::uint32_t block, const float* rz1, const float* dra1, float* dzfc1, __half* dzfc1_half) {
     const std::uint64_t item = static_cast<std::uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     const std::uint64_t total = static_cast<std::uint64_t>(samples) * shape.hd2;
@@ -1308,6 +1324,21 @@ __global__ void ResidualDzFc1FromHalfActivationKernel(std::uint32_t samples, std
     const float v = dra1[item] * grad;
     dzfc1[item] = v;
     dzfc1_half[item] = __float2half(v);
+}
+
+__global__ void ResidualDzFc1FromHalfActivationVec4Kernel(std::uint64_t total, const __half* activation, const float* dra1, float* dzfc1, __half* dzfc1_half) {
+    const std::uint64_t item = (static_cast<std::uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x) * 4U;
+    if (item >= total) return;
+    const float2 act01 = __half22float2(*reinterpret_cast<const __half2*>(activation + item));
+    const float2 act23 = __half22float2(*reinterpret_cast<const __half2*>(activation + item + 2U));
+    const float4 grad = *reinterpret_cast<const float4*>(dra1 + item);
+    const float4 value{
+        act01.x > 0.0f ? grad.x : 0.0f, act01.y > 0.0f ? grad.y : 0.0f,
+        act23.x > 0.0f ? grad.z : 0.0f, act23.y > 0.0f ? grad.w : 0.0f,
+    };
+    *reinterpret_cast<float4*>(dzfc1 + item) = value;
+    *reinterpret_cast<__half2*>(dzfc1_half + item) = __floats2half2_rn(value.x, value.y);
+    *reinterpret_cast<__half2*>(dzfc1_half + item + 2U) = __floats2half2_rn(value.z, value.w);
 }
 __global__ void HiddenDz2Kernel(CudaMlpShape shape, const float* z2, const float* dcur, std::uint32_t samples, float* dz2) {
     const std::uint64_t item = static_cast<std::uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -1633,6 +1664,18 @@ mgt::Status LaunchMlpLossGradKernelWithWorkspaceInternal(const CudaMlpShape& sha
 
     const DeviceLaunchConfig h1_launch = Build1DLaunchConfig(static_cast<std::uint64_t>(sample_count) * shape.hd1, 128);
     const DeviceLaunchConfig h2_launch = Build1DLaunchConfig(static_cast<std::uint64_t>(sample_count) * shape.hd2, 128);
+    const std::uint64_t batch_h2_items = static_cast<std::uint64_t>(sample_count) * shape.hd2;
+    const bool use_residual_dz_vec4 = (batch_h2_items % 4U) == 0U &&
+        (reinterpret_cast<std::uintptr_t>(w.block_inputs) % alignof(float4)) == 0U &&
+        (reinterpret_cast<std::uintptr_t>(w.rz2) % alignof(float4)) == 0U &&
+        (reinterpret_cast<std::uintptr_t>(w.dcur) % alignof(float4)) == 0U &&
+        (reinterpret_cast<std::uintptr_t>(w.dprev) % alignof(float4)) == 0U &&
+        (reinterpret_cast<std::uintptr_t>(w.dzfc2) % alignof(float4)) == 0U &&
+        (reinterpret_cast<std::uintptr_t>(w.dra1) % alignof(float4)) == 0U &&
+        (reinterpret_cast<std::uintptr_t>(w.dzfc1) % alignof(float4)) == 0U &&
+        (reinterpret_cast<std::uintptr_t>(w.h2_right_half) % alignof(__half2)) == 0U &&
+        (reinterpret_cast<std::uintptr_t>(w.ra1_half) % alignof(__half2)) == 0U;
+    const DeviceLaunchConfig h2_vec4_launch = Build1DLaunchConfig((batch_h2_items + 3U) / 4U, 128);
     const bool use_residual_fc1_fused_epilogue = use_half_linear && (shape.hd2 % 8U) == 0U;
     if (use_half_linear && external_weights_half == nullptr) {
         const DeviceLaunchConfig weight_half_launch = Build1DLaunchConfig(param_count, 256);
@@ -1744,7 +1787,11 @@ mgt::Status LaunchMlpLossGradKernelWithWorkspaceInternal(const CudaMlpShape& sha
         const __half* block_ra1_half = use_half_linear ? w.ra1_half + static_cast<std::uint64_t>(block) * batch_h2 : nullptr;
 
         if (use_half_linear) {
-            ResidualDzFc2HalfKernel<<<h2_launch.blocks, h2_launch.threads, 0, stream>>>(shape, sample_count, block, w.block_inputs, w.rz2, w.dcur, w.dzfc2, w.h2_right_half, w.dprev);
+            if (use_residual_dz_vec4) {
+                ResidualDzFc2HalfVec4Kernel<<<h2_vec4_launch.blocks, h2_vec4_launch.threads, 0, stream>>>(batch_h2, static_cast<std::uint64_t>(block) * batch_h2, w.block_inputs, w.rz2, w.dcur, w.dzfc2, w.h2_right_half, w.dprev);
+            } else {
+                ResidualDzFc2HalfKernel<<<h2_launch.blocks, h2_launch.threads, 0, stream>>>(shape, sample_count, block, w.block_inputs, w.rz2, w.dcur, w.dzfc2, w.h2_right_half, w.dprev);
+            }
             if (!LaunchOk()) return mgt::Status::kCudaFailure;
             if (profile != nullptr && stage_timer.MarkAdd(&profile->residual_fc2_dz_ms, &profile->residual_backward_ms) != mgt::Status::kOk) return mgt::Status::kCudaFailure;
             if (GemmGradWeightsHalf(blas_lt, stream, lt_workspace_base, lt_workspace_bytes, block_ra1_half, w.h2_right_half, device_grad + ResidualFc2Weight(shape, block), sample_count, shape.hd2, shape.hd2) != mgt::Status::kOk) return mgt::Status::kCudaFailure;
@@ -1767,7 +1814,11 @@ mgt::Status LaunchMlpLossGradKernelWithWorkspaceInternal(const CudaMlpShape& sha
 
         if (use_half_linear) {
             if (use_residual_fc1_fused_epilogue) {
-                ResidualDzFc1FromHalfActivationKernel<<<h2_launch.blocks, h2_launch.threads, 0, stream>>>(sample_count, shape.hd2, block_ra1_half, w.dra1, w.dzfc1, w.h2_right_half);
+                if (use_residual_dz_vec4) {
+                    ResidualDzFc1FromHalfActivationVec4Kernel<<<h2_vec4_launch.blocks, h2_vec4_launch.threads, 0, stream>>>(batch_h2, block_ra1_half, w.dra1, w.dzfc1, w.h2_right_half);
+                } else {
+                    ResidualDzFc1FromHalfActivationKernel<<<h2_launch.blocks, h2_launch.threads, 0, stream>>>(sample_count, shape.hd2, block_ra1_half, w.dra1, w.dzfc1, w.h2_right_half);
+                }
             } else {
                 ResidualDzFc1HalfKernel<<<h2_launch.blocks, h2_launch.threads, 0, stream>>>(shape, sample_count, block, w.rz1, w.dra1, w.dzfc1, w.h2_right_half);
             }
