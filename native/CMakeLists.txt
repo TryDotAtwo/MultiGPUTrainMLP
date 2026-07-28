@@ -24,6 +24,7 @@ add_library(mgt_core STATIC
     src/model_layout.cpp
     src/weight_export.cpp
     src/random_walk_cpu.cpp
+    src/batch_norm_cpu.cpp
     src/mlp_cpu_ref.cpp
     src/memory_plan.cpp
     src/train_plan.cpp
@@ -59,6 +60,9 @@ add_test(NAME random_walk_cpu COMMAND test_random_walk_cpu)
 add_executable(test_mlp_cpu_ref tests/test_mlp_cpu_ref.cpp)
 target_link_libraries(test_mlp_cpu_ref PRIVATE mgt_core)
 add_test(NAME mlp_cpu_ref COMMAND test_mlp_cpu_ref)
+add_executable(test_batch_norm_cpu tests/test_batch_norm_cpu.cpp)
+target_link_libraries(test_batch_norm_cpu PRIVATE mgt_core)
+add_test(NAME batch_norm_cpu COMMAND test_batch_norm_cpu)
 add_executable(test_memory_plan tests/test_memory_plan.cpp)
 target_link_libraries(test_memory_plan PRIVATE mgt_core)
 add_test(NAME memory_plan COMMAND test_memory_plan)
@@ -87,10 +91,14 @@ add_test(NAME training_evaluation COMMAND test_training_evaluation)
 add_executable(test_optimizer_contract tests/test_optimizer_contract.cpp)
 target_link_libraries(test_optimizer_contract PRIVATE mgt_core)
 add_test(NAME optimizer_contract COMMAND test_optimizer_contract)
+add_executable(test_p888_training_contract tests/test_p888_training_contract.cpp)
+target_link_libraries(test_p888_training_contract PRIVATE mgt_core)
+add_test(NAME p888_training_contract COMMAND test_p888_training_contract)
 if(MGT_ENABLE_CUDA)
     add_library(mgt_cuda STATIC
         cuda/device_context.cu
         cuda/random_walk_kernel.cu
+        cuda/batch_norm.cu
         cuda/mlp_forward.cu
         cuda/mlp_backward.cu
         cuda/adamw.cu
@@ -192,6 +200,9 @@ if(MGT_ENABLE_CUDA)
     add_executable(test_cuda_compile tests/cuda/test_cuda_compile.cu)
     target_link_libraries(test_cuda_compile PRIVATE mgt_cuda)
     add_test(NAME cuda_compile COMMAND test_cuda_compile)
+    add_executable(test_cuda_batch_norm_reference tests/cuda/test_cuda_batch_norm_reference.cu)
+    target_link_libraries(test_cuda_batch_norm_reference PRIVATE mgt_cuda)
+    add_test(NAME cuda_batch_norm_reference COMMAND test_cuda_batch_norm_reference)
     add_executable(test_cuda_random_walk_smoke tests/cuda/test_cuda_random_walk_smoke.cu)
     target_link_libraries(test_cuda_random_walk_smoke PRIVATE mgt_cuda)
     add_test(NAME cuda_random_walk_smoke COMMAND test_cuda_random_walk_smoke)

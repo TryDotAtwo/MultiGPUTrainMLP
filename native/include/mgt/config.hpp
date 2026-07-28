@@ -62,6 +62,26 @@ struct ModelSpec {
     PrecisionMode precision = PrecisionMode::kFloat16ComputeFloat32Master;
 };
 
+struct P888TrainingContract {
+    static constexpr std::uint32_t kInputFeatures = 6336;
+    static constexpr std::uint32_t kHidden1 = 2556;
+    static constexpr std::uint32_t kHidden2 = 218;
+    static constexpr std::uint32_t kResidualBlocks = 16;
+    static constexpr std::uint32_t kBatchNormSites = 2 + 2 * kResidualBlocks;
+    static constexpr std::uint32_t kMinDepth = 1;
+    static constexpr std::uint32_t kMaxDepth = 29;
+    static constexpr std::uint32_t kWalkersPerDepth = 34482;
+    static constexpr std::uint32_t kSamplesPerEpoch = kWalkersPerDepth * (kMaxDepth - kMinDepth + 1);
+    static constexpr std::uint32_t kGlobalBatch = 100000;
+    static constexpr std::uint32_t kFinalGlobalBatch = kSamplesPerEpoch % kGlobalBatch;
+    static constexpr std::uint32_t kOptimizerStepsPerEpoch = (kSamplesPerEpoch + kGlobalBatch - 1) / kGlobalBatch;
+    static constexpr std::uint32_t kEpochs = 32692;
+    static constexpr std::uint32_t kOptimizerSteps = kEpochs * kOptimizerStepsPerEpoch;
+    static constexpr float kLearningRate = 1.0e-4f;
+    static constexpr float kWeightDecay = 0.0f;
+    static constexpr float kBatchNormEpsilon = 1.0e-5f;
+    static constexpr float kBatchNormMomentum = 0.1f;
+};
 struct TrainSpec {
     std::uint32_t epochs = 32692;
     std::uint32_t batch_size = 100000;

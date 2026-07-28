@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace mgt {
@@ -37,9 +38,20 @@ struct ParamBlockPlan {
     std::uint32_t block_index = 0;
 };
 
+struct BatchNormSlice {
+    std::string name;
+    std::uint32_t features = 0;
+    std::uint64_t gamma_offset = 0;
+    std::uint64_t beta_offset = 0;
+    std::uint64_t running_mean_offset = 0;
+    std::uint64_t running_var_offset = 0;
+};
 struct ModelLayout {
     std::vector<TensorBlockHeader> blocks;
     std::vector<ParamBlockPlan> param_blocks;
+    std::vector<BatchNormSlice> batch_norms;
+    std::uint64_t batch_norm_trainable_params = 0;
+    std::uint64_t batch_norm_running_state_params = 0;
     std::uint64_t total_bytes = 0;
     std::uint64_t total_params = 0;
     std::uint64_t logical_params = 0;

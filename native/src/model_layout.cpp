@@ -7,6 +7,20 @@ std::uint64_t Align64(std::uint64_t value) {
     return RoundUp64(value, 64ULL);
 }
 
+void AddBatchNorm(ModelLayout* layout, std::string name, std::uint32_t features) {
+    BatchNormSlice slice{};
+    slice.name = std::move(name);
+    slice.features = features;
+    slice.gamma_offset = layout->batch_norm_trainable_params;
+    layout->batch_norm_trainable_params += features;
+    slice.beta_offset = layout->batch_norm_trainable_params;
+    layout->batch_norm_trainable_params += features;
+    slice.running_mean_offset = layout->batch_norm_running_state_params;
+    layout->batch_norm_running_state_params += features;
+    slice.running_var_offset = layout->batch_norm_running_state_params;
+    layout->batch_norm_running_state_params += features;
+    layout->batch_norms.push_back(std::move(slice));
+}
 void AddBlock(ModelLayout* layout,
               ParamBlockRole role,
               std::uint32_t logical_rows,
@@ -107,6 +121,12 @@ ModelLayout BuildModelLayout(const PuzzleSpec& puzzle, const ModelSpec& model) {
                  1,
                  layout.physical_hd2,
                  block);
+    }
+    AddBatchNorm(&layout, "input", model.hd1);
+    AddBatchNorm(&layout, "hidden", model.hd2);
+    for (std::uint32_t block = 0; block < model.residual_blocks; ++block) {
+        AddBatchNorm(&layout, "residual." + std::to_string(block) + ".fc1", model.hd2);
+        AddBatchNorm(&layout, "residual." + std::to_string(block) + ".fc2", model.hd2);
     }
     AddBlock(&layout,
              ParamBlockRole::kOutputWeight,
