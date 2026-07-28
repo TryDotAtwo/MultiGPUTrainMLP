@@ -22,6 +22,10 @@ mgt::Status NcclAllreduceAverageFloat(const mgt::AllreduceConfig& config,
                                       float* device_gradients,
                                       NcclRankContext* context,
                                       cudaStream_t stream);
+mgt::Status NcclAllreduceSumFloat(float* device_values,
+                                  std::size_t element_count,
+                                  NcclRankContext* context,
+                                  cudaStream_t stream);
 
 using NcclSingleRankContext = NcclRankContext;
 inline mgt::Status DestroyNcclSingleRankContext(NcclSingleRankContext* context) {

@@ -149,4 +149,19 @@ mgt::Status NcclAllreduceAverageFloat(const mgt::AllreduceConfig& config,
     return mgt::Status::kOk;
 }
 
+mgt::Status NcclAllreduceSumFloat(float* device_values,
+                                  std::size_t element_count,
+                                  NcclRankContext* context,
+                                  cudaStream_t stream) {
+    if (device_values == nullptr || element_count == 0 || context == nullptr) {
+        return mgt::Status::kInvalidConfig;
+    }
+    return NcclStatus(ncclAllReduce(device_values,
+                                    device_values,
+                                    element_count,
+                                    ncclFloat32,
+                                    ncclSum,
+                                    context->comm,
+                                    stream));
+}
 }  // namespace mgt_cuda
