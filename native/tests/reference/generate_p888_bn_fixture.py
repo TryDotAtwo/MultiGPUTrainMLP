@@ -57,11 +57,27 @@ weights = torch.tensor([0.03 * ((i % 9) - 4) for i in range(param_count)])
 states = torch.tensor([[i, (i + 1) % STATE_PAD] for i in range(4)], dtype=torch.long)
 model = FixtureNet(weights)
 model.train()
-train_output = model(states).detach().flatten()
+train_prediction = model(states)
+labels = torch.tensor([[1.0], [3.0], [-1.0], [2.0]])
+loss = torch.mean((train_prediction - labels) ** 2)
+loss.backward()
+train_output = train_prediction.detach().flatten()
+weight_grad = torch.cat([
+    model.table.grad.flatten(), model.input_bias.grad.flatten(),
+    model.hidden.weight.grad.T.flatten(), model.hidden.bias.grad.flatten(),
+    model.fc1.weight.grad.T.flatten(), model.fc1.bias.grad.flatten(),
+    model.fc2.weight.grad.T.flatten(), model.fc2.bias.grad.flatten(),
+    model.output.weight.grad.T.flatten(), model.output.bias.grad.flatten(),
+])
+batch_norms = (model.input_bn, model.hidden_bn, model.fc1_bn, model.fc2_bn)
+affine_grad = torch.cat([
+    *(bn.weight.grad.flatten() for bn in batch_norms),
+    *(bn.bias.grad.flatten() for bn in batch_norms),
+])
 running = []
-for bn in (model.input_bn, model.hidden_bn, model.fc1_bn, model.fc2_bn):
+for bn in batch_norms:
     running.extend(bn.running_mean.tolist())
-for bn in (model.input_bn, model.hidden_bn, model.fc1_bn, model.fc2_bn):
+for bn in batch_norms:
     running.extend(bn.running_var.tolist())
 model.eval()
 eval_output = model(states).detach().flatten()
@@ -71,6 +87,10 @@ payload = {
     "weights": weights.tolist(),
     "states": states.tolist(),
     "train_output": train_output.tolist(),
+    "labels": labels.flatten().tolist(),
+    "loss": loss.item(),
+    "weight_grad": weight_grad.tolist(),
+    "affine_grad": affine_grad.tolist(),
     "running": running,
     "eval_output": eval_output.tolist(),
 }
