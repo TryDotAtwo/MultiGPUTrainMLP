@@ -1,6 +1,7 @@
 #pragma once
 #include "mgt/batch_norm_training.hpp"
 #include "mgt_cuda/mlp_forward.cuh"
+#include "mgt_cuda/adamw.cuh"
 #include <cublas_v2.h>
 namespace mgt_cuda {
 struct NcclRankContext;
@@ -9,4 +10,7 @@ mgt::Status LaunchMlpBatchNormForward(const CudaMlpShape& physical_shape,std::ui
 mgt::Status LaunchMlpBatchNormOutputLossGrad(const CudaMlpShape& physical_shape,const float* weights,const float* labels,const float* outputs,const float* final_activation,std::uint32_t local_rows,std::uint32_t global_rows,float* loss,float* weight_grad,float* output_dy,float* final_activation_grad,NcclRankContext* context,cublasHandle_t blas,cudaStream_t stream);
 mgt::Status LaunchMlpBatchNormResidualFc2Backward(const CudaMlpShape& physical_shape,const float* weights,const float* batch_norm_affine,std::uint32_t block_index,std::uint32_t local_rows,std::uint32_t global_rows,float* forward_workspace,const mgt::BatchNormTrainingPlan& plan,float* block_grad,float* weight_grad,float* affine_grad,float* fc1_activation_grad,float* residual_grad,NcclRankContext* context,cublasHandle_t blas,cudaStream_t stream);
 mgt::Status LaunchMlpBatchNormResidualStackBackward(const CudaMlpShape& physical_shape,const float* weights,const float* batch_norm_affine,std::uint32_t local_rows,std::uint32_t global_rows,float* forward_workspace,const mgt::BatchNormTrainingPlan& plan,float* block_grad,float* weight_grad,float* affine_grad,float* fc1_grad_workspace,float* residual_grad_workspace,NcclRankContext* context,cublasHandle_t blas,cudaStream_t stream);
+mgt::Status LaunchMlpBatchNormHiddenBackward(const CudaMlpShape& physical_shape,const float* weights,const float* batch_norm_affine,std::uint32_t local_rows,std::uint32_t global_rows,float* forward_workspace,const mgt::BatchNormTrainingPlan& plan,float* hidden_grad,float* weight_grad,float* affine_grad,float* input_activation_grad,NcclRankContext* context,cublasHandle_t blas,cudaStream_t stream);
+mgt::Status LaunchMlpBatchNormInputBackward(const CudaMlpShape& physical_shape,const float* batch_norm_affine,const mgt::TrainStateStorage* states,std::uint32_t local_rows,std::uint32_t global_rows,float* forward_workspace,const mgt::BatchNormTrainingPlan& plan,float* input_activation_grad,float* weight_grad,float* affine_grad,NcclRankContext* context,cudaStream_t stream);
+mgt::Status LaunchMlpBatchNormAdamStep(const CudaMlpShape& physical_shape,const mgt::BatchNormTrainingPlan& plan,const AdamWKernelConfig& config,float* weights,const float* weight_grad,float* weight_m,float* weight_v,float* batch_norm_affine,const float* affine_grad,float* affine_m,float* affine_v,cudaStream_t stream);
 }
