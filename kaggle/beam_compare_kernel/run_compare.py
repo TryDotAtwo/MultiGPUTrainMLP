@@ -15,9 +15,9 @@ BUILD = Path("/tmp/beam-build-t4")
 DATA = Path("/tmp/ihes-data")
 MODELS = Path("/tmp/models")
 OUT = ROOT / "beam-model-comparison"
-PUZZLES = [1000]
-DEPTH = 30
-BEAM = 4_000_000
+PUZZLES = [0]
+DEPTH = 100
+BEAM = 10_000_000
 
 for path in (REPO, BUILD, DATA, MODELS, OUT):
     shutil.rmtree(path, ignore_errors=True)
