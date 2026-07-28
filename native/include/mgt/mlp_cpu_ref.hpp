@@ -3,6 +3,7 @@
 #include "mgt/static_contracts.hpp"
 #include <cstdint>
 #include <span>
+#include <vector>
 
 namespace mgt {
 
@@ -16,6 +17,24 @@ struct CpuMlpShape {
 };
 
 std::uint64_t CpuMlpParamCount(const CpuMlpShape& shape);
+
+struct CpuMlpBatchNormState {
+    std::vector<float> affine;
+    std::vector<float> running;
+};
+
+std::uint64_t CpuMlpBatchNormFeatureCount(const CpuMlpShape& shape);
+CpuMlpBatchNormState InitializeCpuMlpBatchNormState(const CpuMlpShape& shape);
+
+Status CpuMlpBatchNormForward(const CpuMlpShape& shape,
+                              std::span<const float> weights,
+                              CpuMlpBatchNormState* batch_norm,
+                              const TrainStateStorage* states,
+                              std::uint32_t sample_count,
+                              float momentum,
+                              float epsilon,
+                              bool training,
+                              float* outputs);
 
 Status CpuMlpForward(const CpuMlpShape& shape,
                      std::span<const float> weights,

@@ -1,4 +1,5 @@
 #include "mgt/mlp_cpu_ref.hpp"
+#include "mgt/batch_norm.hpp"
 #include <algorithm>
 #include <cmath>
 #include <vector>
@@ -124,6 +125,118 @@ Status ForwardOne(const CpuMlpShape& shape,
 std::uint64_t CpuMlpParamCount(const CpuMlpShape& shape) {
     if (!ValidShape(shape)) return 0;
     return BuildOffsets(shape).total;
+}
+std::uint64_t CpuMlpBatchNormFeatureCount(const CpuMlpShape& shape) {
+    if (!ValidShape(shape)) return 0;
+    return static_cast<std::uint64_t>(shape.hd1) +
+           static_cast<std::uint64_t>(1U + 2U * shape.residual_blocks) * shape.hd2;
+}
+
+CpuMlpBatchNormState InitializeCpuMlpBatchNormState(const CpuMlpShape& shape) {
+    CpuMlpBatchNormState state;
+    const std::uint64_t features = CpuMlpBatchNormFeatureCount(shape);
+    state.affine.assign(2ULL * features, 0.0f);
+    state.running.assign(2ULL * features, 0.0f);
+    std::fill(state.affine.begin(), state.affine.begin() + features, 1.0f);
+    std::fill(state.running.begin() + features, state.running.end(), 1.0f);
+    return state;
+}
+
+Status CpuMlpBatchNormForward(const CpuMlpShape& shape,
+                              std::span<const float> weights,
+                              CpuMlpBatchNormState* batch_norm,
+                              const TrainStateStorage* states,
+                              std::uint32_t sample_count,
+                              float momentum,
+                              float epsilon,
+                              bool training,
+                              float* outputs) {
+    if (!ValidShape(shape) || batch_norm == nullptr || states == nullptr ||
+        sample_count == 0 || momentum < 0.0f || momentum > 1.0f ||
+        epsilon <= 0.0f || outputs == nullptr) return Status::kInvalidConfig;
+    const Offsets offsets = BuildOffsets(shape);
+    const std::uint64_t features = CpuMlpBatchNormFeatureCount(shape);
+    if (weights.size() != offsets.total || batch_norm->affine.size() != 2ULL * features ||
+        batch_norm->running.size() != 2ULL * features) return Status::kInvalidConfig;
+
+    const std::uint64_t rows = sample_count;
+    std::vector<float> input(rows * shape.hd1, 0.0f), input_bn(rows * shape.hd1);
+    for (std::uint32_t r = 0; r < sample_count; ++r) {
+        for (std::uint32_t h = 0; h < shape.hd1; ++h)
+            input[static_cast<std::uint64_t>(r) * shape.hd1 + h] = weights[offsets.input_bias + h];
+        for (std::uint32_t pos = 0; pos < shape.state_len; ++pos) {
+            const std::uint32_t value = states[r].v[pos];
+            if (value >= shape.state_value_pad) return Status::kInvalidConfig;
+            const std::uint64_t row = static_cast<std::uint64_t>(pos) * shape.state_value_pad + value;
+            const std::uint64_t base = offsets.input_table + row * shape.hd1;
+            for (std::uint32_t h = 0; h < shape.hd1; ++h)
+                input[static_cast<std::uint64_t>(r) * shape.hd1 + h] += weights[base + h];
+        }
+    }
+
+    std::uint64_t bn_offset = 0;
+    BatchNormCache cache;
+    auto apply_bn = [&](const std::vector<float>& x, std::uint32_t cols, std::vector<float>* y) {
+        batch_norm_forward_cpu(x.data(), static_cast<int>(sample_count), static_cast<int>(cols),
+            batch_norm->affine.data() + bn_offset,
+            batch_norm->affine.data() + features + bn_offset,
+            batch_norm->running.data() + bn_offset,
+            batch_norm->running.data() + features + bn_offset,
+            momentum, epsilon, training, y->data(), &cache);
+        bn_offset += cols;
+    };
+    apply_bn(input, shape.hd1, &input_bn);
+    for (float& value : input_bn) value = Relu(value);
+
+    std::vector<float> hidden(rows * shape.hd2, 0.0f), current(rows * shape.hd2);
+    for (std::uint32_t r = 0; r < sample_count; ++r) {
+        for (std::uint32_t j = 0; j < shape.hd2; ++j) {
+            float sum = weights[offsets.hidden_bias + j];
+            for (std::uint32_t h = 0; h < shape.hd1; ++h)
+                sum += input_bn[static_cast<std::uint64_t>(r) * shape.hd1 + h] *
+                       weights[offsets.hidden_weight + static_cast<std::uint64_t>(h) * shape.hd2 + j];
+            hidden[static_cast<std::uint64_t>(r) * shape.hd2 + j] = sum;
+        }
+    }
+    apply_bn(hidden, shape.hd2, &current);
+    for (float& value : current) value = Relu(value);
+
+    std::vector<float> fc1(current.size()), fc1_bn(current.size());
+    std::vector<float> fc2(current.size()), fc2_bn(current.size());
+    for (std::uint32_t block = 0; block < shape.residual_blocks; ++block) {
+        const std::uint64_t fc1w = ResidualFc1Weight(shape, offsets, block);
+        const std::uint64_t fc1b = ResidualFc1Bias(shape, offsets, block);
+        const std::uint64_t fc2w = ResidualFc2Weight(shape, offsets, block);
+        const std::uint64_t fc2b = ResidualFc2Bias(shape, offsets, block);
+        for (std::uint32_t r = 0; r < sample_count; ++r) for (std::uint32_t j = 0; j < shape.hd2; ++j) {
+            float sum = weights[fc1b + j];
+            for (std::uint32_t i = 0; i < shape.hd2; ++i)
+                sum += current[static_cast<std::uint64_t>(r) * shape.hd2 + i] *
+                       weights[fc1w + static_cast<std::uint64_t>(i) * shape.hd2 + j];
+            fc1[static_cast<std::uint64_t>(r) * shape.hd2 + j] = sum;
+        }
+        apply_bn(fc1, shape.hd2, &fc1_bn);
+        for (float& value : fc1_bn) value = Relu(value);
+        for (std::uint32_t r = 0; r < sample_count; ++r) for (std::uint32_t j = 0; j < shape.hd2; ++j) {
+            float sum = weights[fc2b + j];
+            for (std::uint32_t i = 0; i < shape.hd2; ++i)
+                sum += fc1_bn[static_cast<std::uint64_t>(r) * shape.hd2 + i] *
+                       weights[fc2w + static_cast<std::uint64_t>(i) * shape.hd2 + j];
+            fc2[static_cast<std::uint64_t>(r) * shape.hd2 + j] = sum;
+        }
+        apply_bn(fc2, shape.hd2, &fc2_bn);
+        for (std::uint64_t i = 0; i < current.size(); ++i) current[i] = Relu(current[i] + fc2_bn[i]);
+    }
+    if (bn_offset != features) return Status::kInvalidConfig;
+
+    for (std::uint32_t r = 0; r < sample_count; ++r) for (std::uint32_t out = 0; out < shape.output_dim; ++out) {
+        float sum = weights[offsets.output_bias + out];
+        for (std::uint32_t j = 0; j < shape.hd2; ++j)
+            sum += current[static_cast<std::uint64_t>(r) * shape.hd2 + j] *
+                   weights[offsets.output_weight + static_cast<std::uint64_t>(j) * shape.output_dim + out];
+        outputs[static_cast<std::uint64_t>(r) * shape.output_dim + out] = sum;
+    }
+    return Status::kOk;
 }
 
 Status CpuMlpForward(const CpuMlpShape& shape,
