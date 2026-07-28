@@ -102,6 +102,7 @@ if(MGT_ENABLE_CUDA)
         cuda/device_context.cu
         cuda/random_walk_kernel.cu
         cuda/batch_norm.cu
+        cuda/batch_norm_activation.cu
         cuda/mlp_forward.cu
         cuda/mlp_backward.cu
         cuda/adamw.cu
@@ -213,6 +214,9 @@ if(MGT_ENABLE_CUDA)
     add_executable(test_cuda_batch_norm_reference tests/cuda/test_cuda_batch_norm_reference.cu)
     target_link_libraries(test_cuda_batch_norm_reference PRIVATE mgt_cuda)
     add_test(NAME cuda_batch_norm_reference COMMAND test_cuda_batch_norm_reference)
+    add_executable(test_batch_norm_activation tests/cuda/test_batch_norm_activation.cu)
+    target_link_libraries(test_batch_norm_activation PRIVATE mgt_cuda)
+    add_test(NAME batch_norm_activation COMMAND test_batch_norm_activation)
     add_executable(test_cuda_random_walk_smoke tests/cuda/test_cuda_random_walk_smoke.cu)
     target_link_libraries(test_cuda_random_walk_smoke PRIVATE mgt_cuda)
     add_test(NAME cuda_random_walk_smoke COMMAND test_cuda_random_walk_smoke)
