@@ -25,6 +25,7 @@ add_library(mgt_core STATIC
     src/weight_export.cpp
     src/random_walk_cpu.cpp
     src/batch_norm_cpu.cpp
+    src/batch_norm_training.cpp
     src/mlp_cpu_ref.cpp
     src/memory_plan.cpp
     src/train_plan.cpp
@@ -66,6 +67,9 @@ add_test(NAME mlp_batch_norm_cpu_ref COMMAND test_mlp_batch_norm_cpu_ref)
 add_executable(test_batch_norm_cpu tests/test_batch_norm_cpu.cpp)
 target_link_libraries(test_batch_norm_cpu PRIVATE mgt_core)
 add_test(NAME batch_norm_cpu COMMAND test_batch_norm_cpu)
+add_executable(test_batch_norm_training_plan tests/test_batch_norm_training_plan.cpp)
+target_link_libraries(test_batch_norm_training_plan PRIVATE mgt_core)
+add_test(NAME batch_norm_training_plan COMMAND test_batch_norm_training_plan)
 add_executable(test_memory_plan tests/test_memory_plan.cpp)
 target_link_libraries(test_memory_plan PRIVATE mgt_core)
 add_test(NAME memory_plan COMMAND test_memory_plan)
