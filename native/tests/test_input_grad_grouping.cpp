@@ -49,6 +49,7 @@ int main() {
     if (!ResolvesTo(72, 0, shared_bytes_per_position, t4, 3, 27648)) return 1;
     if (!ResolvesTo(72, 4, shared_bytes_per_position, t4, 4, 36864)) return 1;
     if (!ResolvesTo(2, 0, shared_bytes_per_position, a100, 2, 18432)) return 1;
+    if (!ResolvesTo(2, 4, shared_bytes_per_position, a100, 4, 36864)) return 1;
 
     mgt::InputGradGroupingConfig config{};
     if (mgt::ResolveInputGradGrouping(72, 4, shared_bytes_per_position, constrained, &config) !=
