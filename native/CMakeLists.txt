@@ -101,6 +101,9 @@ add_test(NAME optimizer_contract COMMAND test_optimizer_contract)
 add_executable(test_p888_training_contract tests/test_p888_training_contract.cpp)
 target_link_libraries(test_p888_training_contract PRIVATE mgt_core)
 add_test(NAME p888_training_contract COMMAND test_p888_training_contract)
+add_executable(test_input_grad_grouping tests/test_input_grad_grouping.cpp)
+target_link_libraries(test_input_grad_grouping PRIVATE mgt_core)
+add_test(NAME input_grad_grouping COMMAND test_input_grad_grouping)
 if(MGT_ENABLE_CUDA)
     add_library(mgt_cuda STATIC
         cuda/device_context.cu
