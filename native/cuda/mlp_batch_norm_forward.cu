@@ -21,6 +21,37 @@ __global__ void AddInPlace(float*x,const float*y,std::uint64_t n){std::uint64_t 
 constexpr unsigned INPUT_T=96;
 __global__ void SparseInputGrad(CudaMlpShape s,const mgt::TrainStateStorage*states,const float*dz,unsigned rows,float*grad){extern __shared__ float sums[];unsigned h=blockIdx.x*blockDim.x+threadIdx.x,pos=blockIdx.y,stride=s.state_value_pad+1;float*v=sums+threadIdx.x*stride;bool active=h<s.hd1;unsigned lane=threadIdx.x&31U;for(unsigned x=0;x<s.state_value_pad;x++)v[x]=0;for(unsigned r=0;r<rows;r++){unsigned value=0;if(lane==0)value=states[r].v[pos];value=__shfl_sync(0xffffffffU,value,0);if(active&&value<s.state_value_pad)v[value]+=dz[static_cast<std::uint64_t>(r)*s.hd1+h];}if(!active)return;for(unsigned value=0;value<s.state_value_pad;value++){std::uint64_t row=static_cast<std::uint64_t>(pos)*s.state_value_pad+value;grad[row*s.hd1+h]=v[value];}}
 constexpr unsigned GROUPED_INPUT_T = 32;
+__global__ void SparseInputGradCoalesced96(
+    CudaMlpShape s,
+    const mgt::TrainStateStorage* states,
+    const float* dz,
+    unsigned rows,
+    float* grad) {
+    extern __shared__ float sums[];
+    const unsigned h = blockIdx.x * INPUT_T + threadIdx.x;
+    const unsigned position = blockIdx.y;
+    const bool active = h < s.hd1;
+    const unsigned lane = threadIdx.x & 31U;
+    for (unsigned value = 0; value < s.state_value_pad; ++value) {
+        sums[value * INPUT_T + threadIdx.x] = 0.0f;
+    }
+    for (unsigned row = 0; row < rows; ++row) {
+        unsigned value = 0;
+        if (lane == 0) value = states[row].v[position];
+        value = __shfl_sync(0xffffffffU, value, 0);
+        if (active && value < s.state_value_pad) {
+            sums[value * INPUT_T + threadIdx.x] +=
+                dz[static_cast<std::uint64_t>(row) * s.hd1 + h];
+        }
+    }
+    if (!active) return;
+    for (unsigned value = 0; value < s.state_value_pad; ++value) {
+        const std::uint64_t output_row =
+            static_cast<std::uint64_t>(position) * s.state_value_pad + value;
+        grad[output_row * s.hd1 + h] = sums[value * INPUT_T + threadIdx.x];
+    }
+}
+
 constexpr unsigned GROUPED_INPUT_MAX_POSITIONS = 4;
 
 __global__ void SparseInputGradExactGrouped(
@@ -95,6 +126,7 @@ InputGradLaunchConfig ResolveInputGradLaunch(CudaMlpShape shape) {
         std::getenv("MGT_BN_INPUT_GRAD_POSITIONS_PER_BLOCK");
     const bool strict = mode != nullptr && std::strcmp(mode, "strict") == 0;
     const bool automatic = mode == nullptr || std::strcmp(mode, "auto") == 0;
+    const bool coalesced = mode != nullptr && std::strcmp(mode, "coalesced") == 0;
     const bool exact = mode != nullptr && std::strcmp(mode, "exact") == 0;
     unsigned requested = 0;
     bool requested_valid = true;
@@ -106,8 +138,12 @@ InputGradLaunchConfig ResolveInputGradLaunch(CudaMlpShape shape) {
         if (requested_valid) requested = static_cast<unsigned>(parsed);
     }
 
-    if ((strict || automatic || exact) && requested_valid && (!strict || requested == 0)) {
-        if (strict) {
+    if ((strict || automatic || exact || coalesced) && requested_valid &&
+        (!(strict || coalesced) || requested == 0)) {
+        if (coalesced) {
+            cached = {mgt::Status::kOk, true, 0,
+                      static_cast<std::size_t>(INPUT_T) * shape.state_value_pad * sizeof(float)};
+        } else if (strict) {
             cached = {mgt::Status::kOk, false, 1, 0};
         } else {
             cudaDeviceProp properties{};
@@ -151,7 +187,9 @@ InputGradLaunchConfig ResolveInputGradLaunch(CudaMlpShape shape) {
     std::fprintf(
         stderr,
         "mgt input_grad kernel=%s positions=%u shared=%zu status=%u\n",
-        cached.status == mgt::Status::kOk ? (cached.exact ? "exact" : "strict") : "invalid",
+        cached.status == mgt::Status::kOk
+            ? (cached.exact ? (cached.positions == 0 ? "coalesced" : "exact") : "strict")
+            : "invalid",
         cached.positions,
         cached.shared,
         static_cast<unsigned>(cached.status));
@@ -202,10 +240,16 @@ mgt::Status LaunchMlpBatchNormInputBackward(
     const std::uint64_t parameter_count = HW(s);
     if (cudaMemsetAsync(weight_grad, 0, parameter_count * sizeof(float), st) != cudaSuccess)
         return mgt::Status::kCudaFailure;
-    const dim3 grid((s.hd1 + GROUPED_INPUT_T - 1U) / GROUPED_INPUT_T,
-                    (s.state_len + input_launch.positions - 1U) / input_launch.positions);
-    SparseInputGradExactGrouped<<<grid, GROUPED_INPUT_T, input_launch.shared, st>>>(
-        s, states, input_grad, lr, input_launch.positions, weight_grad);
+    if (input_launch.positions == 0) {
+        const dim3 grid((s.hd1 + INPUT_T - 1U) / INPUT_T, s.state_len);
+        SparseInputGradCoalesced96<<<grid, INPUT_T, input_launch.shared, st>>>(
+            s, states, input_grad, lr, weight_grad);
+    } else {
+        const dim3 grid((s.hd1 + GROUPED_INPUT_T - 1U) / GROUPED_INPUT_T,
+                        (s.state_len + input_launch.positions - 1U) / input_launch.positions);
+        SparseInputGradExactGrouped<<<grid, GROUPED_INPUT_T, input_launch.shared, st>>>(
+            s, states, input_grad, lr, input_launch.positions, weight_grad);
+    }
     if (!launch()) return mgt::Status::kCudaFailure;
     ColumnSum<<<s.hd1, T, 0, st>>>(
         input_grad, lr, q.logical_features, s.hd1, weight_grad + IB(s));
