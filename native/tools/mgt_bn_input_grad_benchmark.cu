@@ -230,7 +230,13 @@ int main(int argc, char** argv) {
     double sum_abs = 0.0;
     for (const float value : host_result) sum_abs += std::fabs(value);
     const std::uint64_t checksum = Fnv1a64(host_result);
-    if (!(sum_abs > 0.0) || !std::isfinite(sum_abs)) return 13;
+    const bool expected_nonzero = state_pattern != StatePattern::kZero;
+    if (!std::isfinite(sum_abs) || (expected_nonzero && !(sum_abs > 0.0)) ||
+        (!expected_nonzero && sum_abs != 0.0)) {
+        std::cerr << "unexpected gradient sum for state pattern "
+                  << StatePatternName(state_pattern) << ": " << sum_abs << '\n';
+        return 13;
+    }
 
     if (rank == 0) {
         const double step_ms = total_ms / steps;

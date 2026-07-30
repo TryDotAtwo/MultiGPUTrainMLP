@@ -94,8 +94,8 @@ InputGradLaunchConfig ResolveInputGradLaunch(CudaMlpShape shape) {
     const char* requested_text =
         std::getenv("MGT_BN_INPUT_GRAD_POSITIONS_PER_BLOCK");
     const bool strict = mode != nullptr && std::strcmp(mode, "strict") == 0;
-    const bool exact = mode == nullptr || std::strcmp(mode, "auto") == 0 ||
-                       std::strcmp(mode, "exact") == 0;
+    const bool automatic = mode == nullptr || std::strcmp(mode, "auto") == 0;
+    const bool exact = mode != nullptr && std::strcmp(mode, "exact") == 0;
     unsigned requested = 0;
     bool requested_valid = true;
     if (requested_text != nullptr) {
@@ -106,13 +106,17 @@ InputGradLaunchConfig ResolveInputGradLaunch(CudaMlpShape shape) {
         if (requested_valid) requested = static_cast<unsigned>(parsed);
     }
 
-    if ((strict || exact) && requested_valid && (!strict || requested == 0)) {
+    if ((strict || automatic || exact) && requested_valid && (!strict || requested == 0)) {
         if (strict) {
             cached = {mgt::Status::kOk, false, 1, 0};
         } else {
             cudaDeviceProp properties{};
             if (cudaGetDeviceProperties(&properties, device) != cudaSuccess) {
                 cached.status = mgt::Status::kCudaFailure;
+            } else if (automatic && requested == 0 && properties.major >= 8) {
+                // The owner-write kernel is ~2.6x faster than grouped exact on A100.
+                // Keep grouped exact available explicitly and as the T4 auto policy.
+                cached = {mgt::Status::kOk, false, 1, 0};
             } else {
                 const mgt::InputGradGroupingLimits limits{
                     static_cast<std::uint64_t>(properties.sharedMemPerBlock),
