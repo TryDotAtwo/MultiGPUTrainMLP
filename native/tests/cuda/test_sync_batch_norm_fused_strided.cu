@@ -1,5 +1,6 @@
 #include "sync_batch_norm.cuh"
 #include "mgt/batch_norm.hpp"
+#include "mgt_cuda/allreduce_nccl.cuh"
 
 #include <cmath>
 #include <vector>
