@@ -22,12 +22,22 @@ build_dir="${MGT_BUILD_DIR:-build-a100-fused-bn}"
 results_root="${MGT_RESULTS_ROOT:-results/${SLURM_JOB_ID:-manual}-fused-bn}"
 mkdir -p "$results_root/raw"
 
-cmake -S native -B "$build_dir" \
-  -DMGT_ENABLE_CUDA=ON \
-  -DMGT_ENABLE_NCCL=ON \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_CUDA_ARCHITECTURES=80 \
+cmake_args=(
+  -S native
+  -B "$build_dir"
+  -DMGT_ENABLE_CUDA=ON
+  -DMGT_ENABLE_NCCL=ON
+  -DCMAKE_BUILD_TYPE=Release
+  -DCMAKE_CUDA_ARCHITECTURES=80
   -DMGT_CUTLASS_ROOT="${CUTLASS_ROOT:-/opt/cutlass}"
+)
+if [[ -n "${MGT_NCCL_INCLUDE_DIR:-}" ]]; then
+  cmake_args+=("-DNCCL_INCLUDE_DIR=${MGT_NCCL_INCLUDE_DIR}")
+fi
+if [[ -n "${MGT_NCCL_LIB:-}" ]]; then
+  cmake_args+=("-DNCCL_LIB=${MGT_NCCL_LIB}")
+fi
+cmake "${cmake_args[@]}"
 cmake --build "$build_dir" --config Release --parallel "${SLURM_CPUS_ON_NODE:-32}" \
   --target test_sync_batch_norm_fused_strided test_mlp_batch_norm_forward \
            test_mlp_batch_norm_full_backward mgt_bn_step_benchmark
