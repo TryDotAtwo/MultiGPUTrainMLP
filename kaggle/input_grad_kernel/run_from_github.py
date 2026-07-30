@@ -7,7 +7,7 @@ from pathlib import Path
 
 REPO = "https://github.com/TryDotAtwo/MultiGPUTrainMLP.git"
 REF = "codex/sparse-input-grad-v3"
-REV = "e821ce7cb25f746981a3750a1a66bbb31b680c97"
+REV = "2a555ccdf6c5f41e612cdb1cfaafd6eb87e535b9"
 WORK = Path("/tmp/MultiGPUTrainMLP")
 BUILD = Path("/tmp/build-input-grad-sm75")
 OUT = Path("/kaggle/working/input-grad-2xt4")
@@ -127,7 +127,7 @@ run(
 run([str(BUILD / "test_input_grad_grouping")], cwd=WORK, env=env)
 
 records = []
-configs = [("strict", 0), ("exact", 1), ("exact", 2), ("exact", 3), ("exact", 4), ("auto", 0)]
+configs = [("strict", 0), ("auto", 0)]
 for repeat in range(1, 4):
     for mode, group in configs:
         records.append(launch(mode, group, "permutation", repeat, 10, 50))
