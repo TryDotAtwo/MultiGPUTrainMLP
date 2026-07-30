@@ -145,6 +145,8 @@ InputGradLaunchConfig ResolveInputGradLaunch(CudaMlpShape shape) {
                       static_cast<std::size_t>(INPUT_T) * shape.state_value_pad * sizeof(float)};
         } else if (strict) {
             cached = {mgt::Status::kOk, false, 1, 0};
+        } else if (automatic && requested == 0) {
+            cached = {mgt::Status::kOk, false, 1, 0};
         } else {
             cudaDeviceProp properties{};
             if (cudaGetDeviceProperties(&properties, device) != cudaSuccess) {
