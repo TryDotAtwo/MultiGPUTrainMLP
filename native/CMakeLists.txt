@@ -130,6 +130,7 @@ if(MGT_ENABLE_CUDA)
         cuda/mlp_backward.cu
         cuda/adamw.cu
         cuda/finite_check.cu
+        cuda/p888_step_control.cu
     )
     target_include_directories(mgt_cuda PUBLIC include cuda)
     target_link_libraries(mgt_cuda PUBLIC mgt_core CUDA::cublas CUDA::cublasLt)
@@ -273,6 +274,9 @@ if(MGT_ENABLE_CUDA)
     add_executable(test_cuda_compile tests/cuda/test_cuda_compile.cu)
     target_link_libraries(test_cuda_compile PRIVATE mgt_cuda)
     add_test(NAME cuda_compile COMMAND test_cuda_compile)
+    add_executable(test_p888_step_control tests/cuda/test_p888_step_control.cu)
+    target_link_libraries(test_p888_step_control PRIVATE mgt_cuda)
+    add_test(NAME p888_step_control COMMAND test_p888_step_control)
     add_executable(test_cuda_batch_norm_reference tests/cuda/test_cuda_batch_norm_reference.cu)
     target_link_libraries(test_cuda_batch_norm_reference PRIVATE mgt_cuda)
     add_test(NAME cuda_batch_norm_reference COMMAND test_cuda_batch_norm_reference)
