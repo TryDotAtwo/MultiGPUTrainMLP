@@ -1,0 +1,33 @@
+#include "mgt/a100_static_arena.hpp"
+
+#include <algorithm>
+#include <limits>
+#include <string>
+#include <vector>
+
+namespace {
+bool Add(std::uint64_t a,std::uint64_t b,std::uint64_t* o){if(a>std::numeric_limits<std::uint64_t>::max()-b)return false;*o=a+b;return true;}
+bool Mul(std::uint64_t a,std::uint64_t b,std::uint64_t* o){if(a&&b>std::numeric_limits<std::uint64_t>::max()/a)return false;*o=a*b;return true;}
+bool Align(std::uint64_t v,std::uint64_t a,std::uint64_t* o){std::uint64_t t;if(!a||(a&(a-1))||!Add(v,a-1,&t))return false;*o=t&~(a-1);return true;}
+void U32(std::vector<std::uint8_t>& o,std::uint32_t v){for(int i=0;i<4;++i)o.push_back((std::uint8_t)(v>>(8*i)));}
+void U64(std::vector<std::uint8_t>& o,std::uint64_t v){for(int i=0;i<8;++i)o.push_back((std::uint8_t)(v>>(8*i)));}
+bool Hex(const std::string& s,std::array<std::uint8_t,32>* o){if(s.size()!=64)return false;auto n=[](char c)->int{if(c>='0'&&c<='9')return c-'0';if(c>='a'&&c<='f')return c-'a'+10;return -1;};for(int i=0;i<32;++i){int a=n(s[2*i]),b=n(s[2*i+1]);if(a<0||b<0)return false;(*o)[i]=(std::uint8_t)((a<<4)|b);}return true;}
+struct Builder{mgt::A100StaticArenaPlanV1* p;bool Put(mgt::A100ArenaSliceKind k,mgt::A100ArenaDomain d,mgt::A100ArenaDtype t,std::uint64_t bytes,std::uint32_t alignment){if(!bytes||p->slice_count>=p->slices.size())return false;auto* total=d==mgt::A100ArenaDomain::kOrdinaryDevice?&p->ordinary_bytes:d==mgt::A100ArenaDomain::kSymmetricDevice?&p->symmetric_bytes:&p->pinned_host_bytes;std::uint64_t off,end;if(!Align(*total,alignment,&off)||!Add(off,bytes,&end))return false;p->slices[p->slice_count++]={k,d,t,off,bytes,alignment};*total=end;return true;}};
+}
+
+mgt::Status mgt::BuildA100StaticArenaPlan(const A100StaticArenaBuildInfo& i,A100StaticArenaPlanV1* out){
+ if(!out||!i.profile||i.capacity_rows==0||!i.parameter_count||!i.affine_value_count||!i.state_storage_bytes||!i.hd1||!i.hd2||!i.output_dim||ValidateA100Bf16Policy(i.profile->policy)!=Status::kOk)return Status::kInvalidConfig;
+ if(i.state_storage_bytes>std::numeric_limits<std::uint64_t>::max()/2||
+    i.affine_value_count>std::numeric_limits<std::uint64_t>::max()/20||
+    std::uint64_t{i.hd1}+i.hd2>std::numeric_limits<std::uint32_t>::max()||
+    std::uint64_t{i.hd1}+3ULL*i.hd2>std::numeric_limits<std::uint64_t>::max()/4)
+     return Status::kCapacityExceeded;
+ *out={};Builder b{out};std::uint64_t p4,p2,aff4,states,labels,acts,dz,scratch;
+ if(!Mul(i.parameter_count,4,&p4)||!Mul(i.parameter_count,2,&p2)||!Mul(i.affine_value_count,4,&aff4)||!Mul(i.capacity_rows,i.state_storage_bytes*2,&states)||!Mul(i.capacity_rows,(std::uint64_t)i.output_dim*4*2,&labels)||!Mul(i.capacity_rows,(std::uint64_t)(i.hd1+i.hd2)*2,&acts)||!Mul(i.capacity_rows,(std::uint64_t)i.hd2*2*i.profile->policy.dz_ring_slots,&dz)||!Mul(i.capacity_rows,(std::uint64_t)(i.hd1+3*i.hd2)*4,&scratch))return Status::kCapacityExceeded;
+ const auto O=A100ArenaDomain::kOrdinaryDevice;
+ if(!b.Put(A100ArenaSliceKind::kStepControl,O,A100ArenaDtype::kBytes,256,256)||!b.Put(A100ArenaSliceKind::kWeightsFp32,O,A100ArenaDtype::kFp32,p4,256)||!b.Put(A100ArenaSliceKind::kWeightGradFp32,O,A100ArenaDtype::kFp32,p4,256)||!b.Put(A100ArenaSliceKind::kWeightMFp32,O,A100ArenaDtype::kFp32,p4,256)||!b.Put(A100ArenaSliceKind::kWeightVFp32,O,A100ArenaDtype::kFp32,p4,256)||!b.Put(A100ArenaSliceKind::kWeightsBf16,O,A100ArenaDtype::kBf16,p2,256)||!b.Put(A100ArenaSliceKind::kAffineStateFp32,O,A100ArenaDtype::kFp32,aff4*5,256)||!b.Put(A100ArenaSliceKind::kBatchStates,O,A100ArenaDtype::kState,states,256)||!b.Put(A100ArenaSliceKind::kBatchLabels,O,A100ArenaDtype::kFp32,labels,256)||!b.Put(A100ArenaSliceKind::kActivationsBf16,O,A100ArenaDtype::kBf16,acts,256)||!b.Put(A100ArenaSliceKind::kDzRingBf16,O,A100ArenaDtype::kBf16,dz,256)||!b.Put(A100ArenaSliceKind::kScratchFp32,O,A100ArenaDtype::kFp32,scratch,256)||!b.Put(A100ArenaSliceKind::kLtWorkspace,O,A100ArenaDtype::kBytes,i.profile->policy.lt_workspace_bytes,256)||!b.Put(A100ArenaSliceKind::kFatalHealth,O,A100ArenaDtype::kU32,256,256)||!b.Put(A100ArenaSliceKind::kTelemetryDevice,O,A100ArenaDtype::kBytes,65536,256)||!b.Put(A100ArenaSliceKind::kTelemetryHost,A100ArenaDomain::kPinnedHost,A100ArenaDtype::kBytes,65536,64))return Status::kCapacityExceeded;
+ if(i.profile->policy.bn_collective==A100BnCollectiveBackend::kNcclDeviceLsa&&!b.Put(A100ArenaSliceKind::kBnSymmetric,A100ArenaDomain::kSymmetricDevice,A100ArenaDtype::kFp32,std::max<std::uint64_t>(256,i.affine_value_count*8),256))return Status::kCapacityExceeded;
+ if(!Align(out->ordinary_bytes,256,&out->ordinary_bytes)||!Align(out->symmetric_bytes,256,&out->symmetric_bytes)||!Align(out->pinned_host_bytes,64,&out->pinned_host_bytes))return Status::kCapacityExceeded;
+ std::vector<std::uint8_t> bytes;U32(bytes,out->schema_version);U32(bytes,out->slice_count);for(std::uint32_t n=0;n<out->slice_count;++n){const auto&s=out->slices[n];U32(bytes,(std::uint32_t)s.kind);U32(bytes,(std::uint32_t)s.domain);U32(bytes,(std::uint32_t)s.dtype);U64(bytes,s.offset);U64(bytes,s.bytes);U32(bytes,s.alignment);}U64(bytes,out->ordinary_bytes);U64(bytes,out->symmetric_bytes);U64(bytes,out->pinned_host_bytes);std::string hex;if(CanonicalBytesSha256(bytes,&hex)!=Status::kOk||!Hex(hex,&out->layout_sha256))return Status::kInvalidConfig;return ValidateA100StaticArenaPlan(*out);
+}
+mgt::Status mgt::ValidateA100StaticArenaPlan(const A100StaticArenaPlanV1& p){if(p.schema_version!=1||!p.slice_count||p.slice_count>p.slices.size()||!p.ordinary_bytes||!p.pinned_host_bytes||(p.ordinary_bytes&255)||(p.symmetric_bytes&255)||(p.pinned_host_bytes&63)||std::all_of(p.layout_sha256.begin(),p.layout_sha256.end(),[](auto x){return x==0;}))return Status::kInvalidConfig;for(std::uint32_t i=0;i<p.slice_count;++i){const auto&s=p.slices[i];if(!s.bytes||!s.alignment||(s.offset&(s.alignment-1)))return Status::kInvalidConfig;for(std::uint32_t j=i+1;j<p.slice_count;++j)if(s.kind==p.slices[j].kind)return Status::kInvalidConfig;}return Status::kOk;}

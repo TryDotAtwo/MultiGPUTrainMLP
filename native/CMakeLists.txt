@@ -25,6 +25,7 @@ add_library(mgt_core STATIC
     src/benchmark_snapshot.cpp
     src/a100_bf16_policy.cpp
     src/a100_execution_profile.cpp
+    src/a100_static_arena.cpp
     src/model_layout.cpp
     src/weight_export.cpp
     src/random_walk_cpu.cpp
@@ -118,6 +119,9 @@ add_test(NAME a100_bf16_policy COMMAND test_a100_bf16_policy)
 add_executable(test_a100_execution_profile tests/test_a100_execution_profile.cpp)
 target_link_libraries(test_a100_execution_profile PRIVATE mgt_core)
 add_test(NAME a100_execution_profile COMMAND test_a100_execution_profile)
+add_executable(test_a100_static_arena tests/test_a100_static_arena.cpp)
+target_link_libraries(test_a100_static_arena PRIVATE mgt_core)
+add_test(NAME a100_static_arena COMMAND test_a100_static_arena)
 target_link_libraries(test_input_grad_grouping PRIVATE mgt_core)
 add_test(NAME input_grad_grouping COMMAND test_input_grad_grouping)
 if(MGT_ENABLE_CUDA)
