@@ -20,7 +20,9 @@ endif()
 
 add_library(mgt_core STATIC
     src/static_contracts.cpp
+    src/distributed_batch.cpp
     src/puzzle_io.cpp
+    src/benchmark_snapshot.cpp
     src/model_layout.cpp
     src/weight_export.cpp
     src/random_walk_cpu.cpp
@@ -102,6 +104,12 @@ add_executable(test_p888_training_contract tests/test_p888_training_contract.cpp
 target_link_libraries(test_p888_training_contract PRIVATE mgt_core)
 add_test(NAME p888_training_contract COMMAND test_p888_training_contract)
 add_executable(test_input_grad_grouping tests/test_input_grad_grouping.cpp)
+add_executable(test_distributed_batch tests/test_distributed_batch.cpp)
+target_link_libraries(test_distributed_batch PRIVATE mgt_core)
+add_test(NAME distributed_batch COMMAND test_distributed_batch)
+add_executable(test_benchmark_snapshot tests/test_benchmark_snapshot.cpp)
+target_link_libraries(test_benchmark_snapshot PRIVATE mgt_core)
+add_test(NAME benchmark_snapshot COMMAND test_benchmark_snapshot)
 target_link_libraries(test_input_grad_grouping PRIVATE mgt_core)
 add_test(NAME input_grad_grouping COMMAND test_input_grad_grouping)
 if(MGT_ENABLE_CUDA)
@@ -198,6 +206,7 @@ if(MGT_ENABLE_CUDA)
             target_sources(mgt_cuda PRIVATE cuda/sync_batch_norm.cu)
             target_sources(mgt_cuda PRIVATE cuda/sync_batch_norm_fused_feature.cu)
             target_sources(mgt_cuda PRIVATE cuda/mlp_batch_norm_forward.cu)
+            target_sources(mgt_cuda PRIVATE cuda/prepared_p888_train_step.cu)
             target_include_directories(mgt_cuda PUBLIC ${NCCL_INCLUDE_DIR})
             target_link_libraries(mgt_cuda PUBLIC ${NCCL_LIB})
             target_compile_definitions(mgt_cuda PUBLIC MGT_HAS_NCCL=1)
@@ -231,6 +240,9 @@ if(MGT_ENABLE_CUDA)
             add_executable(test_mlp_batch_norm_full_backward tests/cuda/test_mlp_batch_norm_full_backward.cu)
             target_link_libraries(test_mlp_batch_norm_full_backward PRIVATE mgt_cuda)
             add_test(NAME mlp_batch_norm_full_backward COMMAND test_mlp_batch_norm_full_backward)
+            add_executable(test_prepared_p888_train_step tests/cuda/test_prepared_p888_train_step.cu)
+            target_link_libraries(test_prepared_p888_train_step PRIVATE mgt_cuda)
+            add_test(NAME prepared_p888_train_step COMMAND test_prepared_p888_train_step)
             add_executable(test_mlp_batch_norm_input_backward tests/cuda/test_mlp_batch_norm_input_backward.cu)
             target_link_libraries(test_mlp_batch_norm_input_backward PRIVATE mgt_cuda)
             add_test(NAME mlp_batch_norm_input_backward COMMAND test_mlp_batch_norm_input_backward)
