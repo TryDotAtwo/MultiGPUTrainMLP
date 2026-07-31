@@ -46,5 +46,6 @@ struct A100Bf16Policy {
 Status ValidateA100Bf16Policy(const A100Bf16Policy& policy);
 Status CanonicalSerializeA100Bf16Policy(const A100Bf16Policy& policy, std::vector<std::uint8_t>* out);
 Status CanonicalA100Bf16PolicySha256(const A100Bf16Policy& policy, std::string* out_hex);
+Status CanonicalBytesSha256(const std::vector<std::uint8_t>& bytes, std::string* out_hex);
 
 }  // namespace mgt
