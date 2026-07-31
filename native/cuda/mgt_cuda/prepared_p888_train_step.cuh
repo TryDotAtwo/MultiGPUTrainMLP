@@ -55,4 +55,7 @@ mgt::Status LaunchPreparedP888TrainStep(
     const PreparedTrainStepRequest& request,
     PreparedTrainStepTicket* ticket);
 
+mgt::Status RecordPreparedP888TrainEvent(
+    PreparedP888TrainRuntime* runtime,
+    cudaEvent_t event);
 }  // namespace mgt_cuda

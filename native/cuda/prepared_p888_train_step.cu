@@ -181,4 +181,13 @@ mgt::Status LaunchPreparedP888TrainStep(
     return mgt::Status::kOk;
 }
 
+mgt::Status RecordPreparedP888TrainEvent(
+    PreparedP888TrainRuntime* runtime,
+    cudaEvent_t event) {
+    if (!runtime || !event) return mgt::Status::kInvalidConfig;
+    return cudaEventRecord(event, runtime->stream) == cudaSuccess
+        ? mgt::Status::kOk
+        : mgt::Status::kCudaFailure;
+}
+
 }  // namespace mgt_cuda
