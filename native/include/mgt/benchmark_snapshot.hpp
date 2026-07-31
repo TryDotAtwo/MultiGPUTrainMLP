@@ -3,6 +3,7 @@
 #include "mgt/static_contracts.hpp"
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace mgt {
@@ -38,5 +39,11 @@ Status FillBenchmarkSnapshot(
     BenchmarkMutableState* mutable_state,
     std::vector<TrainStateStorage>* states,
     std::vector<float>* labels);
+Status CanonicalBenchmarkSnapshotSha256(
+    const BenchmarkMutableState& mutable_state,
+    const std::vector<TrainStateStorage>& states,
+    const std::vector<float>& labels,
+    std::string* sha256_hex);
+
 
 }  // namespace mgt

@@ -118,6 +118,22 @@ int main() {
         return EXIT_FAILURE;
     }
 
+    std::string whole_sha;
+    std::string joined_sha;
+    if (mgt::CanonicalBenchmarkSnapshotSha256(
+            whole_mutable, whole_states, whole_labels, &whole_sha) !=
+            mgt::Status::kOk ||
+        mgt::CanonicalBenchmarkSnapshotSha256(
+            whole_mutable, joined_states, joined_labels, &joined_sha) !=
+            mgt::Status::kOk || whole_sha != joined_sha ||
+        whole_sha.size() != 64 ||
+        !std::all_of(whole_sha.begin(), whole_sha.end(), [](char value) {
+            return (value >= '0' && value <= '9') ||
+                   (value >= 'a' && value <= 'f');
+        })) {
+        return EXIT_FAILURE;
+    }
+
     mgt::BenchmarkMutableState changed_mutable{};
     std::vector<mgt::TrainStateStorage> changed_states;
     std::vector<float> changed_labels;
@@ -127,6 +143,15 @@ int main() {
         SameMutableState(whole_mutable, changed_mutable) ||
         SameStates(whole_states, changed_states) ||
         whole_labels == changed_labels) {
+        return EXIT_FAILURE;
+    }
+    std::string changed_sha;
+    if (mgt::CanonicalBenchmarkSnapshotSha256(
+            changed_mutable, changed_states, changed_labels, &changed_sha) !=
+            mgt::Status::kOk || changed_sha == whole_sha ||
+        mgt::CanonicalBenchmarkSnapshotSha256(
+            whole_mutable, whole_states, whole_labels, nullptr) !=
+            mgt::Status::kInvalidConfig) {
         return EXIT_FAILURE;
     }
 

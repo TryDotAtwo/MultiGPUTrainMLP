@@ -1,7 +1,10 @@
 #include "mgt/benchmark_snapshot.hpp"
 
+#include <array>
+#include <bit>
 #include <cmath>
 #include <limits>
+#include <string>
 
 namespace mgt {
 namespace {
@@ -135,3 +138,141 @@ Status FillBenchmarkSnapshot(
 }
 
 }  // namespace mgt
+
+namespace {
+
+class Sha256 {
+public:
+    void Update(const std::uint8_t* data, std::size_t size) {
+        total_bytes_ += size;
+        while (size != 0) {
+            const std::size_t take = std::min(size, block_.size() - block_size_);
+            std::copy_n(data, take, block_.data() + block_size_);
+            block_size_ += take;
+            data += take;
+            size -= take;
+            if (block_size_ == block_.size()) {
+                Transform(block_.data());
+                block_size_ = 0;
+            }
+        }
+    }
+
+    std::array<std::uint8_t, 32> Final() {
+        const std::uint64_t total_bits = total_bytes_ * 8ULL;
+        const std::uint8_t marker = 0x80;
+        Update(&marker, 1);
+        const std::uint8_t zero = 0;
+        while (block_size_ != 56) Update(&zero, 1);
+        std::array<std::uint8_t, 8> length{};
+        for (unsigned i = 0; i < 8; ++i) {
+            length[7U - i] = static_cast<std::uint8_t>(total_bits >> (8U * i));
+        }
+        Update(length.data(), length.size());
+        std::array<std::uint8_t, 32> digest{};
+        for (std::size_t i = 0; i < state_.size(); ++i) {
+            digest[4 * i] = static_cast<std::uint8_t>(state_[i] >> 24U);
+            digest[4 * i + 1] = static_cast<std::uint8_t>(state_[i] >> 16U);
+            digest[4 * i + 2] = static_cast<std::uint8_t>(state_[i] >> 8U);
+            digest[4 * i + 3] = static_cast<std::uint8_t>(state_[i]);
+        }
+        return digest;
+    }
+
+private:
+    static std::uint32_t Rotate(std::uint32_t value, unsigned amount) {
+        return (value >> amount) | (value << (32U - amount));
+    }
+
+    void Transform(const std::uint8_t* block) {
+        static constexpr std::array<std::uint32_t, 64> k{
+            0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+            0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+            0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+            0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+            0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+            0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+            0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+            0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2};
+        std::array<std::uint32_t, 64> w{};
+        for (unsigned i = 0; i < 16; ++i) {
+            w[i] = (static_cast<std::uint32_t>(block[4 * i]) << 24U) |
+                   (static_cast<std::uint32_t>(block[4 * i + 1]) << 16U) |
+                   (static_cast<std::uint32_t>(block[4 * i + 2]) << 8U) |
+                   static_cast<std::uint32_t>(block[4 * i + 3]);
+        }
+        for (unsigned i = 16; i < 64; ++i) {
+            const std::uint32_t s0 = Rotate(w[i - 15], 7) ^ Rotate(w[i - 15], 18) ^ (w[i - 15] >> 3U);
+            const std::uint32_t s1 = Rotate(w[i - 2], 17) ^ Rotate(w[i - 2], 19) ^ (w[i - 2] >> 10U);
+            w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+        }
+        auto a=state_[0],b=state_[1],c=state_[2],d=state_[3],e=state_[4],f=state_[5],g=state_[6],h=state_[7];
+        for (unsigned i = 0; i < 64; ++i) {
+            const std::uint32_t s1 = Rotate(e,6)^Rotate(e,11)^Rotate(e,25);
+            const std::uint32_t ch = (e&f)^((~e)&g);
+            const std::uint32_t t1 = h+s1+ch+k[i]+w[i];
+            const std::uint32_t s0 = Rotate(a,2)^Rotate(a,13)^Rotate(a,22);
+            const std::uint32_t maj = (a&b)^(a&c)^(b&c);
+            const std::uint32_t t2 = s0+maj;
+            h=g;g=f;f=e;e=d+t1;d=c;c=b;b=a;a=t1+t2;
+        }
+        state_[0]+=a;state_[1]+=b;state_[2]+=c;state_[3]+=d;
+        state_[4]+=e;state_[5]+=f;state_[6]+=g;state_[7]+=h;
+    }
+
+    std::array<std::uint32_t,8> state_{0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19};
+    std::array<std::uint8_t,64> block_{};
+    std::size_t block_size_ = 0;
+    std::uint64_t total_bytes_ = 0;
+};
+
+void HashU64(Sha256* hash, std::uint64_t value) {
+    std::array<std::uint8_t,8> bytes{};
+    for (unsigned i=0;i<8;++i) bytes[i]=static_cast<std::uint8_t>(value>>(8U*i));
+    hash->Update(bytes.data(), bytes.size());
+}
+
+void HashFloats(Sha256* hash, const std::vector<float>& values) {
+    HashU64(hash, values.size());
+    for (float value : values) {
+        const std::uint32_t bits=std::bit_cast<std::uint32_t>(value);
+        std::array<std::uint8_t,4> bytes{
+            static_cast<std::uint8_t>(bits),static_cast<std::uint8_t>(bits>>8U),
+            static_cast<std::uint8_t>(bits>>16U),static_cast<std::uint8_t>(bits>>24U)};
+        hash->Update(bytes.data(), bytes.size());
+    }
+}
+
+}  // namespace
+
+mgt::Status mgt::CanonicalBenchmarkSnapshotSha256(
+    const BenchmarkMutableState& mutable_state,
+    const std::vector<TrainStateStorage>& states,
+    const std::vector<float>& labels,
+    std::string* sha256_hex) {
+    if (!sha256_hex) return Status::kInvalidConfig;
+    Sha256 hash;
+    static constexpr std::array<std::uint8_t,25> magic{
+        'm','g','t','_','b','e','n','c','h','m','a','r','k','_','s','n','a','p','s','h','o','t','_','v','1'};
+    hash.Update(magic.data(), magic.size());
+    HashFloats(&hash, mutable_state.weights);
+    HashFloats(&hash, mutable_state.weight_grad);
+    HashFloats(&hash, mutable_state.weight_m);
+    HashFloats(&hash, mutable_state.weight_v);
+    HashFloats(&hash, mutable_state.affine);
+    HashFloats(&hash, mutable_state.affine_grad);
+    HashFloats(&hash, mutable_state.affine_m);
+    HashFloats(&hash, mutable_state.affine_v);
+    HashFloats(&hash, mutable_state.running);
+    HashU64(&hash, states.size());
+    for (const auto& state : states) hash.Update(state.v, sizeof(state.v));
+    HashFloats(&hash, labels);
+    const auto digest=hash.Final();
+    static constexpr char hex[]="0123456789abcdef";
+    sha256_hex->resize(64);
+    for (std::size_t i=0;i<digest.size();++i) {
+        (*sha256_hex)[2*i]=hex[digest[i]>>4U];
+        (*sha256_hex)[2*i+1]=hex[digest[i]&15U];
+    }
+    return Status::kOk;
+}
