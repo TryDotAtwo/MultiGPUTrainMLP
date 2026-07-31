@@ -23,6 +23,7 @@ add_library(mgt_core STATIC
     src/distributed_batch.cpp
     src/puzzle_io.cpp
     src/benchmark_snapshot.cpp
+    src/a100_bf16_policy.cpp
     src/model_layout.cpp
     src/weight_export.cpp
     src/random_walk_cpu.cpp
@@ -110,6 +111,9 @@ add_test(NAME distributed_batch COMMAND test_distributed_batch)
 add_executable(test_benchmark_snapshot tests/test_benchmark_snapshot.cpp)
 target_link_libraries(test_benchmark_snapshot PRIVATE mgt_core)
 add_test(NAME benchmark_snapshot COMMAND test_benchmark_snapshot)
+add_executable(test_a100_bf16_policy tests/test_a100_bf16_policy.cpp)
+target_link_libraries(test_a100_bf16_policy PRIVATE mgt_core)
+add_test(NAME a100_bf16_policy COMMAND test_a100_bf16_policy)
 target_link_libraries(test_input_grad_grouping PRIVATE mgt_core)
 add_test(NAME input_grad_grouping COMMAND test_input_grad_grouping)
 if(MGT_ENABLE_CUDA)
