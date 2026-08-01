@@ -33,5 +33,6 @@ mgt::Status CreateA100Bf16Runtime(const A100Bf16RuntimeCreateInfo& info,
 mgt::Status DestroyA100Bf16Runtime(A100Bf16Runtime* runtime);
 mgt::Status QueryA100Bf16RuntimeView(const A100Bf16Runtime* runtime,A100StaticArenaView* out);
 P888StepControlV1* A100Bf16RuntimeStepControl(A100Bf16Runtime* runtime);
+bool A100Bf16RuntimeHasCommunicators(const A100Bf16Runtime* runtime);
 
 }  // namespace mgt_cuda
