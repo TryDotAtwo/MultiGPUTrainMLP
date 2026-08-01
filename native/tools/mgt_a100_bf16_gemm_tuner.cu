@@ -129,6 +129,23 @@ bool Tune(cublasLtHandle_t handle, cudaStream_t stream, void* workspace,
         cudaMemsetAsync(b, 0x3d, b_count * sizeof(*b), stream);
         cudaMemsetAsync(c, 0, c_count * sizeof(*c), stream);
     }
+    static bool device_warmed = false;
+    if (ok && !device_warmed) {
+        const float alpha = 1.0f, beta = 0.0f;
+        constexpr std::uint32_t kBurnInIterations = 12000;
+        for (std::uint32_t i = 0; i < kBurnInIterations; ++i) {
+            if (cublasLtMatmul(handle, d.operation, &alpha, a, d.a, b, d.b, &beta,
+                               c, d.c, c, d.c, &candidates[0].algo, workspace,
+                               candidates[0].workspaceSize, stream) != CUBLAS_STATUS_SUCCESS) {
+                ok = false;
+                break;
+            }
+        }
+        if (ok && cudaStreamSynchronize(stream) != cudaSuccess) ok = false;
+        device_warmed = ok;
+        std::fprintf(stderr, "bf16_tuner_burn_in iterations=%u status=%s\n",
+                     kBurnInIterations, ok ? "ok" : "failed");
+    }
     Result best{};
     best.median_ms = 1.0e30f;
     int valid = 0;
