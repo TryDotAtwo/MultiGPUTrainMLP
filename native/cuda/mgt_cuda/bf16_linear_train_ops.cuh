@@ -19,6 +19,8 @@ struct Bf16LinearProblem {
     std::uint32_t output_features;
 };
 
+mgt::Status BuildP888A100Sm80Cuda124Bf16AlgorithmTable(mgt::Bf16AlgorithmTable* out);
+
 mgt::Status BuildBf16LinearGemmKey(const Bf16LinearProblem& problem,
                                     mgt::Bf16GemmRole role,
                                     float beta,
