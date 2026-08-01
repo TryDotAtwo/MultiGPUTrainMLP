@@ -26,6 +26,31 @@ mgt::Status BuildBf16LinearGemmKey(const Bf16LinearProblem& problem,
                                     float beta,
                                     mgt::Bf16GemmKeyV1* out);
 
+struct A100StaticArenaView;
+struct Bf16LinearTrainOpsPlan;
+
+mgt::Status CreateBf16LinearTrainOpsPlan(
+    const Bf16LinearProblem* problems,
+    std::uint32_t problem_count,
+    std::uint32_t device_id,
+    cublasLtHandle_t handle,
+    const mgt::Bf16AlgorithmTable& algorithms,
+    const A100StaticArenaView& arena,
+    Bf16LinearTrainOpsPlan** out);
+mgt::Status DestroyBf16LinearTrainOpsPlan(Bf16LinearTrainOpsPlan* plan);
+mgt::Status LaunchBf16LinearForwardToFloat(
+    const Bf16LinearTrainOpsPlan* plan, Bf16LinearProblem problem,
+    const __nv_bfloat16* input, const __nv_bfloat16* weight,
+    float* output, cudaStream_t stream);
+mgt::Status LaunchBf16LinearGradWeightToFloat(
+    const Bf16LinearTrainOpsPlan* plan, Bf16LinearProblem problem,
+    const __nv_bfloat16* input, const __nv_bfloat16* grad_output,
+    float* grad_weight, cudaStream_t stream);
+mgt::Status LaunchBf16LinearGradInputToFloat(
+    const Bf16LinearTrainOpsPlan* plan, Bf16LinearProblem problem,
+    const __nv_bfloat16* grad_output, const __nv_bfloat16* weight,
+    float* grad_input, float beta, cudaStream_t stream);
+
 struct FixedBf16GemmPlan;
 
 mgt::Status CreateFixedBf16GemmPlan(cublasLtHandle_t handle,

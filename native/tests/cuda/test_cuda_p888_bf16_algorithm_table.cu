@@ -1,7 +1,9 @@
 #include "mgt_cuda/bf16_linear_train_ops.cuh"
+#include "mgt_cuda/a100_bf16_runtime.cuh"
 
 #include <cstdint>
 #include <cstdio>
+#include <vector>
 
 namespace {
 bool Expect(const mgt::Bf16AlgorithmTable& table, const mgt_cuda::Bf16LinearProblem& problem,
@@ -73,6 +75,35 @@ int main() {
             !Reconstruct(table, hidden, mgt::Bf16GemmRole::kGradInput, handle, workspace, workspace_bytes))
             return 5;
     }
+    mgt::A100StaticArenaPlanV1 arena_plan{};
+    arena_plan.slice_count = 1;
+    arena_plan.slices[0] = {mgt::A100ArenaSliceKind::kLtWorkspace,
+                            mgt::A100ArenaDomain::kOrdinaryDevice,
+                            mgt::A100ArenaDtype::kBytes, 0, workspace_bytes, 256};
+    arena_plan.ordinary_bytes = workspace_bytes;
+    mgt_cuda::A100StaticArenaView arena_view{};
+    arena_view.ordinary_base = workspace;
+    arena_view.ordinary_bytes = workspace_bytes;
+    arena_view.plan = &arena_plan;
+    std::vector<mgt_cuda::Bf16LinearProblem> problems;
+    problems.reserve(102);
+    for (std::uint32_t rows : {12497U, 12498U, 12500U}) {
+        problems.push_back({rows, 1, rows, 2560, 224});
+        for (std::uint32_t site = 2; site <= 34; ++site)
+            problems.push_back({rows, site, rows, 224, 224});
+    }
+    mgt_cuda::Bf16LinearTrainOpsPlan* ops = nullptr;
+    if (mgt_cuda::CreateBf16LinearTrainOpsPlan(
+            problems.data(), static_cast<std::uint32_t>(problems.size()), 0,
+            handle, table, arena_view, &ops) != mgt::Status::kOk || ops == nullptr)
+        return 6;
+    if (mgt_cuda::DestroyBf16LinearTrainOpsPlan(ops) != mgt::Status::kOk) return 7;
+    problems.push_back(problems.front());
+    if (mgt_cuda::CreateBf16LinearTrainOpsPlan(
+            problems.data(), static_cast<std::uint32_t>(problems.size()), 0,
+            handle, table, arena_view, &ops) == mgt::Status::kOk || ops != nullptr)
+        return 8;
+
     cudaFree(workspace);
     cublasLtDestroy(handle);
 

@@ -1,9 +1,12 @@
 #include "mgt_cuda/bf16_linear_train_ops.cuh"
+#include "mgt_cuda/a100_bf16_runtime.cuh"
 
 #include <cublasLt.h>
 #include <cuda_runtime.h>
 
 #include <cstring>
+#include <new>
+#include <vector>
 
 namespace {
 std::uint32_t FloatBits(float value) {
@@ -147,3 +150,157 @@ mgt::Status mgt_cuda::BuildP888A100Sm80Cuda124Bf16AlgorithmTable(
     }
     return mgt::ValidateBf16AlgorithmTable(*out);
 }
+namespace mgt_cuda {
+struct Bf16LinearTrainOpsPlan {
+    struct Entry {
+        Bf16LinearProblem problem{};
+        FixedBf16GemmPlan* forward = nullptr;
+        FixedBf16GemmPlan* grad_weight = nullptr;
+        FixedBf16GemmPlan* grad_input_zero = nullptr;
+    };
+    std::uint32_t device_id = 0;
+    std::vector<Entry> entries;
+};
+
+namespace {
+bool SameProblem(const Bf16LinearProblem& a, const Bf16LinearProblem& b) {
+    return a.active_rows == b.active_rows && a.site_id == b.site_id &&
+           a.compute_rows == b.compute_rows && a.input_features == b.input_features &&
+           a.output_features == b.output_features;
+}
+
+const mgt::A100ArenaSliceV1* FindLtWorkspace(const A100StaticArenaView& arena) {
+    if (arena.plan == nullptr) return nullptr;
+    for (std::uint32_t i = 0; i < arena.plan->slice_count; ++i)
+        if (arena.plan->slices[i].kind == mgt::A100ArenaSliceKind::kLtWorkspace)
+            return &arena.plan->slices[i];
+    return nullptr;
+}
+
+mgt::Bf16GemmRole ForwardRole(std::uint32_t site_id) {
+    if (site_id == 1) return mgt::Bf16GemmRole::kInputForward;
+    if (site_id == 2) return mgt::Bf16GemmRole::kHiddenForward;
+    return mgt::Bf16GemmRole::kResidualForward;
+}
+
+const Bf16LinearTrainOpsPlan::Entry* FindEntry(
+    const Bf16LinearTrainOpsPlan* plan, const Bf16LinearProblem& problem) {
+    if (plan == nullptr || problem.site_id == 0 || problem.site_id > 34) return nullptr;
+    for (const auto& entry : plan->entries)
+        if (SameProblem(entry.problem, problem)) return &entry;
+    return nullptr;
+}
+
+mgt::Status PrepareOne(cublasLtHandle_t handle, const mgt::Bf16AlgorithmTable& algorithms,
+                       const Bf16LinearProblem& problem, mgt::Bf16GemmRole role,
+                       void* workspace, std::uint64_t workspace_bytes,
+                       FixedBf16GemmPlan** out) {
+    mgt::Bf16GemmKeyV1 key{};
+    if (BuildBf16LinearGemmKey(problem, role, 0.0f, &key) != mgt::Status::kOk)
+        return mgt::Status::kInvalidConfig;
+    const mgt::Bf16GemmChoiceV1* choice = nullptr;
+    if (mgt::LookupBf16GemmChoice(algorithms, key, &choice) != mgt::Status::kOk || choice == nullptr)
+        return mgt::Status::kInvalidConfig;
+    return CreateFixedBf16GemmPlan(handle, key, *choice, workspace, workspace_bytes, out);
+}
+}
+
+mgt::Status CreateBf16LinearTrainOpsPlan(
+    const Bf16LinearProblem* problems, std::uint32_t problem_count,
+    std::uint32_t device_id, cublasLtHandle_t handle,
+    const mgt::Bf16AlgorithmTable& algorithms, const A100StaticArenaView& arena,
+    Bf16LinearTrainOpsPlan** out) {
+    if (out == nullptr) return mgt::Status::kInvalidConfig;
+    *out = nullptr;
+    if (problems == nullptr || problem_count == 0 || handle == nullptr ||
+        arena.ordinary_base == nullptr ||
+        mgt::ValidateBf16AlgorithmTable(algorithms) != mgt::Status::kOk)
+        return mgt::Status::kInvalidConfig;
+    int current_device = -1;
+    if (cudaGetDevice(&current_device) != cudaSuccess) return mgt::Status::kCudaFailure;
+    if (current_device != static_cast<int>(device_id)) return mgt::Status::kInvalidConfig;
+    const auto* workspace_slice = FindLtWorkspace(arena);
+    if (workspace_slice == nullptr || workspace_slice->bytes == 0 ||
+        workspace_slice->offset > arena.ordinary_bytes ||
+        workspace_slice->bytes > arena.ordinary_bytes - workspace_slice->offset)
+        return mgt::Status::kInvalidConfig;
+    void* workspace = static_cast<std::uint8_t*>(arena.ordinary_base) + workspace_slice->offset;
+    if (reinterpret_cast<std::uintptr_t>(workspace) % 256 != 0)
+        return mgt::Status::kInvalidConfig;
+
+    auto* plan = new (std::nothrow) Bf16LinearTrainOpsPlan;
+    if (plan == nullptr) return mgt::Status::kCapacityExceeded;
+    plan->device_id = device_id;
+    plan->entries.reserve(problem_count);
+    for (std::uint32_t i = 0; i < problem_count; ++i) {
+        for (const auto& existing : plan->entries) {
+            if (SameProblem(existing.problem, problems[i])) {
+                DestroyBf16LinearTrainOpsPlan(plan);
+                return mgt::Status::kInvalidConfig;
+            }
+        }
+        Bf16LinearTrainOpsPlan::Entry entry{};
+        entry.problem = problems[i];
+        auto status = PrepareOne(handle, algorithms, entry.problem, ForwardRole(entry.problem.site_id),
+                                 workspace, workspace_slice->bytes, &entry.forward);
+        if (status == mgt::Status::kOk)
+            status = PrepareOne(handle, algorithms, entry.problem, mgt::Bf16GemmRole::kGradWeight,
+                                workspace, workspace_slice->bytes, &entry.grad_weight);
+        const auto dx_role = entry.problem.site_id == 1 ? mgt::Bf16GemmRole::kInputTableGrad
+                                                        : mgt::Bf16GemmRole::kGradInput;
+        if (status == mgt::Status::kOk)
+            status = PrepareOne(handle, algorithms, entry.problem, dx_role,
+                                workspace, workspace_slice->bytes, &entry.grad_input_zero);
+        plan->entries.push_back(entry);
+        if (status != mgt::Status::kOk) {
+            DestroyBf16LinearTrainOpsPlan(plan);
+            return status;
+        }
+    }
+    *out = plan;
+    return mgt::Status::kOk;
+}
+
+mgt::Status DestroyBf16LinearTrainOpsPlan(Bf16LinearTrainOpsPlan* plan) {
+    if (plan == nullptr) return mgt::Status::kInvalidConfig;
+    mgt::Status result = mgt::Status::kOk;
+    for (auto& entry : plan->entries) {
+        if (entry.grad_input_zero && DestroyFixedBf16GemmPlan(entry.grad_input_zero) != mgt::Status::kOk)
+            result = mgt::Status::kCudaFailure;
+        if (entry.grad_weight && DestroyFixedBf16GemmPlan(entry.grad_weight) != mgt::Status::kOk)
+            result = mgt::Status::kCudaFailure;
+        if (entry.forward && DestroyFixedBf16GemmPlan(entry.forward) != mgt::Status::kOk)
+            result = mgt::Status::kCudaFailure;
+    }
+    delete plan;
+    return result;
+}
+
+mgt::Status LaunchBf16LinearForwardToFloat(
+    const Bf16LinearTrainOpsPlan* plan, Bf16LinearProblem problem,
+    const __nv_bfloat16* input, const __nv_bfloat16* weight,
+    float* output, cudaStream_t stream) {
+    const auto* entry = FindEntry(plan, problem);
+    return entry ? LaunchFixedBf16Gemm(entry->forward, input, weight, output, stream)
+                 : mgt::Status::kInvalidConfig;
+}
+
+mgt::Status LaunchBf16LinearGradWeightToFloat(
+    const Bf16LinearTrainOpsPlan* plan, Bf16LinearProblem problem,
+    const __nv_bfloat16* input, const __nv_bfloat16* grad_output,
+    float* grad_weight, cudaStream_t stream) {
+    const auto* entry = FindEntry(plan, problem);
+    return entry ? LaunchFixedBf16Gemm(entry->grad_weight, grad_output, input, grad_weight, stream)
+                 : mgt::Status::kInvalidConfig;
+}
+
+mgt::Status LaunchBf16LinearGradInputToFloat(
+    const Bf16LinearTrainOpsPlan* plan, Bf16LinearProblem problem,
+    const __nv_bfloat16* grad_output, const __nv_bfloat16* weight,
+    float* grad_input, float beta, cudaStream_t stream) {
+    if (beta != 0.0f) return mgt::Status::kInvalidConfig;
+    const auto* entry = FindEntry(plan, problem);
+    return entry ? LaunchFixedBf16Gemm(entry->grad_input_zero, grad_output, weight, grad_input, stream)
+                 : mgt::Status::kInvalidConfig;
+}
+}  // namespace mgt_cuda
