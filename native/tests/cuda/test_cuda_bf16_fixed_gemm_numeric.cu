@@ -91,6 +91,20 @@ float Pattern(std::size_t index, int period, float scale) {
 }
 }
 
+int RunBackwardCase(cublasLtHandle_t handle, void* workspace, std::uint64_t workspace_bytes, const mgt_cuda::Bf16LinearProblem& p, mgt::Bf16GemmRole role, float beta, const std::vector<__nv_bfloat16>& dy, const std::vector<__nv_bfloat16>& rhs) {
+    mgt::Bf16GemmKeyV1 key{}; mgt::Bf16GemmChoiceV1 choice{};
+    if (mgt_cuda::BuildBf16LinearGemmKey(p, role, beta, &key) != mgt::Status::kOk || !Discover(handle, key, workspace_bytes, &choice)) return 20;
+    mgt_cuda::FixedBf16GemmPlan* plan=nullptr; if (mgt_cuda::CreateFixedBf16GemmPlan(handle,key,choice,workspace,workspace_bytes,&plan)!=mgt::Status::kOk) return 21;
+    std::vector<float> initial(key.m*key.n), expected(key.m*key.n), got(key.m*key.n); for(std::size_t i=0;i<initial.size();++i) initial[i]=Pattern(i*11+5,23,0.017f); expected=initial; if(beta==0.0f) std::fill(expected.begin(),expected.end(),0.0f);
+    if(role==mgt::Bf16GemmRole::kGradWeight) for(std::uint32_t o=0;o<p.output_features;++o) for(std::uint32_t i=0;i<p.input_features;++i) for(std::uint32_t r=0;r<p.compute_rows;++r) expected[o*p.input_features+i]+=static_cast<float>(dy[r*p.output_features+o])*static_cast<float>(rhs[r*p.input_features+i]);
+    else for(std::uint32_t r=0;r<p.compute_rows;++r) for(std::uint32_t i=0;i<p.input_features;++i) for(std::uint32_t o=0;o<p.output_features;++o) expected[r*p.input_features+i]+=static_cast<float>(dy[r*p.output_features+o])*static_cast<float>(rhs[o*p.input_features+i]);
+    __nv_bfloat16 *da=nullptr,*db=nullptr; float* dc=nullptr; if(cudaMalloc(&da,dy.size()*sizeof(*da))!=cudaSuccess||cudaMalloc(&db,rhs.size()*sizeof(*db))!=cudaSuccess||cudaMalloc(&dc,got.size()*sizeof(*dc))!=cudaSuccess) return 22;
+    cudaMemcpy(da,dy.data(),dy.size()*sizeof(*da),cudaMemcpyHostToDevice); cudaMemcpy(db,rhs.data(),rhs.size()*sizeof(*db),cudaMemcpyHostToDevice); cudaMemcpy(dc,initial.data(),initial.size()*sizeof(*dc),cudaMemcpyHostToDevice);
+    if(mgt_cuda::LaunchFixedBf16Gemm(plan,da,db,dc,nullptr)!=mgt::Status::kOk||cudaDeviceSynchronize()!=cudaSuccess) return 23; cudaMemcpy(got.data(),dc,got.size()*sizeof(*dc),cudaMemcpyDeviceToHost);
+    double e2=0.0,r2=0.0,maxe=0.0; for(std::size_t i=0;i<got.size();++i){if(!std::isfinite(got[i])) return 24; const double e=std::abs(static_cast<double>(got[i])-expected[i]); e2+=e*e; r2+=static_cast<double>(expected[i])*expected[i]; maxe=std::max(maxe,e/std::max(1.0,std::abs(static_cast<double>(expected[i]))));} const double l2=std::sqrt(e2/std::max(r2,1e-30));
+    std::printf("bf16_fixed_%s_beta%.0f algo=%d tile=%u stages=%u workspace=%llu relative_l2=%.9g scaled_max=%.9g\n",role==mgt::Bf16GemmRole::kGradWeight?"dw":"dx",beta,choice.cublaslt_algo_id,choice.tile_id,choice.stages_id,static_cast<unsigned long long>(choice.workspace_bytes),l2,maxe);
+    int result=(l2>1e-4||maxe>2e-3)?25:0; if(result==0&&role==mgt::Bf16GemmRole::kGradInput) for(std::size_t i=static_cast<std::size_t>(p.active_rows)*p.input_features;i<got.size();++i) if(got[i]!=(beta==0.0f?0.0f:initial[i])){result=26;break;} mgt_cuda::DestroyFixedBf16GemmPlan(plan); cudaFree(dc); cudaFree(db); cudaFree(da); return result;
+}
 int main() {
     constexpr std::uint32_t active = 127, rows = 128, input = 64, output = 48;
     const mgt_cuda::Bf16LinearProblem problem{active, 9, rows, input, output};
@@ -140,6 +154,10 @@ int main() {
     if (relative_l2 > 1e-4 || scaled_max > 2e-3) return 9;
     for (std::size_t i = active * output; i < got.size(); ++i) if (got[i] != 0.0f) return 10;
     mgt_cuda::DestroyFixedBf16GemmPlan(plan);
-    cudaFree(dc); cudaFree(db); cudaFree(da); cudaFree(workspace); cublasLtDestroy(handle);
-    return 0;
+    cudaFree(dc); cudaFree(db); cudaFree(da);
+    std::vector<__nv_bfloat16> dy(rows * output), x(rows * input), weights(output * input);
+    for(std::size_t i=0;i<dy.size();++i) dy[i]=__float2bfloat16(Pattern(i*5+1,37,0.019f)); for(std::size_t i=active*output;i<dy.size();++i) dy[i]=__float2bfloat16(0.0f);
+    for(std::size_t i=0;i<x.size();++i) x[i]=__float2bfloat16(Pattern(i*3+2,41,0.013f)); for(std::size_t i=active*input;i<x.size();++i) x[i]=__float2bfloat16(0.0f); for(std::size_t i=0;i<weights.size();++i) weights[i]=__float2bfloat16(Pattern(i*7+4,43,0.011f));
+    const int dw0=RunBackwardCase(handle,workspace,workspace_bytes,problem,mgt::Bf16GemmRole::kGradWeight,0.0f,dy,x); const int dw1=RunBackwardCase(handle,workspace,workspace_bytes,problem,mgt::Bf16GemmRole::kGradWeight,1.0f,dy,x); const int dx0=RunBackwardCase(handle,workspace,workspace_bytes,problem,mgt::Bf16GemmRole::kGradInput,0.0f,dy,weights); const int dx1=RunBackwardCase(handle,workspace,workspace_bytes,problem,mgt::Bf16GemmRole::kGradInput,1.0f,dy,weights);
+    cudaFree(workspace); cublasLtDestroy(handle); if(dw0!=0)return dw0; if(dw1!=0)return dw1; if(dx0!=0)return dx0; return dx1;
 }
