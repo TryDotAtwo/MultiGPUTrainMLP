@@ -2,6 +2,7 @@
 #include "mgt/batch_norm_training.hpp"
 #include "mgt_cuda/mlp_forward.cuh"
 #include "mgt_cuda/adamw.cuh"
+#include "mgt_cuda/bf16_activation.cuh"
 #include <cublas_v2.h>
 namespace mgt_cuda {
 struct NcclRankContext;

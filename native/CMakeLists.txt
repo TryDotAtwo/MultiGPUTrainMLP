@@ -134,6 +134,7 @@ if(MGT_ENABLE_CUDA)
         cuda/random_walk_kernel.cu
         cuda/batch_norm.cu
         cuda/batch_norm_activation.cu
+        cuda/bf16_activation.cu
         cuda/mlp_forward.cu
         cuda/mlp_backward.cu
         cuda/adamw.cu
@@ -291,6 +292,9 @@ if(MGT_ENABLE_CUDA)
     add_executable(test_a100_bf16_runtime tests/cuda/test_a100_bf16_runtime.cu)
     target_link_libraries(test_a100_bf16_runtime PRIVATE mgt_cuda)
     add_test(NAME a100_bf16_runtime COMMAND test_a100_bf16_runtime)
+    add_executable(test_mlp_batch_norm_bf16_dataflow tests/cuda/test_mlp_batch_norm_bf16_dataflow.cu)
+    target_link_libraries(test_mlp_batch_norm_bf16_dataflow PRIVATE mgt_cuda)
+    add_test(NAME mlp_batch_norm_bf16_dataflow COMMAND test_mlp_batch_norm_bf16_dataflow)
     add_executable(test_cuda_batch_norm_reference tests/cuda/test_cuda_batch_norm_reference.cu)
     target_link_libraries(test_cuda_batch_norm_reference PRIVATE mgt_cuda)
     add_test(NAME cuda_batch_norm_reference COMMAND test_cuda_batch_norm_reference)

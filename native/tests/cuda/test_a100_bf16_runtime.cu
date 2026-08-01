@@ -89,8 +89,10 @@ int main() {
         view.ordinary_bytes != plan.ordinary_bytes ||
         view.pinned_host_bytes != plan.pinned_host_bytes || view.symmetric_base)
         return 3;
+    const auto* activation_plan = mgt_cuda::A100Bf16RuntimeActivationPlan(runtime);
     if (!mgt_cuda::A100Bf16RuntimeStepControl(runtime) ||
-        !mgt_cuda::A100Bf16RuntimeLinearPlan(runtime))
+        !mgt_cuda::A100Bf16RuntimeLinearPlan(runtime) || !activation_plan ||
+        activation_plan->saved_activation_bf16_count != 12500ULL * (2560ULL + 33ULL * 224ULL))
         return 4;
     if (!mgt_cuda::A100Bf16RuntimeHasCommunicators(runtime)) return 6;
     if (mgt_cuda::DestroyA100Bf16Runtime(runtime) != mgt::Status::kOk) return 5;

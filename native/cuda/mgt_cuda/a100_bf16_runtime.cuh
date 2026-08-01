@@ -2,6 +2,7 @@
 
 #include "mgt/a100_static_arena.hpp"
 #include "mgt_cuda/p888_step_control.cuh"
+#include "mgt_cuda/bf16_activation.cuh"
 
 #include <cstdint>
 
@@ -36,5 +37,6 @@ mgt::Status QueryA100Bf16RuntimeView(const A100Bf16Runtime* runtime,A100StaticAr
 P888StepControlV1* A100Bf16RuntimeStepControl(A100Bf16Runtime* runtime);
 bool A100Bf16RuntimeHasCommunicators(const A100Bf16Runtime* runtime);
 const Bf16LinearTrainOpsPlan* A100Bf16RuntimeLinearPlan(const A100Bf16Runtime* runtime);
+const MlpBatchNormBf16WorkspacePlan* A100Bf16RuntimeActivationPlan(const A100Bf16Runtime* runtime);
 
 }  // namespace mgt_cuda

@@ -13,7 +13,7 @@ enum class A100ArenaSliceKind : std::uint32_t {
     kStepControl=1,kWeightsFp32=2,kWeightGradFp32=3,kWeightMFp32=4,kWeightVFp32=5,
     kWeightsBf16=6,kAffineStateFp32=7,kBatchStates=8,kBatchLabels=9,kActivationsBf16=10,
     kDzRingBf16=11,kScratchFp32=12,kLtWorkspace=13,kFatalHealth=14,kTelemetryDevice=15,
-    kBnSymmetric=16,kTelemetryHost=17
+    kBnSymmetric=16,kTelemetryHost=17,kXhat=18,kReluMasks=19
 };
 
 struct A100ArenaSliceV1 {
