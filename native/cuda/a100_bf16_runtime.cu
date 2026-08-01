@@ -1,0 +1,39 @@
+#include "mgt_cuda/a100_bf16_runtime.cuh"
+
+#include <cublasLt.h>
+
+#include <array>
+#include <cstring>
+#include <new>
+#include <string>
+
+namespace mgt_cuda {
+struct A100Bf16Runtime{
+ mgt::P888A100ExecutionProfileV1 profile{};mgt::A100StaticArenaPlanV1 plan{};A100StaticArenaView view{};
+ std::array<cudaStream_t,5> streams{};std::array<cudaEvent_t,16> events{};std::array<cublasLtHandle_t,2> lt{};P888StepControlV1* control=nullptr;
+};
+namespace {
+bool SameHash(const std::array<std::uint8_t,32>&a,const std::array<std::uint8_t,32>&b){return a==b;}
+bool Distinct(const char*a,const char*b,const char*c){return a&&b&&c&&*a&&*b&&*c&&std::strcmp(a,b)&&std::strcmp(a,c)&&std::strcmp(b,c);}
+const mgt::A100ArenaSliceV1* Find(const mgt::A100StaticArenaPlanV1&p,mgt::A100ArenaSliceKind k){for(std::uint32_t i=0;i<p.slice_count;++i)if(p.slices[i].kind==k)return&p.slices[i];return nullptr;}
+mgt::Status Validate(const A100Bf16RuntimeCreateInfo&i,const mgt::A100StaticArenaPlanV1&p){
+ if(!i.execution_profile||i.arena_info.profile!=i.execution_profile||!i.world||i.rank>=i.world||i.world!=i.execution_profile->world||mgt::ValidateP888A100ExecutionProfile(*i.execution_profile,i.profile_use)!=mgt::Status::kOk||mgt::ValidateA100StaticArenaPlan(p)!=mgt::Status::kOk||!SameHash(p.layout_sha256,i.execution_profile->arena_layout_sha256)||p.ordinary_bytes!=i.execution_profile->ordinary_arena_bytes||p.symmetric_bytes!=i.execution_profile->symmetric_arena_bytes||p.pinned_host_bytes!=i.execution_profile->pinned_host_bytes)return mgt::Status::kInvalidConfig;
+ if(i.world>1&&!Distinct(i.bn_nccl_id_file,i.weight_nccl_id_file,i.metrics_nccl_id_file))return mgt::Status::kInvalidConfig;
+ // Multi-rank creation is enabled only after all three NCCL contexts are owned here.
+ if(i.world>1)return mgt::Status::kInvalidConfig;
+ if(p.symmetric_bytes)return mgt::Status::kInvalidConfig;
+ int current=-1;if(cudaGetDevice(&current)!=cudaSuccess)return mgt::Status::kCudaFailure;if(current!=(int)i.device_id)return mgt::Status::kInvalidConfig;return mgt::Status::kOk;
+}
+}
+mgt::Status CreateA100Bf16Runtime(const A100Bf16RuntimeCreateInfo&i,const mgt::A100StaticArenaPlanV1&p,A100Bf16Runtime**out){
+ if(!out)return mgt::Status::kInvalidConfig;*out=nullptr;auto status=Validate(i,p);if(status!=mgt::Status::kOk)return status;auto*r=new(std::nothrow)A100Bf16Runtime;if(!r)return mgt::Status::kCapacityExceeded;r->profile=*i.execution_profile;r->plan=p;r->view.plan=&r->plan;r->view.ordinary_bytes=p.ordinary_bytes;r->view.pinned_host_bytes=p.pinned_host_bytes;
+ if(cudaMalloc(&r->view.ordinary_base,p.ordinary_bytes)!=cudaSuccess||cudaHostAlloc(&r->view.pinned_host_base,p.pinned_host_bytes,cudaHostAllocPortable)!=cudaSuccess){DestroyA100Bf16Runtime(r);return mgt::Status::kCudaFailure;}
+ for(auto&s:r->streams)if(cudaStreamCreateWithFlags(&s,cudaStreamNonBlocking)!=cudaSuccess){DestroyA100Bf16Runtime(r);return mgt::Status::kCudaFailure;}
+ for(auto&e:r->events)if(cudaEventCreateWithFlags(&e,cudaEventDisableTiming)!=cudaSuccess){DestroyA100Bf16Runtime(r);return mgt::Status::kCudaFailure;}
+ for(auto&h:r->lt)if(cublasLtCreate(&h)!=CUBLAS_STATUS_SUCCESS){DestroyA100Bf16Runtime(r);return mgt::Status::kCudaFailure;}
+ const auto*s=Find(p,mgt::A100ArenaSliceKind::kStepControl);if(!s||s->bytes<sizeof(P888StepControlV1)){DestroyA100Bf16Runtime(r);return mgt::Status::kInvalidConfig;}r->control=reinterpret_cast<P888StepControlV1*>(static_cast<std::uint8_t*>(r->view.ordinary_base)+s->offset);if(InitializeP888StepControl(r->control,0,0,888)!=mgt::Status::kOk){DestroyA100Bf16Runtime(r);return mgt::Status::kCudaFailure;}*out=r;return mgt::Status::kOk;
+}
+mgt::Status DestroyA100Bf16Runtime(A100Bf16Runtime*r){if(!r)return mgt::Status::kInvalidConfig;mgt::Status result=mgt::Status::kOk;for(auto s:r->streams)if(s&&cudaStreamSynchronize(s)!=cudaSuccess)result=mgt::Status::kCudaFailure;for(auto h:r->lt)if(h&&cublasLtDestroy(h)!=CUBLAS_STATUS_SUCCESS)result=mgt::Status::kCudaFailure;for(auto e:r->events)if(e&&cudaEventDestroy(e)!=cudaSuccess)result=mgt::Status::kCudaFailure;for(auto s:r->streams)if(s&&cudaStreamDestroy(s)!=cudaSuccess)result=mgt::Status::kCudaFailure;if(r->view.pinned_host_base&&cudaFreeHost(r->view.pinned_host_base)!=cudaSuccess)result=mgt::Status::kCudaFailure;if(r->view.ordinary_base&&cudaFree(r->view.ordinary_base)!=cudaSuccess)result=mgt::Status::kCudaFailure;delete r;return result;}
+mgt::Status QueryA100Bf16RuntimeView(const A100Bf16Runtime*r,A100StaticArenaView*out){if(!r||!out)return mgt::Status::kInvalidConfig;*out=r->view;return mgt::Status::kOk;}
+P888StepControlV1* A100Bf16RuntimeStepControl(A100Bf16Runtime*r){return r?r->control:nullptr;}
+}
