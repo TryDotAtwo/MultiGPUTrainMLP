@@ -88,3 +88,11 @@ __host__ mgt::Status LaunchAdamWKernelWithHalfMirror(const AdamWKernelConfig& co
     return cudaGetLastError() == cudaSuccess ? mgt::Status::kOk : mgt::Status::kCudaFailure;
 }
 }  // namespace mgt_cuda
+namespace mgt_cuda {
+namespace {
+__global__ void FloatToBfloat16MirrorKernel(const float* master,__nv_bfloat16* mirror,std::uint64_t count){const std::uint64_t i=static_cast<std::uint64_t>(blockIdx.x)*blockDim.x+threadIdx.x;if(i<count)mirror[i]=__float2bfloat16_rn(master[i]);}
+__global__ void AdamWWithBfloat16MirrorKernel(AdamWKernelConfig config,float* master,__nv_bfloat16* mirror,const float* grad,float* moment1,float* moment2){const std::uint64_t i=static_cast<std::uint64_t>(blockIdx.x)*blockDim.x+threadIdx.x;if(i>=config.param_count)return;const float next=AdamWUpdateOne(config,master[i],grad[i],moment1+i,moment2+i);master[i]=next;mirror[i]=__float2bfloat16_rn(next);}
+}
+mgt::Status LaunchFloatToBfloat16Mirror(const float* master,__nv_bfloat16* mirror,std::uint64_t count,cudaStream_t stream){if(!master||!mirror||!count)return mgt::Status::kInvalidConfig;const auto launch=Build1DLaunchConfig(count,256);FloatToBfloat16MirrorKernel<<<launch.blocks,launch.threads,0,stream>>>(master,mirror,count);return cudaPeekAtLastError()==cudaSuccess?mgt::Status::kOk:mgt::Status::kCudaFailure;}
+mgt::Status LaunchAdamWKernelWithBfloat16Mirror(const AdamWKernelConfig& config,float* master,__nv_bfloat16* mirror,const float* grad,float* moment1,float* moment2,cudaStream_t stream){if(ValidateAdamWKernelConfig(config)!=mgt::Status::kOk||!master||!mirror||!grad||!moment1||!moment2)return mgt::Status::kInvalidConfig;const auto launch=Build1DLaunchConfig(config.param_count,256);AdamWWithBfloat16MirrorKernel<<<launch.blocks,launch.threads,0,stream>>>(config,master,mirror,grad,moment1,moment2);return cudaPeekAtLastError()==cudaSuccess?mgt::Status::kOk:mgt::Status::kCudaFailure;}
+}  // namespace mgt_cuda
