@@ -24,6 +24,7 @@ add_library(mgt_core STATIC
     src/puzzle_io.cpp
     src/benchmark_snapshot.cpp
     src/a100_bf16_policy.cpp
+    src/a100_bf16_algorithm_table.cpp
     src/a100_execution_profile.cpp
     src/a100_static_arena.cpp
     src/model_layout.cpp
@@ -116,6 +117,9 @@ add_test(NAME benchmark_snapshot COMMAND test_benchmark_snapshot)
 add_executable(test_a100_bf16_policy tests/test_a100_bf16_policy.cpp)
 target_link_libraries(test_a100_bf16_policy PRIVATE mgt_core)
 add_test(NAME a100_bf16_policy COMMAND test_a100_bf16_policy)
+add_executable(test_a100_bf16_algorithm_table tests/test_a100_bf16_algorithm_table.cpp)
+target_link_libraries(test_a100_bf16_algorithm_table PRIVATE mgt_core)
+add_test(NAME a100_bf16_algorithm_table COMMAND test_a100_bf16_algorithm_table)
 add_executable(test_a100_execution_profile tests/test_a100_execution_profile.cpp)
 target_link_libraries(test_a100_execution_profile PRIVATE mgt_core)
 add_test(NAME a100_execution_profile COMMAND test_a100_execution_profile)
