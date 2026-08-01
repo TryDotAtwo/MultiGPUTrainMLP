@@ -88,7 +88,7 @@ mgt::Status mgt_cuda::BuildP888A100Sm80Cuda124Bf16AlgorithmTable(
     mgt::Bf16AlgorithmTable* out) {
     if (out == nullptr) return mgt::Status::kInvalidConfig;
     out->records.clear();
-    out->records.reserve(3U * 34U * 3U);
+    out->records.reserve(3U * 33U * 3U);
 
     const auto choice = [](std::uint32_t tile, std::uint32_t stages,
                            std::uint32_t split_k, std::uint32_t reduction,
@@ -128,16 +128,10 @@ mgt::Status mgt_cuda::BuildP888A100Sm80Cuda124Bf16AlgorithmTable(
 
     constexpr std::uint32_t rows[] = {12497, 12498, 12500};
     for (std::uint32_t active_rows : rows) {
-        const Bf16LinearProblem input{active_rows, 1, active_rows, 2560, 224};
-        if (!add(input, mgt::Bf16GemmRole::kInputForward, input_forward) ||
-            !add(input, mgt::Bf16GemmRole::kGradWeight, input_dw) ||
-            !add(input, mgt::Bf16GemmRole::kInputTableGrad, input_dx))
-            return mgt::Status::kInvalidConfig;
-
-        const Bf16LinearProblem hidden{active_rows, 2, active_rows, 224, 224};
-        if (!add(hidden, mgt::Bf16GemmRole::kHiddenForward, hidden_forward) ||
-            !add(hidden, mgt::Bf16GemmRole::kGradWeight, hidden_dw) ||
-            !add(hidden, mgt::Bf16GemmRole::kGradInput, hidden_dx))
+        const Bf16LinearProblem hidden{active_rows, 2, active_rows, 2560, 224};
+        if (!add(hidden, mgt::Bf16GemmRole::kHiddenForward, input_forward) ||
+            !add(hidden, mgt::Bf16GemmRole::kGradWeight, input_dw) ||
+            !add(hidden, mgt::Bf16GemmRole::kGradInput, input_dx))
             return mgt::Status::kInvalidConfig;
 
         for (std::uint32_t site = 3; site <= 34; ++site) {
@@ -178,14 +172,13 @@ const mgt::A100ArenaSliceV1* FindLtWorkspace(const A100StaticArenaView& arena) {
 }
 
 mgt::Bf16GemmRole ForwardRole(std::uint32_t site_id) {
-    if (site_id == 1) return mgt::Bf16GemmRole::kInputForward;
     if (site_id == 2) return mgt::Bf16GemmRole::kHiddenForward;
     return mgt::Bf16GemmRole::kResidualForward;
 }
 
 const Bf16LinearTrainOpsPlan::Entry* FindEntry(
     const Bf16LinearTrainOpsPlan* plan, const Bf16LinearProblem& problem) {
-    if (plan == nullptr || problem.site_id == 0 || problem.site_id > 34) return nullptr;
+    if (plan == nullptr || problem.site_id < 2 || problem.site_id > 34) return nullptr;
     for (const auto& entry : plan->entries)
         if (SameProblem(entry.problem, problem)) return &entry;
     return nullptr;
@@ -246,8 +239,7 @@ mgt::Status CreateBf16LinearTrainOpsPlan(
         if (status == mgt::Status::kOk)
             status = PrepareOne(handle, algorithms, entry.problem, mgt::Bf16GemmRole::kGradWeight,
                                 workspace, workspace_slice->bytes, &entry.grad_weight);
-        const auto dx_role = entry.problem.site_id == 1 ? mgt::Bf16GemmRole::kInputTableGrad
-                                                        : mgt::Bf16GemmRole::kGradInput;
+        const auto dx_role = mgt::Bf16GemmRole::kGradInput;
         if (status == mgt::Status::kOk)
             status = PrepareOne(handle, algorithms, entry.problem, dx_role,
                                 workspace, workspace_slice->bytes, &entry.grad_input_zero);

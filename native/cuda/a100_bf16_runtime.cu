@@ -1,22 +1,34 @@
 #include "mgt_cuda/a100_bf16_runtime.cuh"
 #include "mgt_cuda/allreduce_nccl.cuh"
+#include "mgt_cuda/bf16_linear_train_ops.cuh"
 
 #include <cublasLt.h>
 
 #include <array>
 #include <cstring>
 #include <new>
+#include <vector>
 #include <string>
 
 namespace mgt_cuda {
 struct A100Bf16Runtime{
  mgt::P888A100ExecutionProfileV1 profile{};mgt::A100StaticArenaPlanV1 plan{};A100StaticArenaView view{};
  std::array<cudaStream_t,5> streams{};std::array<cudaEvent_t,16> events{};std::array<cublasLtHandle_t,2> lt{};std::array<NcclRankContext*,3> contexts{};P888StepControlV1* control=nullptr;
+ mgt::Bf16AlgorithmTable algorithms{};Bf16LinearTrainOpsPlan* linear_plan=nullptr;
 };
 namespace {
 bool SameHash(const std::array<std::uint8_t,32>&a,const std::array<std::uint8_t,32>&b){return a==b;}
 bool Distinct(const char*a,const char*b,const char*c){return a&&b&&c&&*a&&*b&&*c&&std::strcmp(a,b)&&std::strcmp(a,c)&&std::strcmp(b,c);}
 const mgt::A100ArenaSliceV1* Find(const mgt::A100StaticArenaPlanV1&p,mgt::A100ArenaSliceKind k){for(std::uint32_t i=0;i<p.slice_count;++i)if(p.slices[i].kind==k)return&p.slices[i];return nullptr;}
+std::string Hex(const std::array<std::uint8_t,32>& value){static constexpr char digits[]="0123456789abcdef";std::string out(64,'0');for(std::size_t i=0;i<value.size();++i){out[2*i]=digits[value[i]>>4];out[2*i+1]=digits[value[i]&15];}return out;}
+mgt::Status PrepareLinear(A100Bf16Runtime*r,const A100Bf16RuntimeCreateInfo&i){
+ if(i.arena_info.hd1!=2560||i.arena_info.hd2!=224||i.arena_info.residual_blocks!=16)return mgt::Status::kInvalidConfig;
+ auto status=BuildP888A100Sm80Cuda124Bf16AlgorithmTable(&r->algorithms);if(status!=mgt::Status::kOk)return status;
+ std::string hash;if(mgt::CanonicalBf16AlgorithmTableSha256(r->algorithms,&hash)!=mgt::Status::kOk||hash!=Hex(i.execution_profile->policy.algorithm_table_sha256))return mgt::Status::kInvalidConfig;
+ std::vector<Bf16LinearProblem> problems;problems.reserve(i.execution_profile->active_rows.size()*33U);
+ for(auto rows:i.execution_profile->active_rows){problems.push_back({rows,2,rows,2560,224});for(std::uint32_t site=3;site<=34;++site)problems.push_back({rows,site,rows,224,224});}
+ return CreateBf16LinearTrainOpsPlan(problems.data(),static_cast<std::uint32_t>(problems.size()),i.device_id,r->lt[0],r->algorithms,r->view,&r->linear_plan);
+}
 mgt::Status Validate(const A100Bf16RuntimeCreateInfo&i,const mgt::A100StaticArenaPlanV1&p){
  if(!i.execution_profile||i.arena_info.profile!=i.execution_profile||!i.world||i.rank>=i.world||i.world!=i.execution_profile->world||mgt::ValidateP888A100ExecutionProfile(*i.execution_profile,i.profile_use)!=mgt::Status::kOk||mgt::ValidateA100StaticArenaPlan(p)!=mgt::Status::kOk||!SameHash(p.layout_sha256,i.execution_profile->arena_layout_sha256)||p.ordinary_bytes!=i.execution_profile->ordinary_arena_bytes||p.symmetric_bytes!=i.execution_profile->symmetric_arena_bytes||p.pinned_host_bytes!=i.execution_profile->pinned_host_bytes)return mgt::Status::kInvalidConfig;
  if(i.world>1&&!Distinct(i.bn_nccl_id_file,i.weight_nccl_id_file,i.metrics_nccl_id_file))return mgt::Status::kInvalidConfig;
@@ -31,6 +43,7 @@ mgt::Status CreateA100Bf16Runtime(const A100Bf16RuntimeCreateInfo&i,const mgt::A
  for(auto&s:r->streams)if(cudaStreamCreateWithFlags(&s,cudaStreamNonBlocking)!=cudaSuccess){DestroyA100Bf16Runtime(r);return mgt::Status::kCudaFailure;}
  for(auto&e:r->events)if(cudaEventCreateWithFlags(&e,cudaEventDisableTiming)!=cudaSuccess){DestroyA100Bf16Runtime(r);return mgt::Status::kCudaFailure;}
  for(auto&h:r->lt)if(cublasLtCreate(&h)!=CUBLAS_STATUS_SUCCESS){DestroyA100Bf16Runtime(r);return mgt::Status::kCudaFailure;}
+ if(PrepareLinear(r,i)!=mgt::Status::kOk){DestroyA100Bf16Runtime(r);return mgt::Status::kInvalidConfig;}
 #ifdef MGT_HAS_NCCL
  const char* ids[3]={i.bn_nccl_id_file,i.weight_nccl_id_file,i.metrics_nccl_id_file};
  for(int n=0;n<3;++n){const auto cs=i.world==1?CreateNcclSingleRankContext(i.device_id,&r->contexts[n]):CreateNcclRankContext(i.device_id,i.world,i.rank,std::filesystem::path(ids[n]),&r->contexts[n]);if(cs!=mgt::Status::kOk){DestroyA100Bf16Runtime(r);return cs;}}
@@ -40,6 +53,7 @@ mgt::Status CreateA100Bf16Runtime(const A100Bf16RuntimeCreateInfo&i,const mgt::A
  const auto*s=Find(p,mgt::A100ArenaSliceKind::kStepControl);if(!s||s->bytes<sizeof(P888StepControlV1)){DestroyA100Bf16Runtime(r);return mgt::Status::kInvalidConfig;}r->control=reinterpret_cast<P888StepControlV1*>(static_cast<std::uint8_t*>(r->view.ordinary_base)+s->offset);if(InitializeP888StepControl(r->control,0,0,888)!=mgt::Status::kOk){DestroyA100Bf16Runtime(r);return mgt::Status::kCudaFailure;}*out=r;return mgt::Status::kOk;
 }
 mgt::Status DestroyA100Bf16Runtime(A100Bf16Runtime*r){if(!r)return mgt::Status::kInvalidConfig;mgt::Status result=mgt::Status::kOk;for(auto s:r->streams)if(s&&cudaStreamSynchronize(s)!=cudaSuccess)result=mgt::Status::kCudaFailure;
+if(r->linear_plan&&DestroyBf16LinearTrainOpsPlan(r->linear_plan)!=mgt::Status::kOk)result=mgt::Status::kCudaFailure;
 #ifdef MGT_HAS_NCCL
  for(auto c:r->contexts)if(c&&DestroyNcclRankContext(c)!=mgt::Status::kOk)result=mgt::Status::kNcclFailure;
 #endif
@@ -54,4 +68,8 @@ bool mgt_cuda::A100Bf16RuntimeHasCommunicators(const A100Bf16Runtime*r){
 #else
  (void)r;return false;
 #endif
+}
+const mgt_cuda::Bf16LinearTrainOpsPlan* mgt_cuda::A100Bf16RuntimeLinearPlan(
+    const A100Bf16Runtime* runtime) {
+    return runtime ? runtime->linear_plan : nullptr;
 }

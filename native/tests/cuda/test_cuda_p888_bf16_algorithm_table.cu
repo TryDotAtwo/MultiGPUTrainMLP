@@ -42,20 +42,18 @@ bool Reconstruct(const mgt::Bf16AlgorithmTable& table,
 int main() {
     mgt::Bf16AlgorithmTable table;
     if (mgt_cuda::BuildP888A100Sm80Cuda124Bf16AlgorithmTable(&table) != mgt::Status::kOk ||
-        table.records.size() != 306) return 1;
+        table.records.size() != 297) return 1;
     for (std::uint32_t rows : {12497U, 12498U, 12500U}) {
-        const mgt_cuda::Bf16LinearProblem input{rows, 1, rows, 2560, 224};
-        if (!Expect(table, input, mgt::Bf16GemmRole::kInputForward, 23, 15, 1, 0, 1, 0) ||
-            !Expect(table, input, mgt::Bf16GemmRole::kGradWeight, 20, 15, 2, 1, 0, 160) ||
-            !Expect(table, input, mgt::Bf16GemmRole::kInputTableGrad, 20, 11, 1, 0, 1, 0))
+        const mgt_cuda::Bf16LinearProblem hidden{rows, 2, rows, 2560, 224};
+        if (!Expect(table, hidden, mgt::Bf16GemmRole::kHiddenForward, 23, 15, 1, 0, 1, 0) ||
+            !Expect(table, hidden, mgt::Bf16GemmRole::kGradWeight, 20, 15, 2, 1, 0, 160) ||
+            !Expect(table, hidden, mgt::Bf16GemmRole::kGradInput, 20, 11, 1, 0, 1, 0))
             return 2;
-        for (std::uint32_t site : {2U, 3U, 18U, 34U}) {
-            const mgt_cuda::Bf16LinearProblem hidden{rows, site, rows, 224, 224};
-            const auto forward_role = site == 2 ? mgt::Bf16GemmRole::kHiddenForward
-                                                : mgt::Bf16GemmRole::kResidualForward;
-            if (!Expect(table, hidden, forward_role, 24, 9, 1, 0, 1, 0) ||
-                !Expect(table, hidden, mgt::Bf16GemmRole::kGradWeight, 20, 15, 24, 4, 0, 4816896) ||
-                !Expect(table, hidden, mgt::Bf16GemmRole::kGradInput, 24, 9, 1, 0, 1, 0))
+        for (std::uint32_t site : {3U, 18U, 34U}) {
+            const mgt_cuda::Bf16LinearProblem residual{rows, site, rows, 224, 224};
+            if (!Expect(table, residual, mgt::Bf16GemmRole::kResidualForward, 24, 9, 1, 0, 1, 0) ||
+                !Expect(table, residual, mgt::Bf16GemmRole::kGradWeight, 20, 15, 24, 4, 0, 4816896) ||
+                !Expect(table, residual, mgt::Bf16GemmRole::kGradInput, 24, 9, 1, 0, 1, 0))
                 return 3;
         }
     }
@@ -65,14 +63,14 @@ int main() {
     if (cublasLtCreate(&handle) != CUBLAS_STATUS_SUCCESS ||
         cudaMalloc(&workspace, workspace_bytes) != cudaSuccess) return 4;
     for (std::uint32_t rows : {12497U, 12498U, 12500U}) {
-        const mgt_cuda::Bf16LinearProblem input{rows, 1, rows, 2560, 224};
-        const mgt_cuda::Bf16LinearProblem hidden{rows, 2, rows, 224, 224};
-        if (!Reconstruct(table, input, mgt::Bf16GemmRole::kInputForward, handle, workspace, workspace_bytes) ||
-            !Reconstruct(table, input, mgt::Bf16GemmRole::kGradWeight, handle, workspace, workspace_bytes) ||
-            !Reconstruct(table, input, mgt::Bf16GemmRole::kInputTableGrad, handle, workspace, workspace_bytes) ||
-            !Reconstruct(table, hidden, mgt::Bf16GemmRole::kHiddenForward, handle, workspace, workspace_bytes) ||
+        const mgt_cuda::Bf16LinearProblem hidden{rows, 2, rows, 2560, 224};
+        const mgt_cuda::Bf16LinearProblem residual{rows, 3, rows, 224, 224};
+        if (!Reconstruct(table, hidden, mgt::Bf16GemmRole::kHiddenForward, handle, workspace, workspace_bytes) ||
             !Reconstruct(table, hidden, mgt::Bf16GemmRole::kGradWeight, handle, workspace, workspace_bytes) ||
-            !Reconstruct(table, hidden, mgt::Bf16GemmRole::kGradInput, handle, workspace, workspace_bytes))
+            !Reconstruct(table, hidden, mgt::Bf16GemmRole::kGradInput, handle, workspace, workspace_bytes) ||
+            !Reconstruct(table, residual, mgt::Bf16GemmRole::kResidualForward, handle, workspace, workspace_bytes) ||
+            !Reconstruct(table, residual, mgt::Bf16GemmRole::kGradWeight, handle, workspace, workspace_bytes) ||
+            !Reconstruct(table, residual, mgt::Bf16GemmRole::kGradInput, handle, workspace, workspace_bytes))
             return 5;
     }
     mgt::A100StaticArenaPlanV1 arena_plan{};
@@ -86,10 +84,10 @@ int main() {
     arena_view.ordinary_bytes = workspace_bytes;
     arena_view.plan = &arena_plan;
     std::vector<mgt_cuda::Bf16LinearProblem> problems;
-    problems.reserve(102);
+    problems.reserve(99);
     for (std::uint32_t rows : {12497U, 12498U, 12500U}) {
-        problems.push_back({rows, 1, rows, 2560, 224});
-        for (std::uint32_t site = 2; site <= 34; ++site)
+        problems.push_back({rows, 2, rows, 2560, 224});
+        for (std::uint32_t site = 3; site <= 34; ++site)
             problems.push_back({rows, site, rows, 224, 224});
     }
     mgt_cuda::Bf16LinearTrainOpsPlan* ops = nullptr;
