@@ -22,6 +22,13 @@ void KeyBytes(const mgt::Bf16GemmKeyV1& k, std::vector<std::uint8_t>& o) {
 }
 std::vector<std::uint8_t> KeyBytes(const mgt::Bf16GemmKeyV1& key) { std::vector<std::uint8_t> out; KeyBytes(key,out); return out; }
 bool Pow2(std::uint64_t value) { return value != 0 && (value & (value - 1)) == 0; }
+bool ByteLess(const std::vector<std::uint8_t>& a, const std::vector<std::uint8_t>& b) {
+    const std::size_t common = std::min(a.size(), b.size());
+    for (std::size_t i = 0; i < common; ++i) {
+        if (a[i] != b[i]) return a[i] < b[i];
+    }
+    return a.size() < b.size();
+}
 bool ValidKey(const mgt::Bf16GemmKeyV1& k) {
     const auto role = static_cast<std::uint32_t>(k.role);
     return k.schema_version == 1 && role >= 1 && role <= 6 && k.site_id != 0 && k.batch_count != 0 &&
@@ -56,7 +63,7 @@ mgt::Status mgt::ValidateBf16AlgorithmTable(const Bf16AlgorithmTable& table) {
         if (!ValidKey(record.key) || !ValidChoice(record.choice)) return Status::kInvalidConfig;
         keys.push_back(KeyBytes(record.key));
     }
-    std::sort(keys.begin(), keys.end());
+    std::sort(keys.begin(), keys.end(), ByteLess);
     return std::adjacent_find(keys.begin(), keys.end()) == keys.end() ? Status::kOk : Status::kInvalidConfig;
 }
 
@@ -64,7 +71,7 @@ mgt::Status mgt::CanonicalSerializeBf16AlgorithmTable(const Bf16AlgorithmTable& 
     if (out == nullptr || ValidateBf16AlgorithmTable(table) != Status::kOk) return Status::kInvalidConfig;
     std::vector<std::pair<std::vector<std::uint8_t>, const Bf16GemmChoiceV1*>> rows;
     for (const auto& record : table.records) rows.push_back({KeyBytes(record.key), &record.choice});
-    std::sort(rows.begin(), rows.end(), [](const auto& a,const auto& b){ return a.first < b.first; });
+    std::sort(rows.begin(), rows.end(), [](const auto& a,const auto& b){ return ByteLess(a.first, b.first); });
     out->clear(); const std::uint8_t tag[]={'M','G','T','B','F','1','6','A'}; out->insert(out->end(),std::begin(tag),std::end(tag)); U32(*out,1); U32(*out,static_cast<std::uint32_t>(rows.size()));
     for (const auto& row : rows) { out->insert(out->end(),row.first.begin(),row.first.end()); ChoiceBytes(*row.second,*out); }
     return Status::kOk;

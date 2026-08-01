@@ -140,6 +140,7 @@ if(MGT_ENABLE_CUDA)
         cuda/finite_check.cu
         cuda/p888_step_control.cu
         cuda/a100_bf16_runtime.cu
+        cuda/bf16_linear_train_ops.cu
     )
     target_include_directories(mgt_cuda PUBLIC include cuda)
     target_link_libraries(mgt_cuda PUBLIC mgt_core CUDA::cublas CUDA::cublasLt)
@@ -304,6 +305,9 @@ if(MGT_ENABLE_CUDA)
     add_executable(test_cuda_adamw_bf16_mirror tests/cuda/test_cuda_adamw_bf16_mirror.cu)
     target_link_libraries(test_cuda_adamw_bf16_mirror PRIVATE mgt_cuda)
     add_test(NAME cuda_adamw_bf16_mirror COMMAND test_cuda_adamw_bf16_mirror)
+    add_executable(test_cuda_bf16_linear_train_ops tests/cuda/test_cuda_bf16_linear_train_ops.cu)
+    target_link_libraries(test_cuda_bf16_linear_train_ops PRIVATE mgt_cuda)
+    add_test(NAME cuda_bf16_linear_train_ops COMMAND test_cuda_bf16_linear_train_ops)
     add_executable(test_cuda_mlp_forward_smoke tests/cuda/test_cuda_mlp_forward_smoke.cu)
     target_link_libraries(test_cuda_mlp_forward_smoke PRIVATE mgt_cuda)
     add_test(NAME cuda_mlp_forward_smoke COMMAND test_cuda_mlp_forward_smoke)
