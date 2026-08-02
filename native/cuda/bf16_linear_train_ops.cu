@@ -127,6 +127,8 @@ mgt::Status mgt_cuda::BuildP888A100Sm80Cuda124Bf16AlgorithmTable(
         value.split_k_contract.slot_count = 1;
         return value;
     };
+    const auto input_embedding_forward = choice(20, 11, 1, 0, 1, 0);
+    const auto input_embedding_dw = choice(24, 15, 2, 1, 1, 200);
     const auto input_forward = choice(23, 15, 1, 0, 1, 0);
     const auto hidden_forward = choice(24, 9, 1, 0, 1, 0);
     const auto input_dw = choice(20, 15, 2, 1, 0, 160);
@@ -152,9 +154,9 @@ mgt::Status mgt_cuda::BuildP888A100Sm80Cuda124Bf16AlgorithmTable(
             if (BuildBf16LinearGemmKey(input, mgt::Bf16GemmRole::kInputForward,
                                        tile == 0 ? 0.0f : 1.0f, &record.key) != mgt::Status::kOk)
                 return mgt::Status::kInvalidConfig;
-            record.choice = input_forward;
+            record.choice = input_embedding_forward;
             out->records.push_back(record);
-            if (!add(input, mgt::Bf16GemmRole::kInputTableGrad, input_dw))
+            if (!add(input, mgt::Bf16GemmRole::kInputTableGrad, input_embedding_dw))
                 return mgt::Status::kInvalidConfig;
         }
         const Bf16LinearProblem hidden{active_rows, 2, active_rows, 2560, 224};

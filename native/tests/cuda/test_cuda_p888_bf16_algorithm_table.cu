@@ -45,8 +45,8 @@ int main() {
         table.records.size() != 351) return 1;
     for (std::uint32_t rows : {12497U, 12498U, 12500U}) {
         const mgt_cuda::Bf16LinearProblem input{rows, 100, rows, 576, 2560};
-        if (!Expect(table, input, mgt::Bf16GemmRole::kInputForward, 23, 15, 1, 0, 1, 0) ||
-            !Expect(table, input, mgt::Bf16GemmRole::kInputTableGrad, 20, 15, 2, 1, 0, 160))
+        if (!Expect(table, input, mgt::Bf16GemmRole::kInputForward, 20, 11, 1, 0, 1, 0) ||
+            !Expect(table, input, mgt::Bf16GemmRole::kInputTableGrad, 24, 15, 2, 1, 1, 200))
             return 9;
         const mgt_cuda::Bf16LinearProblem hidden{rows, 2, rows, 2560, 224};
         if (!Expect(table, hidden, mgt::Bf16GemmRole::kHiddenForward, 23, 15, 1, 0, 1, 0) ||
