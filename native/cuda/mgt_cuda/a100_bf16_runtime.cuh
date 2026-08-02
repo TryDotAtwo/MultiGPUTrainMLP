@@ -43,5 +43,7 @@ const MlpBatchNormBf16WorkspacePlan* A100Bf16RuntimeActivationPlan(const A100Bf1
 const TiledSyncBatchNormConfig* A100Bf16RuntimeBatchNormConfig(const A100Bf16Runtime* runtime);
 const TiledSyncBatchNormWorkspace* A100Bf16RuntimeBatchNormWorkspace(const A100Bf16Runtime* runtime);
 NcclRankContext* A100Bf16RuntimeBatchNormContext(A100Bf16Runtime* runtime);
+float* A100Bf16RuntimePreactivationScratch(A100Bf16Runtime* runtime);
+float* A100Bf16RuntimeGradInputScratch(A100Bf16Runtime* runtime);
 
 }  // namespace mgt_cuda

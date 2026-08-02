@@ -102,7 +102,7 @@ int main() {
     const auto* bn_workspace=mgt_cuda::A100Bf16RuntimeBatchNormWorkspace(runtime);
     if(!bn_config||bn_config->row_chunk!=profile.policy.bn_row_chunk||
        bn_config->feature_tile!=profile.policy.bn_feature_tile||!bn_workspace||
-       !bn_workspace->partials||!bn_workspace->reduced||bn_workspace->partial_count==0||
+       !bn_workspace->partials||!bn_workspace->reduced||!mgt_cuda::A100Bf16RuntimePreactivationScratch(runtime)||!mgt_cuda::A100Bf16RuntimeGradInputScratch(runtime)||bn_workspace->partials==mgt_cuda::A100Bf16RuntimePreactivationScratch(runtime)||bn_workspace->partials==mgt_cuda::A100Bf16RuntimeGradInputScratch(runtime)||bn_workspace->partial_count==0||
        bn_workspace->reduced_count!=2ULL*2560)return 8;
     if (!mgt_cuda::A100Bf16RuntimeHasCommunicators(runtime)) return 6;
     if (mgt_cuda::DestroyA100Bf16Runtime(runtime) != mgt::Status::kOk) return 5;

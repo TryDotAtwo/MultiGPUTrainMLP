@@ -137,6 +137,7 @@ if(MGT_ENABLE_CUDA)
         cuda/bf16_activation.cu
         cuda/bf16_batch_norm_epilogue.cu
         cuda/bf16_batch_norm_sites.cu
+        cuda/bf16_residual_stack.cu
         cuda/sync_batch_norm_tiled.cu
         cuda/mlp_forward.cu
         cuda/mlp_backward.cu
@@ -298,6 +299,9 @@ if(MGT_ENABLE_CUDA)
     add_executable(test_a100_bf16_runtime tests/cuda/test_a100_bf16_runtime.cu)
     target_link_libraries(test_a100_bf16_runtime PRIVATE mgt_cuda)
     add_test(NAME a100_bf16_runtime COMMAND test_a100_bf16_runtime)
+    add_executable(test_bf16_residual_stack_contract tests/cuda/test_bf16_residual_stack_contract.cu)
+    target_link_libraries(test_bf16_residual_stack_contract PRIVATE mgt_cuda)
+    add_test(NAME bf16_residual_stack_contract COMMAND test_bf16_residual_stack_contract)
     add_executable(test_bf16_batch_norm_epilogue tests/cuda/test_bf16_batch_norm_epilogue.cu)
     target_link_libraries(test_bf16_batch_norm_epilogue PRIVATE mgt_cuda)
     add_test(NAME bf16_batch_norm_epilogue COMMAND test_bf16_batch_norm_epilogue)
