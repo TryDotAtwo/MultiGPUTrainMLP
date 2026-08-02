@@ -43,8 +43,25 @@ struct PreparedP888StrictRuntimeCreateInfo {
     std::array<const float*, 2> label_slots{};
 };
 
+struct PreparedP888Bf16HiddenBindings {
+    const __nv_bfloat16* input_activation = nullptr;
+    const __nv_bfloat16* weight = nullptr;
+    float* weight_grad = nullptr;
+    const float* gamma = nullptr;
+    const float* beta = nullptr;
+    float* running_mean = nullptr;
+    float* running_variance = nullptr;
+    float* saved_mean = nullptr;
+    float* saved_inv_std = nullptr;
+    float* dgamma = nullptr;
+    float* dbeta = nullptr;
+    float batch_norm_momentum = 0.1f;
+    float batch_norm_epsilon = 1e-5f;
+};
+
 struct PreparedP888Bf16RuntimeCreateInfo {
     A100Bf16Runtime* runtime = nullptr;
+    PreparedP888Bf16HiddenBindings hidden{};
     Bf16ResidualStackBindings residual_stack{};
     const float* output_upstream = nullptr;
     std::uint32_t capacity_rows = 0;

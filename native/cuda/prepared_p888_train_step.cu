@@ -1,6 +1,8 @@
 #include "mgt_cuda/prepared_p888_train_step.cuh"
 
 #include "mgt_cuda/allreduce_nccl.cuh"
+#include "mgt_cuda/bf16_batch_norm_sites.cuh"
+#include "mgt_cuda/bf16_linear_train_ops.cuh"
 
 #include <algorithm>
 #include <filesystem>
@@ -78,7 +80,12 @@ mgt::Status ValidateCreateInfo(const PreparedP888StrictRuntimeCreateInfo& info) 
 }
 
 mgt::Status ValidateBf16CreateInfo(const PreparedP888Bf16RuntimeCreateInfo& info) {
-    if (!info.runtime || !info.output_upstream ||
+    const auto& h = info.hidden;
+    if (!info.runtime || !info.output_upstream || !h.input_activation || !h.weight ||
+        !h.weight_grad || !h.gamma || !h.beta || !h.running_mean ||
+        !h.running_variance || !h.saved_mean || !h.saved_inv_std || !h.dgamma ||
+        !h.dbeta || h.batch_norm_momentum < 0.0f || h.batch_norm_momentum > 1.0f ||
+        h.batch_norm_epsilon <= 0.0f ||
         ValidateBf16ResidualStackBindings(info.residual_stack, true) != mgt::Status::kOk)
         return mgt::Status::kInvalidConfig;
     return ValidateRows(info.capacity_rows, info.supported_active_rows,
@@ -216,19 +223,57 @@ mgt::Status LaunchPreparedP888TrainStep(
         if (status != mgt::Status::kOk) return status;
         status = LaunchBeginP888StepControl(control, slot, runtime->stream);
         if (status != mgt::Status::kOk) return status;
+        const Bf16LinearProblem hidden_problem{
+            request.active_rows, 2, request.active_rows, 2560, 224};
+        const auto* linear = A100Bf16RuntimeLinearPlan(runtime->bf16.runtime);
+        float* preactivation = A100Bf16RuntimePreactivationScratch(runtime->bf16.runtime);
+        if (!linear || !preactivation) return mgt::Status::kInvalidConfig;
+        const auto& hidden = runtime->bf16.hidden;
+        status = LaunchBf16LinearForwardToFloat(
+            linear, hidden_problem, hidden.input_activation, hidden.weight,
+            preactivation, runtime->stream);
+        if (status != mgt::Status::kOk) return status;
+        status = LaunchA100TiledSyncBatchNormForwardSite(
+            runtime->bf16.runtime, 1, preactivation, nullptr, request.active_rows,
+            request.global_rows, hidden.gamma, hidden.beta, hidden.running_mean,
+            hidden.running_variance, hidden.batch_norm_momentum,
+            hidden.batch_norm_epsilon, hidden.saved_mean, hidden.saved_inv_std);
+        if (status != mgt::Status::kOk) return status;
+        Bf16BatchNormSiteView hidden_site{};
+        status = QueryA100Bf16RuntimeBatchNormSite(
+            runtime->bf16.runtime, 1, 0, &hidden_site);
+        if (status != mgt::Status::kOk) return status;
+        auto residual = runtime->bf16.residual_stack;
+        residual.input_activation = hidden_site.activation;
         const __nv_bfloat16* output = nullptr;
         status = LaunchA100Bf16ResidualStackForward(
-            runtime->bf16.runtime, runtime->bf16.residual_stack,
-            request.active_rows, request.global_rows, &output);
+            runtime->bf16.runtime, residual, request.active_rows,
+            request.global_rows, &output);
         if (status != mgt::Status::kOk) return status;
         if (!output) return mgt::Status::kInvalidConfig;
         float* input_gradient = nullptr;
         status = LaunchA100Bf16ResidualStackBackward(
-            runtime->bf16.runtime, runtime->bf16.residual_stack,
-            runtime->bf16.output_upstream, request.active_rows, request.global_rows,
-            &input_gradient);
+            runtime->bf16.runtime, residual, runtime->bf16.output_upstream,
+            request.active_rows, request.global_rows, &input_gradient);
         if (status != mgt::Status::kOk) return status;
         if (!input_gradient) return mgt::Status::kInvalidConfig;
+        status = LaunchA100TiledSyncBatchNormBackwardSite(
+            runtime->bf16.runtime, 1, 0, input_gradient, hidden.saved_inv_std,
+            hidden.gamma, hidden.dgamma, hidden.dbeta, request.active_rows,
+            request.global_rows, nullptr);
+        if (status != mgt::Status::kOk) return status;
+        status = QueryA100Bf16RuntimeBatchNormSite(
+            runtime->bf16.runtime, 1, 0, &hidden_site);
+        if (status != mgt::Status::kOk) return status;
+        status = LaunchBf16LinearGradWeightToFloat(
+            linear, hidden_problem, hidden.input_activation, hidden_site.dz,
+            hidden.weight_grad, runtime->stream);
+        if (status != mgt::Status::kOk) return status;
+        status = LaunchBf16LinearGradInputToFloat(
+            linear, hidden_problem, hidden_site.dz, hidden.weight,
+            A100Bf16RuntimeGradInputScratch(runtime->bf16.runtime), 0.0f,
+            runtime->stream);
+        if (status != mgt::Status::kOk) return status;
         status = LaunchCommitP888StepControl(control, runtime->stream);
         if (status != mgt::Status::kOk) return status;
         if (cudaEventRecord(runtime->completion, runtime->stream) != cudaSuccess)
