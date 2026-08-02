@@ -3,6 +3,7 @@
 #include "mgt_cuda/allreduce_nccl.cuh"
 #include "mgt_cuda/bf16_batch_norm_sites.cuh"
 #include "mgt_cuda/bf16_linear_train_ops.cuh"
+#include "mgt_cuda/input_embedding_bf16.cuh"
 
 #include <algorithm>
 #include <filesystem>
@@ -81,7 +82,13 @@ mgt::Status ValidateCreateInfo(const PreparedP888StrictRuntimeCreateInfo& info) 
 
 mgt::Status ValidateBf16CreateInfo(const PreparedP888Bf16RuntimeCreateInfo& info) {
     const auto& h = info.hidden;
-    if (!info.runtime || !info.output_upstream || !h.input_activation || !h.weight ||
+    const auto& input = info.input;
+    if (!info.runtime || !info.output_upstream || !input.state_slots[0] ||
+        !input.state_slots[1] || !input.table || !input.table_grad || !input.gamma ||
+        !input.beta || !input.running_mean || !input.running_variance ||
+        !input.saved_mean || !input.saved_inv_std || !input.dgamma || !input.dbeta ||
+        input.batch_norm_momentum < 0.0f || input.batch_norm_momentum > 1.0f ||
+        input.batch_norm_epsilon <= 0.0f || !h.weight ||
         !h.weight_grad || !h.gamma || !h.beta || !h.running_mean ||
         !h.running_variance || !h.saved_mean || !h.saved_inv_std || !h.dgamma ||
         !h.dbeta || h.batch_norm_momentum < 0.0f || h.batch_norm_momentum > 1.0f ||
@@ -226,11 +233,26 @@ mgt::Status LaunchPreparedP888TrainStep(
         const Bf16LinearProblem hidden_problem{
             request.active_rows, 2, request.active_rows, 2560, 224};
         const auto* linear = A100Bf16RuntimeLinearPlan(runtime->bf16.runtime);
+        const auto* input_plan = A100Bf16RuntimeInputEmbeddingPlan(runtime->bf16.runtime);
         float* preactivation = A100Bf16RuntimePreactivationScratch(runtime->bf16.runtime);
-        if (!linear || !preactivation) return mgt::Status::kInvalidConfig;
+        if (!linear || !input_plan || !preactivation) return mgt::Status::kInvalidConfig;
+        const auto& input = runtime->bf16.input;
+        status = LaunchInputEmbeddingForwardBf16(
+            input_plan, input.state_slots[request.batch_slot], input.table,
+            request.active_rows, preactivation, runtime->stream);
+        if (status != mgt::Status::kOk) return status;
+        status = LaunchA100TiledSyncBatchNormForwardSite(
+            runtime->bf16.runtime, 0, preactivation, nullptr, request.active_rows,
+            request.global_rows, input.gamma, input.beta, input.running_mean,
+            input.running_variance, input.batch_norm_momentum,
+            input.batch_norm_epsilon, input.saved_mean, input.saved_inv_std);
+        if (status != mgt::Status::kOk) return status;
+        Bf16BatchNormSiteView input_site{};
+        status = QueryA100Bf16RuntimeBatchNormSite(runtime->bf16.runtime, 0, 0, &input_site);
+        if (status != mgt::Status::kOk) return status;
         const auto& hidden = runtime->bf16.hidden;
         status = LaunchBf16LinearForwardToFloat(
-            linear, hidden_problem, hidden.input_activation, hidden.weight,
+            linear, hidden_problem, input_site.activation, hidden.weight,
             preactivation, runtime->stream);
         if (status != mgt::Status::kOk) return status;
         status = LaunchA100TiledSyncBatchNormForwardSite(
@@ -266,13 +288,25 @@ mgt::Status LaunchPreparedP888TrainStep(
             runtime->bf16.runtime, 1, 0, &hidden_site);
         if (status != mgt::Status::kOk) return status;
         status = LaunchBf16LinearGradWeightToFloat(
-            linear, hidden_problem, hidden.input_activation, hidden_site.dz,
+            linear, hidden_problem, input_site.activation, hidden_site.dz,
             hidden.weight_grad, runtime->stream);
         if (status != mgt::Status::kOk) return status;
         status = LaunchBf16LinearGradInputToFloat(
             linear, hidden_problem, hidden_site.dz, hidden.weight,
             A100Bf16RuntimeGradInputScratch(runtime->bf16.runtime), 0.0f,
             runtime->stream);
+        if (status != mgt::Status::kOk) return status;
+        status = LaunchA100TiledSyncBatchNormBackwardSite(
+            runtime->bf16.runtime, 0, 0,
+            A100Bf16RuntimeGradInputScratch(runtime->bf16.runtime), input.saved_inv_std,
+            input.gamma, input.dgamma, input.dbeta, request.active_rows,
+            request.global_rows, nullptr);
+        if (status != mgt::Status::kOk) return status;
+        status = QueryA100Bf16RuntimeBatchNormSite(runtime->bf16.runtime, 0, 0, &input_site);
+        if (status != mgt::Status::kOk) return status;
+        status = LaunchInputEmbeddingTableGradBf16(
+            input_plan, input.state_slots[request.batch_slot], input_site.dz,
+            request.active_rows, input.table_grad, runtime->stream);
         if (status != mgt::Status::kOk) return status;
         status = LaunchCommitP888StepControl(control, runtime->stream);
         if (status != mgt::Status::kOk) return status;

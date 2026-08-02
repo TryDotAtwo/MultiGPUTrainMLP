@@ -42,8 +42,12 @@ bool Reconstruct(const mgt::Bf16AlgorithmTable& table,
 int main() {
     mgt::Bf16AlgorithmTable table;
     if (mgt_cuda::BuildP888A100Sm80Cuda124Bf16AlgorithmTable(&table) != mgt::Status::kOk ||
-        table.records.size() != 297) return 1;
+        table.records.size() != 351) return 1;
     for (std::uint32_t rows : {12497U, 12498U, 12500U}) {
+        const mgt_cuda::Bf16LinearProblem input{rows, 100, rows, 576, 2560};
+        if (!Expect(table, input, mgt::Bf16GemmRole::kInputForward, 23, 15, 1, 0, 1, 0) ||
+            !Expect(table, input, mgt::Bf16GemmRole::kInputTableGrad, 20, 15, 2, 1, 0, 160))
+            return 9;
         const mgt_cuda::Bf16LinearProblem hidden{rows, 2, rows, 2560, 224};
         if (!Expect(table, hidden, mgt::Bf16GemmRole::kHiddenForward, 23, 15, 1, 0, 1, 0) ||
             !Expect(table, hidden, mgt::Bf16GemmRole::kGradWeight, 20, 15, 2, 1, 0, 160) ||

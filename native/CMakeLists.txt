@@ -146,6 +146,7 @@ if(MGT_ENABLE_CUDA)
         cuda/p888_step_control.cu
         cuda/a100_bf16_runtime.cu
         cuda/bf16_linear_train_ops.cu
+        cuda/input_embedding_bf16.cu
         cuda/bf16_fixed_gemm_plan.cu
     )
     target_include_directories(mgt_cuda PUBLIC include cuda)

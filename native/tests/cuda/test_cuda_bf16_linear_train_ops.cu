@@ -53,6 +53,24 @@ int main() {
         grad_input.lda != 224 || grad_input.ldb != 2560 || grad_input.ldc != 2560 ||
         grad_input.ldd != 2560 || grad_input.beta_bits != Bits(1.0f)) return 3;
 
+    const mgt_cuda::Bf16LinearProblem input{12500, 100, 12500, 576, 2560};
+    mgt::Bf16GemmKeyV1 input_forward{};
+    if (mgt_cuda::BuildBf16LinearGemmKey(input, mgt::Bf16GemmRole::kInputForward, 1.0f,
+                                          &input_forward) != mgt::Status::kOk ||
+        input_forward.m != 12500 || input_forward.n != 2560 || input_forward.k != 576 ||
+        input_forward.op_a != CUBLAS_OP_N || input_forward.op_b != CUBLAS_OP_N ||
+        input_forward.lda != 576 || input_forward.ldb != 2560 ||
+        input_forward.ldc != 2560 || input_forward.ldd != 2560 ||
+        input_forward.beta_bits != Bits(1.0f)) return 5;
+
+    mgt::Bf16GemmKeyV1 input_grad{};
+    if (mgt_cuda::BuildBf16LinearGemmKey(input, mgt::Bf16GemmRole::kInputTableGrad, 0.0f,
+                                          &input_grad) != mgt::Status::kOk ||
+        input_grad.m != 576 || input_grad.n != 2560 || input_grad.k != 12500 ||
+        input_grad.op_a != CUBLAS_OP_T || input_grad.op_b != CUBLAS_OP_N ||
+        input_grad.lda != 576 || input_grad.ldb != 2560 ||
+        input_grad.ldc != 2560 || input_grad.ldd != 2560) return 6;
+
     auto invalid = problem;
     invalid.compute_rows = invalid.active_rows - 1;
     if (mgt_cuda::BuildBf16LinearGemmKey(invalid, mgt::Bf16GemmRole::kHiddenForward, 0.0f,

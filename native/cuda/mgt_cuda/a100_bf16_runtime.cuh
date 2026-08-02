@@ -30,6 +30,7 @@ struct A100StaticArenaView {
 };
 
 struct Bf16LinearTrainOpsPlan;
+struct InputEmbeddingBf16Plan;
 struct A100Bf16Runtime;
 mgt::Status CreateA100Bf16Runtime(const A100Bf16RuntimeCreateInfo& info,
     const mgt::A100StaticArenaPlanV1& arena,A100Bf16Runtime** out);
@@ -39,6 +40,7 @@ P888StepControlV1* A100Bf16RuntimeStepControl(A100Bf16Runtime* runtime);
 cudaStream_t A100Bf16RuntimeComputeStream(A100Bf16Runtime* runtime);
 bool A100Bf16RuntimeHasCommunicators(const A100Bf16Runtime* runtime);
 const Bf16LinearTrainOpsPlan* A100Bf16RuntimeLinearPlan(const A100Bf16Runtime* runtime);
+const InputEmbeddingBf16Plan* A100Bf16RuntimeInputEmbeddingPlan(const A100Bf16Runtime* runtime);
 const MlpBatchNormBf16WorkspacePlan* A100Bf16RuntimeActivationPlan(const A100Bf16Runtime* runtime);
 const TiledSyncBatchNormConfig* A100Bf16RuntimeBatchNormConfig(const A100Bf16Runtime* runtime);
 const TiledSyncBatchNormWorkspace* A100Bf16RuntimeBatchNormWorkspace(const A100Bf16Runtime* runtime);

@@ -1,6 +1,7 @@
 #include "mgt_cuda/a100_bf16_runtime.cuh"
 #include "mgt_cuda/allreduce_nccl.cuh"
 #include "mgt_cuda/bf16_linear_train_ops.cuh"
+#include "mgt_cuda/input_embedding_bf16.cuh"
 #include "mgt_cuda/bf16_batch_norm_sites.cuh"
 #include "mgt_cuda/sync_batch_norm_tiled.cuh"
 
@@ -16,7 +17,7 @@ namespace mgt_cuda {
 struct A100Bf16Runtime{
  mgt::P888A100ExecutionProfileV1 profile{};mgt::A100StaticArenaPlanV1 plan{};A100StaticArenaView view{};
  std::array<cudaStream_t,5> streams{};std::array<cudaEvent_t,16> events{};std::array<cublasLtHandle_t,2> lt{};std::array<NcclRankContext*,3> contexts{};P888StepControlV1* control=nullptr;
- mgt::Bf16AlgorithmTable algorithms{};Bf16LinearTrainOpsPlan* linear_plan=nullptr;MlpBatchNormBf16WorkspacePlan activation_plan{};Bf16BatchNormSitesPlan bn_sites{};TiledSyncBatchNormConfig bn_config{};TiledSyncBatchNormWorkspace bn_workspace{};float*preactivation_scratch=nullptr;float*grad_input_scratch=nullptr;
+ mgt::Bf16AlgorithmTable algorithms{};Bf16LinearTrainOpsPlan* linear_plan=nullptr;InputEmbeddingBf16Plan* input_plan=nullptr;MlpBatchNormBf16WorkspacePlan activation_plan{};Bf16BatchNormSitesPlan bn_sites{};TiledSyncBatchNormConfig bn_config{};TiledSyncBatchNormWorkspace bn_workspace{};float*preactivation_scratch=nullptr;float*grad_input_scratch=nullptr;
 };
 namespace {
 bool SameHash(const std::array<std::uint8_t,32>&a,const std::array<std::uint8_t,32>&b){return a==b;}
@@ -56,6 +57,9 @@ mgt::Status CreateA100Bf16Runtime(const A100Bf16RuntimeCreateInfo&i,const mgt::A
  for(auto&h:r->lt)if(cublasLtCreate(&h)!=CUBLAS_STATUS_SUCCESS){DestroyA100Bf16Runtime(r);return mgt::Status::kCudaFailure;}
  if(BuildBf16BatchNormSitesPlan({i.arena_info.state_len,i.arena_info.state_value_pad,i.arena_info.hd1,i.arena_info.hd2,i.arena_info.residual_blocks,i.arena_info.output_dim},i.arena_info.hd1,i.arena_info.hd2,i.arena_info.capacity_rows,i.execution_profile->policy.dz_ring_slots,i.execution_profile->policy.xhat_storage,&r->bn_sites)!=mgt::Status::kOk){DestroyA100Bf16Runtime(r);return mgt::Status::kInvalidConfig;}
  if(PrepareLinear(r,i)!=mgt::Status::kOk){DestroyA100Bf16Runtime(r);return mgt::Status::kInvalidConfig;}
+ const InputEmbeddingBf16Config input_config{i.arena_info.state_len,i.arena_info.state_value_pad,i.arena_info.hd1,i.execution_profile->policy.input_positions_per_tile,i.arena_info.capacity_rows};
+ const std::uint64_t input_scratch_elements=2ULL*matrix_floats;
+ if(CreateInputEmbeddingBf16Plan(input_config,i.execution_profile->active_rows.data(),static_cast<std::uint32_t>(i.execution_profile->active_rows.size()),r->lt[1],r->algorithms,r->view,reinterpret_cast<__nv_bfloat16*>(r->grad_input_scratch),input_scratch_elements,&r->input_plan)!=mgt::Status::kOk){DestroyA100Bf16Runtime(r);return mgt::Status::kInvalidConfig;}
 #ifdef MGT_HAS_NCCL
  const char* ids[3]={i.bn_nccl_id_file,i.weight_nccl_id_file,i.metrics_nccl_id_file};
  for(int n=0;n<3;++n){const auto cs=i.world==1?CreateNcclSingleRankContext(i.device_id,&r->contexts[n]):CreateNcclRankContext(i.device_id,i.world,i.rank,std::filesystem::path(ids[n]),&r->contexts[n]);if(cs!=mgt::Status::kOk){DestroyA100Bf16Runtime(r);return cs;}}
@@ -65,6 +69,7 @@ mgt::Status CreateA100Bf16Runtime(const A100Bf16RuntimeCreateInfo&i,const mgt::A
  const auto*s=Find(p,mgt::A100ArenaSliceKind::kStepControl);if(!s||s->bytes<sizeof(P888StepControlV1)){DestroyA100Bf16Runtime(r);return mgt::Status::kInvalidConfig;}r->control=reinterpret_cast<P888StepControlV1*>(static_cast<std::uint8_t*>(r->view.ordinary_base)+s->offset);if(InitializeP888StepControl(r->control,0,0,888)!=mgt::Status::kOk){DestroyA100Bf16Runtime(r);return mgt::Status::kCudaFailure;}*out=r;return mgt::Status::kOk;
 }
 mgt::Status DestroyA100Bf16Runtime(A100Bf16Runtime*r){if(!r)return mgt::Status::kInvalidConfig;mgt::Status result=mgt::Status::kOk;for(auto s:r->streams)if(s&&cudaStreamSynchronize(s)!=cudaSuccess)result=mgt::Status::kCudaFailure;
+if(r->input_plan&&DestroyInputEmbeddingBf16Plan(r->input_plan)!=mgt::Status::kOk)result=mgt::Status::kCudaFailure;
 if(r->linear_plan&&DestroyBf16LinearTrainOpsPlan(r->linear_plan)!=mgt::Status::kOk)result=mgt::Status::kCudaFailure;
 #ifdef MGT_HAS_NCCL
  for(auto c:r->contexts)if(c&&DestroyNcclRankContext(c)!=mgt::Status::kOk)result=mgt::Status::kNcclFailure;
@@ -86,6 +91,7 @@ const mgt_cuda::Bf16LinearTrainOpsPlan* mgt_cuda::A100Bf16RuntimeLinearPlan(
     const A100Bf16Runtime* runtime) {
     return runtime ? runtime->linear_plan : nullptr;
 }
+const mgt_cuda::InputEmbeddingBf16Plan* mgt_cuda::A100Bf16RuntimeInputEmbeddingPlan(const A100Bf16Runtime* runtime){return runtime?runtime->input_plan:nullptr;}
 const mgt_cuda::MlpBatchNormBf16WorkspacePlan* mgt_cuda::A100Bf16RuntimeActivationPlan(const A100Bf16Runtime* runtime) {
     return runtime ? &runtime->activation_plan : nullptr;
 }

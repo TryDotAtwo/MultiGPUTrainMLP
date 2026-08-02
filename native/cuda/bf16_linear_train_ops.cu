@@ -46,6 +46,15 @@ mgt::Status mgt_cuda::BuildBf16LinearGemmKey(const Bf16LinearProblem& problem,
     SetCommon(problem, role, beta, out);
     switch (role) {
         case mgt::Bf16GemmRole::kInputForward:
+            out->m = problem.compute_rows;
+            out->n = problem.output_features;
+            out->k = problem.input_features;
+            out->op_a = CUBLAS_OP_N;
+            out->op_b = CUBLAS_OP_N;
+            out->lda = problem.input_features;
+            out->ldb = problem.output_features;
+            out->ldc = out->ldd = problem.output_features;
+            break;
         case mgt::Bf16GemmRole::kHiddenForward:
         case mgt::Bf16GemmRole::kResidualForward:
             out->m = problem.compute_rows;
@@ -67,8 +76,17 @@ mgt::Status mgt_cuda::BuildBf16LinearGemmKey(const Bf16LinearProblem& problem,
             out->ldb = problem.input_features;
             out->ldc = out->ldd = problem.input_features;
             break;
-        case mgt::Bf16GemmRole::kGradInput:
         case mgt::Bf16GemmRole::kInputTableGrad:
+            out->m = problem.input_features;
+            out->n = problem.output_features;
+            out->k = problem.compute_rows;
+            out->op_a = CUBLAS_OP_T;
+            out->op_b = CUBLAS_OP_N;
+            out->lda = problem.input_features;
+            out->ldb = problem.output_features;
+            out->ldc = out->ldd = problem.output_features;
+            break;
+        case mgt::Bf16GemmRole::kGradInput:
             out->m = problem.compute_rows;
             out->n = problem.input_features;
             out->k = problem.output_features;
@@ -88,7 +106,7 @@ mgt::Status mgt_cuda::BuildP888A100Sm80Cuda124Bf16AlgorithmTable(
     mgt::Bf16AlgorithmTable* out) {
     if (out == nullptr) return mgt::Status::kInvalidConfig;
     out->records.clear();
-    out->records.reserve(3U * 33U * 3U);
+    out->records.reserve(3U * (33U * 3U + 9U * 2U));
 
     const auto choice = [](std::uint32_t tile, std::uint32_t stages,
                            std::uint32_t split_k, std::uint32_t reduction,
@@ -128,6 +146,17 @@ mgt::Status mgt_cuda::BuildP888A100Sm80Cuda124Bf16AlgorithmTable(
 
     constexpr std::uint32_t rows[] = {12497, 12498, 12500};
     for (std::uint32_t active_rows : rows) {
+        for (std::uint32_t tile = 0; tile < 9; ++tile) {
+            const Bf16LinearProblem input{active_rows, 100U + tile, active_rows, 576, 2560};
+            mgt::Bf16AlgorithmRecordV1 record{};
+            if (BuildBf16LinearGemmKey(input, mgt::Bf16GemmRole::kInputForward,
+                                       tile == 0 ? 0.0f : 1.0f, &record.key) != mgt::Status::kOk)
+                return mgt::Status::kInvalidConfig;
+            record.choice = input_forward;
+            out->records.push_back(record);
+            if (!add(input, mgt::Bf16GemmRole::kInputTableGrad, input_dw))
+                return mgt::Status::kInvalidConfig;
+        }
         const Bf16LinearProblem hidden{active_rows, 2, active_rows, 2560, 224};
         if (!add(hidden, mgt::Bf16GemmRole::kHiddenForward, input_forward) ||
             !add(hidden, mgt::Bf16GemmRole::kGradWeight, input_dw) ||
