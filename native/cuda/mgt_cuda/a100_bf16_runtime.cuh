@@ -3,6 +3,7 @@
 #include "mgt/a100_static_arena.hpp"
 #include "mgt_cuda/p888_step_control.cuh"
 #include "mgt_cuda/bf16_activation.cuh"
+#include "mgt_cuda/sync_batch_norm_tiled.cuh"
 
 #include <cstdint>
 
@@ -39,5 +40,8 @@ cudaStream_t A100Bf16RuntimeComputeStream(A100Bf16Runtime* runtime);
 bool A100Bf16RuntimeHasCommunicators(const A100Bf16Runtime* runtime);
 const Bf16LinearTrainOpsPlan* A100Bf16RuntimeLinearPlan(const A100Bf16Runtime* runtime);
 const MlpBatchNormBf16WorkspacePlan* A100Bf16RuntimeActivationPlan(const A100Bf16Runtime* runtime);
+const TiledSyncBatchNormConfig* A100Bf16RuntimeBatchNormConfig(const A100Bf16Runtime* runtime);
+const TiledSyncBatchNormWorkspace* A100Bf16RuntimeBatchNormWorkspace(const A100Bf16Runtime* runtime);
+NcclRankContext* A100Bf16RuntimeBatchNormContext(A100Bf16Runtime* runtime);
 
 }  // namespace mgt_cuda

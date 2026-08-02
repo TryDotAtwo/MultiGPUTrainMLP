@@ -144,8 +144,12 @@ mgt::Status LaunchTiledSyncBatchNormForward(
     ForwardPartials<<<dim3((logical + 31) / 32, chunks), kThreads, 0, stream>>>(
         x, rows, c.row_chunk, logical, physical, w.partials);
     ReducePartials<<<(logical + 255) / 256, 256, 0, stream>>>(w.partials, chunks, logical, w.reduced);
+#ifdef MGT_HAS_NCCL
     auto status = NcclAllreduceSumFloat(w.reduced, 2ULL * logical, context, stream);
     if (status != mgt::Status::kOk) return status;
+#else
+    return mgt::Status::kInvalidConfig;
+#endif
     FinalizeMoments<<<(logical + 255) / 256, 256, 0, stream>>>(w.reduced, global_rows,
         logical, momentum, epsilon, running_mean, running_variance, mean, inv);
     if (cudaPeekAtLastError() != cudaSuccess) return mgt::Status::kCudaFailure;
@@ -174,8 +178,12 @@ mgt::Status LaunchTiledSyncBatchNormBackward(
             static_cast<const __nv_bfloat16*>(xhat), rows, c.row_chunk, logical, physical, w.partials);
     else return mgt::Status::kInvalidConfig;
     ReducePartials<<<(logical + 255) / 256, 256, 0, stream>>>(w.partials, chunks, logical, w.reduced);
+#ifdef MGT_HAS_NCCL
     auto status = NcclAllreduceSumFloat(w.reduced, 2ULL * logical, context, stream);
     if (status != mgt::Status::kOk) return status;
+#else
+    return mgt::Status::kInvalidConfig;
+#endif
     CopyAffineGrads<<<(logical + 255) / 256, 256, 0, stream>>>(w.reduced, logical, dgamma, dbeta);
     if (cudaPeekAtLastError() != cudaSuccess) return mgt::Status::kCudaFailure;
     return LaunchBf16BatchNormBackwardEpilogue(upstream, mask, xhat, inv, gamma,

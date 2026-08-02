@@ -13,4 +13,6 @@ mgt::Status QueryA100Bf16RuntimeBatchNormSite(A100Bf16Runtime* runtime,std::uint
 const Bf16BatchNormSitesPlan* A100Bf16RuntimeBatchNormSitesPlan(const A100Bf16Runtime* runtime);
 mgt::Status LaunchA100Bf16BatchNormForwardSite(A100Bf16Runtime* runtime,std::uint32_t site_id,const float* preactivation,const float* mean,const float* inv_std,const float* gamma,const float* beta,const __nv_bfloat16* residual,std::uint32_t active_rows);
 mgt::Status LaunchA100Bf16BatchNormBackwardSite(A100Bf16Runtime* runtime,std::uint32_t site_id,std::uint32_t dz_slot,const float* upstream,const float* inv_std,const float* gamma,const float* global_dgamma,const float* global_dbeta,std::uint32_t active_rows,std::uint32_t global_rows,float* residual_grad);
+mgt::Status LaunchA100TiledSyncBatchNormForwardSite(A100Bf16Runtime*,std::uint32_t,const float*,const __nv_bfloat16*,std::uint32_t,std::uint32_t,const float*,const float*,float*,float*,float,float,float*,float*);
+mgt::Status LaunchA100TiledSyncBatchNormBackwardSite(A100Bf16Runtime*,std::uint32_t,std::uint32_t,const float*,const float*,const float*,float*,float*,std::uint32_t,std::uint32_t,float*);
 } // namespace mgt_cuda

@@ -137,6 +137,7 @@ if(MGT_ENABLE_CUDA)
         cuda/bf16_activation.cu
         cuda/bf16_batch_norm_epilogue.cu
         cuda/bf16_batch_norm_sites.cu
+        cuda/sync_batch_norm_tiled.cu
         cuda/mlp_forward.cu
         cuda/mlp_backward.cu
         cuda/adamw.cu
@@ -227,7 +228,6 @@ if(MGT_ENABLE_CUDA)
         if(NCCL_LIB AND NCCL_INCLUDE_DIR)
             target_sources(mgt_cuda PRIVATE cuda/allreduce_nccl.cu)
             target_sources(mgt_cuda PRIVATE cuda/sync_batch_norm.cu)
-            target_sources(mgt_cuda PRIVATE cuda/sync_batch_norm_tiled.cu)
             target_sources(mgt_cuda PRIVATE cuda/sync_batch_norm_fused_feature.cu)
             target_sources(mgt_cuda PRIVATE cuda/mlp_batch_norm_forward.cu)
             target_sources(mgt_cuda PRIVATE cuda/prepared_p888_train_step.cu)
