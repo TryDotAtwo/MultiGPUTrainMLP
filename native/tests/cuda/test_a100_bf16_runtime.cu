@@ -1,6 +1,7 @@
 #include "mgt/a100_static_arena.hpp"
 #include "mgt_cuda/a100_bf16_runtime.cuh"
 #include "mgt_cuda/bf16_linear_train_ops.cuh"
+#include "mgt_cuda/bf16_batch_norm_sites.cuh"
 
 #include <cstdlib>
 #include <string>
@@ -94,6 +95,9 @@ int main() {
         !mgt_cuda::A100Bf16RuntimeLinearPlan(runtime) || !activation_plan ||
         activation_plan->saved_activation_bf16_count != 12500ULL * (2560ULL + 33ULL * 224ULL))
         return 4;
+    mgt_cuda::Bf16BatchNormSiteView first{},last{};
+    const auto* sites=mgt_cuda::A100Bf16RuntimeBatchNormSitesPlan(runtime);
+    if(!sites||sites->site_count!=34||mgt_cuda::QueryA100Bf16RuntimeBatchNormSite(runtime,0,0,&first)!=mgt::Status::kOk||mgt_cuda::QueryA100Bf16RuntimeBatchNormSite(runtime,33,profile.policy.dz_ring_slots-1,&last)!=mgt::Status::kOk||!first.activation||!last.activation||first.activation==last.activation||mgt_cuda::QueryA100Bf16RuntimeBatchNormSite(runtime,34,0,&last)!=mgt::Status::kInvalidConfig)return 7;
     if (!mgt_cuda::A100Bf16RuntimeHasCommunicators(runtime)) return 6;
     if (mgt_cuda::DestroyA100Bf16Runtime(runtime) != mgt::Status::kOk) return 5;
     return 0;

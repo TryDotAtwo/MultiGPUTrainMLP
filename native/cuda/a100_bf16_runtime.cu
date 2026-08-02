@@ -1,6 +1,7 @@
 #include "mgt_cuda/a100_bf16_runtime.cuh"
 #include "mgt_cuda/allreduce_nccl.cuh"
 #include "mgt_cuda/bf16_linear_train_ops.cuh"
+#include "mgt_cuda/bf16_batch_norm_sites.cuh"
 
 #include <cublasLt.h>
 
@@ -14,7 +15,7 @@ namespace mgt_cuda {
 struct A100Bf16Runtime{
  mgt::P888A100ExecutionProfileV1 profile{};mgt::A100StaticArenaPlanV1 plan{};A100StaticArenaView view{};
  std::array<cudaStream_t,5> streams{};std::array<cudaEvent_t,16> events{};std::array<cublasLtHandle_t,2> lt{};std::array<NcclRankContext*,3> contexts{};P888StepControlV1* control=nullptr;
- mgt::Bf16AlgorithmTable algorithms{};Bf16LinearTrainOpsPlan* linear_plan=nullptr;MlpBatchNormBf16WorkspacePlan activation_plan{};
+ mgt::Bf16AlgorithmTable algorithms{};Bf16LinearTrainOpsPlan* linear_plan=nullptr;MlpBatchNormBf16WorkspacePlan activation_plan{};Bf16BatchNormSitesPlan bn_sites{};
 };
 namespace {
 bool SameHash(const std::array<std::uint8_t,32>&a,const std::array<std::uint8_t,32>&b){return a==b;}
@@ -50,6 +51,7 @@ mgt::Status CreateA100Bf16Runtime(const A100Bf16RuntimeCreateInfo&i,const mgt::A
  for(auto&s:r->streams)if(cudaStreamCreateWithFlags(&s,cudaStreamNonBlocking)!=cudaSuccess){DestroyA100Bf16Runtime(r);return mgt::Status::kCudaFailure;}
  for(auto&e:r->events)if(cudaEventCreateWithFlags(&e,cudaEventDisableTiming)!=cudaSuccess){DestroyA100Bf16Runtime(r);return mgt::Status::kCudaFailure;}
  for(auto&h:r->lt)if(cublasLtCreate(&h)!=CUBLAS_STATUS_SUCCESS){DestroyA100Bf16Runtime(r);return mgt::Status::kCudaFailure;}
+ if(BuildBf16BatchNormSitesPlan({i.arena_info.state_len,i.arena_info.state_value_pad,i.arena_info.hd1,i.arena_info.hd2,i.arena_info.residual_blocks,i.arena_info.output_dim},i.arena_info.hd1,i.arena_info.hd2,i.arena_info.capacity_rows,i.execution_profile->policy.dz_ring_slots,i.execution_profile->policy.xhat_storage,&r->bn_sites)!=mgt::Status::kOk){DestroyA100Bf16Runtime(r);return mgt::Status::kInvalidConfig;}
  if(PrepareLinear(r,i)!=mgt::Status::kOk){DestroyA100Bf16Runtime(r);return mgt::Status::kInvalidConfig;}
 #ifdef MGT_HAS_NCCL
  const char* ids[3]={i.bn_nccl_id_file,i.weight_nccl_id_file,i.metrics_nccl_id_file};
@@ -67,6 +69,7 @@ if(r->linear_plan&&DestroyBf16LinearTrainOpsPlan(r->linear_plan)!=mgt::Status::k
 for(auto h:r->lt)if(h&&cublasLtDestroy(h)!=CUBLAS_STATUS_SUCCESS)result=mgt::Status::kCudaFailure;for(auto e:r->events)if(e&&cudaEventDestroy(e)!=cudaSuccess)result=mgt::Status::kCudaFailure;for(auto s:r->streams)if(s&&cudaStreamDestroy(s)!=cudaSuccess)result=mgt::Status::kCudaFailure;if(r->view.pinned_host_base&&cudaFreeHost(r->view.pinned_host_base)!=cudaSuccess)result=mgt::Status::kCudaFailure;if(r->view.ordinary_base&&cudaFree(r->view.ordinary_base)!=cudaSuccess)result=mgt::Status::kCudaFailure;delete r;return result;}
 mgt::Status QueryA100Bf16RuntimeView(const A100Bf16Runtime*r,A100StaticArenaView*out){if(!r||!out)return mgt::Status::kInvalidConfig;*out=r->view;return mgt::Status::kOk;}
 P888StepControlV1* A100Bf16RuntimeStepControl(A100Bf16Runtime*r){return r?r->control:nullptr;}
+cudaStream_t A100Bf16RuntimeComputeStream(A100Bf16Runtime*r){return r?r->streams[0]:nullptr;}
 }
 
 bool mgt_cuda::A100Bf16RuntimeHasCommunicators(const A100Bf16Runtime*r){
@@ -83,3 +86,4 @@ const mgt_cuda::Bf16LinearTrainOpsPlan* mgt_cuda::A100Bf16RuntimeLinearPlan(
 const mgt_cuda::MlpBatchNormBf16WorkspacePlan* mgt_cuda::A100Bf16RuntimeActivationPlan(const A100Bf16Runtime* runtime) {
     return runtime ? &runtime->activation_plan : nullptr;
 }
+const mgt_cuda::Bf16BatchNormSitesPlan* mgt_cuda::A100Bf16RuntimeBatchNormSitesPlan(const A100Bf16Runtime* runtime){return runtime?&runtime->bn_sites:nullptr;}

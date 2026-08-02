@@ -136,6 +136,7 @@ if(MGT_ENABLE_CUDA)
         cuda/batch_norm_activation.cu
         cuda/bf16_activation.cu
         cuda/bf16_batch_norm_epilogue.cu
+        cuda/bf16_batch_norm_sites.cu
         cuda/mlp_forward.cu
         cuda/mlp_backward.cu
         cuda/adamw.cu
