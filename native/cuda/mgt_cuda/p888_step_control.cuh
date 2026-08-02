@@ -39,6 +39,9 @@ struct P888StepControlV1 {
 mgt::Status InitializeP888StepControl(P888StepControlV1* control,
     std::uint64_t initial_sequence,std::uint64_t initial_optimizer_step,
     std::uint64_t generation_seed);
+mgt::Status LaunchConfigureP888StepControl(P888StepControlV1* control,
+    std::uint32_t active_rows,std::uint32_t global_rows,std::uint64_t global_offset,
+    cudaStream_t stream);
 mgt::Status LaunchBeginP888StepControl(P888StepControlV1* control,
     A100LocalGraphSlot slot,cudaStream_t stream);
 mgt::Status LaunchCommitP888StepControl(P888StepControlV1* control,cudaStream_t stream);

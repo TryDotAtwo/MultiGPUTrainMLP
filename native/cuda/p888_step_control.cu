@@ -3,6 +3,10 @@
 #include <limits>
 
 namespace {
+__global__ void Configure(mgt_cuda::P888StepControlV1* c,std::uint32_t active,std::uint32_t global,std::uint64_t offset){
+ if(blockIdx.x||threadIdx.x||c->fatal_health)return;
+ c->active_rows=active;c->global_rows=global;c->global_offset=offset;
+}
 __global__ void Begin(mgt_cuda::P888StepControlV1* c,std::uint32_t slot){
  if(blockIdx.x||threadIdx.x)return;
  if(c->fatal_health)return;
@@ -20,5 +24,7 @@ __global__ void Commit(mgt_cuda::P888StepControlV1* c){
 }
 }
 mgt::Status mgt_cuda::InitializeP888StepControl(P888StepControlV1* c,std::uint64_t seq,std::uint64_t step,std::uint64_t seed){if(!c||!seed)return mgt::Status::kInvalidConfig;P888StepControlV1 h{};h.schema_version=1;h.committed_sequence=seq;h.committed_optimizer_step=step;h.inflight_sequence=seq;h.inflight_optimizer_step=step;h.generation_seed=seed;return cudaMemcpy(c,&h,sizeof(h),cudaMemcpyHostToDevice)==cudaSuccess?mgt::Status::kOk:mgt::Status::kCudaFailure;}
+mgt::Status mgt_cuda::LaunchConfigureP888StepControl(P888StepControlV1* c,std::uint32_t active,std::uint32_t global,std::uint64_t offset,cudaStream_t s){if(!c||!s||!active||global<active||offset>global-active)return mgt::Status::kInvalidConfig;Configure<<<1,1,0,s>>>(c,active,global,offset);return cudaPeekAtLastError()==cudaSuccess?mgt::Status::kOk:mgt::Status::kCudaFailure;}
+
 mgt::Status mgt_cuda::LaunchBeginP888StepControl(P888StepControlV1* c,A100LocalGraphSlot slot,cudaStream_t s){if(!c||!s||(slot!=A100LocalGraphSlot::kFull&&slot!=A100LocalGraphSlot::kTail))return mgt::Status::kInvalidConfig;Begin<<<1,1,0,s>>>(c,(std::uint32_t)slot);return cudaPeekAtLastError()==cudaSuccess?mgt::Status::kOk:mgt::Status::kCudaFailure;}
 mgt::Status mgt_cuda::LaunchCommitP888StepControl(P888StepControlV1* c,cudaStream_t s){if(!c||!s)return mgt::Status::kInvalidConfig;Commit<<<1,1,0,s>>>(c);return cudaPeekAtLastError()==cudaSuccess?mgt::Status::kOk:mgt::Status::kCudaFailure;}

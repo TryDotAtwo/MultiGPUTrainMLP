@@ -2,7 +2,9 @@
 
 #include "mgt/batch_norm_training.hpp"
 #include "mgt/static_contracts.hpp"
+#include "mgt_cuda/a100_bf16_runtime.cuh"
 #include "mgt_cuda/adamw.cuh"
+#include "mgt_cuda/bf16_residual_stack.cuh"
 #include "mgt_cuda/mlp_batch_norm_forward.cuh"
 
 #include <array>
@@ -41,6 +43,15 @@ struct PreparedP888StrictRuntimeCreateInfo {
     std::array<const float*, 2> label_slots{};
 };
 
+struct PreparedP888Bf16RuntimeCreateInfo {
+    A100Bf16Runtime* runtime = nullptr;
+    Bf16ResidualStackBindings residual_stack{};
+    const float* output_upstream = nullptr;
+    std::uint32_t capacity_rows = 0;
+    const std::uint32_t* supported_active_rows = nullptr;
+    std::uint32_t supported_active_row_count = 0;
+};
+
 struct PreparedP888TrainRuntime;
 
 mgt::Status QueryPreparedP888StrictRuntimeBytes(
@@ -48,6 +59,9 @@ mgt::Status QueryPreparedP888StrictRuntimeBytes(
     std::uint64_t* bytes);
 mgt::Status CreatePreparedP888StrictRuntime(
     const PreparedP888StrictRuntimeCreateInfo& info,
+    PreparedP888TrainRuntime** out);
+mgt::Status CreatePreparedP888Bf16Runtime(
+    const PreparedP888Bf16RuntimeCreateInfo& info,
     PreparedP888TrainRuntime** out);
 mgt::Status DestroyPreparedP888TrainRuntime(PreparedP888TrainRuntime* runtime);
 mgt::Status LaunchPreparedP888TrainStep(
