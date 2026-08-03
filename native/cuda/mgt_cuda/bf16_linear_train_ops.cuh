@@ -37,6 +37,16 @@ mgt::Status CreateBf16LinearTrainOpsPlan(
     const mgt::Bf16AlgorithmTable& algorithms,
     const A100StaticArenaView& arena,
     Bf16LinearTrainOpsPlan** out);
+mgt::Status CreateBf16LinearTrainOpsPlanInWorkspace(
+    const Bf16LinearProblem* problems,
+    std::uint32_t problem_count,
+    std::uint32_t device_id,
+    cublasLtHandle_t handle,
+    const mgt::Bf16AlgorithmTable& algorithms,
+    const A100StaticArenaView& arena,
+    std::uint64_t workspace_offset,
+    std::uint64_t workspace_bytes,
+    Bf16LinearTrainOpsPlan** out);
 mgt::Status DestroyBf16LinearTrainOpsPlan(Bf16LinearTrainOpsPlan* plan);
 mgt::Status LaunchBf16LinearForwardToFloat(
     const Bf16LinearTrainOpsPlan* plan, Bf16LinearProblem problem,

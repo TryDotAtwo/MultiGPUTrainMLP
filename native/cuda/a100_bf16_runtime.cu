@@ -17,7 +17,7 @@ namespace mgt_cuda {
 struct A100Bf16Runtime{
  mgt::P888A100ExecutionProfileV1 profile{};mgt::A100StaticArenaPlanV1 plan{};A100StaticArenaView view{};
  std::array<cudaStream_t,5> streams{};std::array<cudaEvent_t,16> events{};std::array<cublasLtHandle_t,2> lt{};std::array<NcclRankContext*,3> contexts{};P888StepControlV1* control=nullptr;
- mgt::Bf16AlgorithmTable algorithms{};Bf16LinearTrainOpsPlan* linear_plan=nullptr;InputEmbeddingBf16Plan* input_plan=nullptr;MlpBatchNormBf16WorkspacePlan activation_plan{};Bf16BatchNormSitesPlan bn_sites{};TiledSyncBatchNormConfig bn_config{};TiledSyncBatchNormWorkspace bn_workspace{};float*preactivation_scratch=nullptr;float*grad_input_scratch=nullptr;
+ mgt::Bf16AlgorithmTable algorithms{};Bf16LinearTrainOpsPlan* linear_plan=nullptr;Bf16LinearTrainOpsPlan* weight_linear_plan=nullptr;InputEmbeddingBf16Plan* input_plan=nullptr;MlpBatchNormBf16WorkspacePlan activation_plan{};Bf16BatchNormSitesPlan bn_sites{};TiledSyncBatchNormConfig bn_config{};TiledSyncBatchNormWorkspace bn_workspace{};float*preactivation_scratch=nullptr;float*grad_input_scratch=nullptr;
 };
 namespace {
 bool SameHash(const std::array<std::uint8_t,32>&a,const std::array<std::uint8_t,32>&b){return a==b;}
@@ -38,7 +38,11 @@ mgt::Status PrepareLinear(A100Bf16Runtime*r,const A100Bf16RuntimeCreateInfo&i){
  std::string hash;if(mgt::CanonicalBf16AlgorithmTableSha256(r->algorithms,&hash)!=mgt::Status::kOk||hash!=Hex(i.execution_profile->policy.algorithm_table_sha256))return mgt::Status::kInvalidConfig;
  std::vector<Bf16LinearProblem> problems;problems.reserve(i.execution_profile->active_rows.size()*33U);
  for(auto rows:i.execution_profile->active_rows){problems.push_back({rows,2,rows,2560,224});for(std::uint32_t site=3;site<=34;++site)problems.push_back({rows,site,rows,224,224});}
- return CreateBf16LinearTrainOpsPlan(problems.data(),static_cast<std::uint32_t>(problems.size()),i.device_id,r->lt[0],r->algorithms,r->view,&r->linear_plan);
+ const auto*workspace=Find(r->plan,mgt::A100ArenaSliceKind::kLtWorkspace);if(!workspace)return mgt::Status::kInvalidConfig;
+ if(i.execution_profile->policy.dw_dx_schedule==mgt::A100DwDxSchedule::kSerial)return CreateBf16LinearTrainOpsPlan(problems.data(),static_cast<std::uint32_t>(problems.size()),i.device_id,r->lt[0],r->algorithms,r->view,&r->linear_plan);
+ const std::uint64_t half=(workspace->bytes/2ULL)&~std::uint64_t{255};if(!half||workspace->bytes-half<half)return mgt::Status::kInvalidConfig;
+ status=CreateBf16LinearTrainOpsPlanInWorkspace(problems.data(),static_cast<std::uint32_t>(problems.size()),i.device_id,r->lt[0],r->algorithms,r->view,0,half,&r->linear_plan);if(status!=mgt::Status::kOk)return status;
+ return CreateBf16LinearTrainOpsPlanInWorkspace(problems.data(),static_cast<std::uint32_t>(problems.size()),i.device_id,r->lt[1],r->algorithms,r->view,half,workspace->bytes-half,&r->weight_linear_plan);
 }
 mgt::Status Validate(const A100Bf16RuntimeCreateInfo&i,const mgt::A100StaticArenaPlanV1&p){
  if(!i.execution_profile||i.arena_info.profile!=i.execution_profile||!i.world||i.rank>=i.world||i.world!=i.execution_profile->world||mgt::ValidateP888A100ExecutionProfile(*i.execution_profile,i.profile_use)!=mgt::Status::kOk||mgt::ValidateA100StaticArenaPlan(p)!=mgt::Status::kOk||!SameHash(p.layout_sha256,i.execution_profile->arena_layout_sha256)||p.ordinary_bytes!=i.execution_profile->ordinary_arena_bytes||p.symmetric_bytes!=i.execution_profile->symmetric_arena_bytes||p.pinned_host_bytes!=i.execution_profile->pinned_host_bytes)return mgt::Status::kInvalidConfig;
@@ -52,8 +56,10 @@ mgt::Status CreateA100Bf16Runtime(const A100Bf16RuntimeCreateInfo&i,const mgt::A
  if(!out)return mgt::Status::kInvalidConfig;*out=nullptr;auto status=Validate(i,p);if(status!=mgt::Status::kOk)return status;auto*r=new(std::nothrow)A100Bf16Runtime;if(!r)return mgt::Status::kCapacityExceeded;r->profile=*i.execution_profile;r->plan=p;if(PrepareActivation(r,i)!=mgt::Status::kOk){delete r;return mgt::Status::kInvalidConfig;}r->view.plan=&r->plan;r->view.ordinary_bytes=p.ordinary_bytes;r->view.pinned_host_bytes=p.pinned_host_bytes;
  if(cudaMalloc(&r->view.ordinary_base,p.ordinary_bytes)!=cudaSuccess||cudaHostAlloc(&r->view.pinned_host_base,p.pinned_host_bytes,cudaHostAllocPortable)!=cudaSuccess){DestroyA100Bf16Runtime(r);return mgt::Status::kCudaFailure;}
  const auto*bn_scratch=Find(r->plan,mgt::A100ArenaSliceKind::kScratchFp32);if(!bn_scratch){DestroyA100Bf16Runtime(r);return mgt::Status::kInvalidConfig;}auto*bn_base=static_cast<std::uint8_t*>(r->view.ordinary_base)+bn_scratch->offset;const std::uint64_t matrix_floats=static_cast<std::uint64_t>(i.arena_info.capacity_rows)*std::max(i.arena_info.hd1,i.arena_info.hd2);r->preactivation_scratch=reinterpret_cast<float*>(bn_base);r->grad_input_scratch=r->preactivation_scratch+matrix_floats;r->bn_workspace.partials=r->grad_input_scratch+matrix_floats;r->bn_workspace.reduced=r->bn_workspace.partials+r->bn_workspace.partial_count;
- for(auto&s:r->streams)if(cudaStreamCreateWithFlags(&s,cudaStreamNonBlocking)!=cudaSuccess){DestroyA100Bf16Runtime(r);return mgt::Status::kCudaFailure;}
+ int least_priority=0,greatest_priority=0;if(cudaDeviceGetStreamPriorityRange(&least_priority,&greatest_priority)!=cudaSuccess){DestroyA100Bf16Runtime(r);return mgt::Status::kCudaFailure;}
+ for(std::size_t n=0;n<r->streams.size();++n){const int priority=n==0?greatest_priority:(n==1?least_priority:0);if(cudaStreamCreateWithPriority(&r->streams[n],cudaStreamNonBlocking,priority)!=cudaSuccess){DestroyA100Bf16Runtime(r);return mgt::Status::kCudaFailure;}}
  for(auto&e:r->events)if(cudaEventCreateWithFlags(&e,cudaEventDisableTiming)!=cudaSuccess){DestroyA100Bf16Runtime(r);return mgt::Status::kCudaFailure;}
+ for(std::uint32_t slot=0;slot<2;++slot)if(cudaEventRecord(r->events[2+slot],r->streams[0])!=cudaSuccess){DestroyA100Bf16Runtime(r);return mgt::Status::kCudaFailure;}
  for(auto&h:r->lt)if(cublasLtCreate(&h)!=CUBLAS_STATUS_SUCCESS){DestroyA100Bf16Runtime(r);return mgt::Status::kCudaFailure;}
  if(BuildBf16BatchNormSitesPlan({i.arena_info.state_len,i.arena_info.state_value_pad,i.arena_info.hd1,i.arena_info.hd2,i.arena_info.residual_blocks,i.arena_info.output_dim},i.arena_info.hd1,i.arena_info.hd2,i.arena_info.capacity_rows,i.execution_profile->policy.dz_ring_slots,i.execution_profile->policy.xhat_storage,&r->bn_sites)!=mgt::Status::kOk){DestroyA100Bf16Runtime(r);return mgt::Status::kInvalidConfig;}
  if(PrepareLinear(r,i)!=mgt::Status::kOk){DestroyA100Bf16Runtime(r);return mgt::Status::kInvalidConfig;}
@@ -70,6 +76,7 @@ mgt::Status CreateA100Bf16Runtime(const A100Bf16RuntimeCreateInfo&i,const mgt::A
 }
 mgt::Status DestroyA100Bf16Runtime(A100Bf16Runtime*r){if(!r)return mgt::Status::kInvalidConfig;mgt::Status result=mgt::Status::kOk;for(auto s:r->streams)if(s&&cudaStreamSynchronize(s)!=cudaSuccess)result=mgt::Status::kCudaFailure;
 if(r->input_plan&&DestroyInputEmbeddingBf16Plan(r->input_plan)!=mgt::Status::kOk)result=mgt::Status::kCudaFailure;
+if(r->weight_linear_plan&&DestroyBf16LinearTrainOpsPlan(r->weight_linear_plan)!=mgt::Status::kOk)result=mgt::Status::kCudaFailure;
 if(r->linear_plan&&DestroyBf16LinearTrainOpsPlan(r->linear_plan)!=mgt::Status::kOk)result=mgt::Status::kCudaFailure;
 #ifdef MGT_HAS_NCCL
  for(auto c:r->contexts)if(c&&DestroyNcclRankContext(c)!=mgt::Status::kOk)result=mgt::Status::kNcclFailure;
@@ -95,6 +102,11 @@ const mgt_cuda::InputEmbeddingBf16Plan* mgt_cuda::A100Bf16RuntimeInputEmbeddingP
 const mgt_cuda::MlpBatchNormBf16WorkspacePlan* mgt_cuda::A100Bf16RuntimeActivationPlan(const A100Bf16Runtime* runtime) {
     return runtime ? &runtime->activation_plan : nullptr;
 }
+const mgt_cuda::Bf16LinearTrainOpsPlan* mgt_cuda::A100Bf16RuntimeWeightLinearPlan(const A100Bf16Runtime*r){return r?r->weight_linear_plan:nullptr;}
+cudaStream_t mgt_cuda::A100Bf16RuntimeWeightStream(A100Bf16Runtime*r){return r?r->streams[1]:nullptr;}
+cudaEvent_t mgt_cuda::A100Bf16RuntimeDzReadyEvent(A100Bf16Runtime*r,std::uint32_t slot){return r&&slot<2?r->events[slot]:nullptr;}
+cudaEvent_t mgt_cuda::A100Bf16RuntimeDzReuseEvent(A100Bf16Runtime*r,std::uint32_t slot){return r&&slot<2?r->events[2+slot]:nullptr;}
+mgt::A100DwDxSchedule mgt_cuda::A100Bf16RuntimeDwDxSchedule(const A100Bf16Runtime*r){return r?r->profile.policy.dw_dx_schedule:mgt::A100DwDxSchedule::kSerial;}
 const mgt_cuda::Bf16BatchNormSitesPlan* mgt_cuda::A100Bf16RuntimeBatchNormSitesPlan(const A100Bf16Runtime* runtime){return runtime?&runtime->bn_sites:nullptr;}
 
 const mgt_cuda::TiledSyncBatchNormConfig* mgt_cuda::A100Bf16RuntimeBatchNormConfig(const A100Bf16Runtime*r){return r?&r->bn_config:nullptr;}

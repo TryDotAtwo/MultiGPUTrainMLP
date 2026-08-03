@@ -234,6 +234,19 @@ mgt::Status CreateBf16LinearTrainOpsPlan(
     std::uint32_t device_id, cublasLtHandle_t handle,
     const mgt::Bf16AlgorithmTable& algorithms, const A100StaticArenaView& arena,
     Bf16LinearTrainOpsPlan** out) {
+    const auto* workspace_slice = FindLtWorkspace(arena);
+    if (workspace_slice == nullptr) return mgt::Status::kInvalidConfig;
+    return CreateBf16LinearTrainOpsPlanInWorkspace(
+        problems, problem_count, device_id, handle, algorithms, arena, 0,
+        workspace_slice->bytes, out);
+}
+
+mgt::Status CreateBf16LinearTrainOpsPlanInWorkspace(
+    const Bf16LinearProblem* problems, std::uint32_t problem_count,
+    std::uint32_t device_id, cublasLtHandle_t handle,
+    const mgt::Bf16AlgorithmTable& algorithms, const A100StaticArenaView& arena,
+    std::uint64_t workspace_offset, std::uint64_t workspace_bytes,
+    Bf16LinearTrainOpsPlan** out) {
     if (out == nullptr) return mgt::Status::kInvalidConfig;
     *out = nullptr;
     if (problems == nullptr || problem_count == 0 || handle == nullptr ||
@@ -244,11 +257,14 @@ mgt::Status CreateBf16LinearTrainOpsPlan(
     if (cudaGetDevice(&current_device) != cudaSuccess) return mgt::Status::kCudaFailure;
     if (current_device != static_cast<int>(device_id)) return mgt::Status::kInvalidConfig;
     const auto* workspace_slice = FindLtWorkspace(arena);
-    if (workspace_slice == nullptr || workspace_slice->bytes == 0 ||
+    if (workspace_slice == nullptr || workspace_bytes == 0 ||
         workspace_slice->offset > arena.ordinary_bytes ||
-        workspace_slice->bytes > arena.ordinary_bytes - workspace_slice->offset)
+        workspace_slice->bytes > arena.ordinary_bytes - workspace_slice->offset ||
+        workspace_offset > workspace_slice->bytes ||
+        workspace_bytes > workspace_slice->bytes - workspace_offset)
         return mgt::Status::kInvalidConfig;
-    void* workspace = static_cast<std::uint8_t*>(arena.ordinary_base) + workspace_slice->offset;
+    void* workspace = static_cast<std::uint8_t*>(arena.ordinary_base) +
+                      workspace_slice->offset + workspace_offset;
     if (reinterpret_cast<std::uintptr_t>(workspace) % 256 != 0)
         return mgt::Status::kInvalidConfig;
 
@@ -266,14 +282,14 @@ mgt::Status CreateBf16LinearTrainOpsPlan(
         Bf16LinearTrainOpsPlan::Entry entry{};
         entry.problem = problems[i];
         auto status = PrepareOne(handle, algorithms, entry.problem, ForwardRole(entry.problem.site_id),
-                                 workspace, workspace_slice->bytes, &entry.forward);
+                                 workspace, workspace_bytes, &entry.forward);
         if (status == mgt::Status::kOk)
             status = PrepareOne(handle, algorithms, entry.problem, mgt::Bf16GemmRole::kGradWeight,
-                                workspace, workspace_slice->bytes, &entry.grad_weight);
+                                workspace, workspace_bytes, &entry.grad_weight);
         const auto dx_role = mgt::Bf16GemmRole::kGradInput;
         if (status == mgt::Status::kOk)
             status = PrepareOne(handle, algorithms, entry.problem, dx_role,
-                                workspace, workspace_slice->bytes, &entry.grad_input_zero);
+                                workspace, workspace_bytes, &entry.grad_input_zero);
         plan->entries.push_back(entry);
         if (status != mgt::Status::kOk) {
             DestroyBf16LinearTrainOpsPlan(plan);
