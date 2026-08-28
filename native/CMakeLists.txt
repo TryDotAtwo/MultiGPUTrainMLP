@@ -140,6 +140,7 @@ if(MGT_ENABLE_CUDA)
         cuda/batch_norm.cu
         cuda/local_batch_norm.cu
         cuda/local_mlp_batch_norm.cu
+        cuda/single_gpu_trainer.cu
         cuda/batch_norm_activation.cu
         cuda/bf16_activation.cu
         cuda/bf16_batch_norm_epilogue.cu
@@ -165,6 +166,11 @@ if(MGT_ENABLE_CUDA)
     target_link_libraries(test_local_mlp_batch_norm_full_step PRIVATE mgt_cuda)
     add_test(NAME local_mlp_batch_norm_full_step
         COMMAND test_local_mlp_batch_norm_full_step)
+    add_executable(test_single_gpu_trainer_lifecycle
+        tests/cuda/test_single_gpu_trainer_lifecycle.cu)
+    target_link_libraries(test_single_gpu_trainer_lifecycle PRIVATE mgt_cuda)
+    add_test(NAME single_gpu_trainer_lifecycle
+        COMMAND test_single_gpu_trainer_lifecycle)
     target_include_directories(mgt_cuda PUBLIC include cuda)
     target_link_libraries(mgt_cuda PUBLIC mgt_core CUDA::cublas CUDA::cublasLt)
     find_path(CUTLASS_INCLUDE_DIR cutlass/cutlass.h PATHS

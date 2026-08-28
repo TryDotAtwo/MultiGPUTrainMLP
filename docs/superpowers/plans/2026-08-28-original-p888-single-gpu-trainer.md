@@ -166,7 +166,7 @@ ctest --test-dir /tmp/mgt-single-sm86 -R '^(local_batch_norm|mlp_batch_norm_full
 
 Expected: both tests pass. Then run `rg -n 'Nccl|nccl' native/cuda/local_batch_norm.cu native/cuda/local_mlp_batch_norm.cu`; expected: no output.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add native/cuda/mgt_cuda/local_batch_norm.cuh native/cuda/local_batch_norm.cu native/cuda/mgt_cuda/local_mlp_batch_norm.cuh native/cuda/local_mlp_batch_norm.cu native/tests/cuda/test_local_batch_norm.cu native/CMakeLists.txt
@@ -185,7 +185,7 @@ git commit -m "perf: add collective free single gpu batchnorm"
 - Produces opaque `mgt_cuda::SingleGpuTrainer`.
 - Produces `QuerySingleGpuTrainerBytes`, `CreateSingleGpuTrainer`, `PrepareSingleGpuTrainer`, `LaunchSingleGpuTrainStep`, `ReadSingleGpuMetrics`, and `DestroySingleGpuTrainer`.
 
-- [ ] **Step 1: Write failing lifecycle tests**
+- [x] **Step 1: Write failing lifecycle tests**
 
 Test invalid device, zero capacity, wrong contract schema, physical-width mismatch, double prepare, step before prepare, capacity overflow, monotonically increasing optimizer step, and double destroy through a pointer-to-pointer helper.
 
@@ -197,17 +197,17 @@ CHECK(mgt_cuda::LaunchSingleGpuTrainStep(trainer, request, &ticket)
 CHECK(mgt_cuda::PrepareSingleGpuTrainer(trainer) == mgt::Status::kOk);
 ```
 
-- [ ] **Step 2: Run RED through the queue**
+- [x] **Step 2: Run RED through the queue**
 
 Run: build `test_single_gpu_trainer_lifecycle` in `/tmp/mgt-single-sm86`.
 
 Expected: FAIL because the runtime API is absent.
 
-- [ ] **Step 3: Implement one persistent arena**
+- [x] **Step 3: Implement one persistent arena**
 
 `CreateSingleGpuTrainer` computes checked byte offsets for weights, gradients, Adam moments, BN affine/running state, states, labels, forward workspace, backward workspace, loss, and metrics. It performs one `cudaMalloc` for the arena and creates streams/events/cuBLAS handles. `PrepareSingleGpuTrainer` uploads immutable state, initializes selected library plans, and runs warmups. `LaunchSingleGpuTrainStep` performs no allocation and accepts only `active_rows <= capacity_rows`.
 
-- [ ] **Step 4: Instrument allocation prohibition**
+- [x] **Step 4: Instrument allocation prohibition**
 
 Expose a test-only allocation counter incremented by the runtime allocation wrapper. Record its value after prepare; assert it is unchanged after three steps. Assert no `cudaDeviceSynchronize` exists in `single_gpu_trainer.cu` with:
 
@@ -215,7 +215,7 @@ Expose a test-only allocation counter incremented by the runtime allocation wrap
 ! rg 'cudaDeviceSynchronize' native/cuda/single_gpu_trainer.cu
 ```
 
-- [ ] **Step 5: Run GREEN**
+- [x] **Step 5: Run GREEN**
 
 Run through the queue:
 

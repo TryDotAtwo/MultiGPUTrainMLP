@@ -4,6 +4,11 @@
 
 namespace mgt_cuda {
 
+std::uint64_t MlpBatchNormParameterCount(const CudaMlpShape& shape) {
+    return ValidateCudaMlpShape(shape) == mgt::Status::kOk
+        ? OB(shape) + shape.output_dim : 0;
+}
+
 mgt::Status LaunchLocalMlpBatchNormTrainStep(
     const CudaMlpShape& shape,
     std::uint32_t logical_hd1,

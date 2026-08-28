@@ -4,6 +4,8 @@
 
 namespace mgt_cuda {
 
+std::uint64_t MlpBatchNormParameterCount(const CudaMlpShape& physical_shape);
+
 mgt::Status LaunchLocalMlpBatchNormTrainStep(
     const CudaMlpShape& physical_shape,
     std::uint32_t logical_hd1,
