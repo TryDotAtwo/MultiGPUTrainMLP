@@ -130,7 +130,7 @@ git commit -m "test: freeze original p888 single gpu contract"
 - Produces: `LaunchLocalStridedBatchNormBackward(...) -> mgt::Status`.
 - Produces: `LaunchLocalMlpBatchNormTrainStep(...) -> mgt::Status`, implemented in an object file with no `NcclRankContext` or NCCL reference.
 
-- [ ] **Step 1: Write a failing local-BN parity test**
+- [x] **Step 1: Write a failing local-BN parity test**
 
 Use four rows, three logical columns, stride four, nontrivial gamma/beta, and the existing CPU fixture. Assert forward output, mean, inverse standard deviation, `dx`, `dgamma`, `dbeta`, running mean/variance, and a zero fourth padding lane.
 
@@ -141,7 +141,7 @@ CHECK(mgt_cuda::LaunchLocalStridedBatchNormForward(
     == mgt::Status::kOk);
 ```
 
-- [ ] **Step 2: Run RED through the GPU queue**
+- [x] **Step 2: Run RED through the GPU queue**
 
 Run:
 
@@ -151,11 +151,11 @@ docker exec mgt-gpu-queue python3 scripts/gpu_queue_submit.py --label single-loc
 
 Expected: FAIL because the target/API is absent.
 
-- [ ] **Step 3: Implement local reductions**
+- [x] **Step 3: Implement local reductions**
 
 Reuse the existing strided local-moment and local-gradient math, but finalize device-local workspace directly. Do not create a communicator and do not call `ncclAllReduce`. Implement the local original-model orchestration in `local_mlp_batch_norm.cu`; route every BN site locally and omit parameter-gradient collectives entirely.
 
-- [ ] **Step 4: Prove parity and absence of NCCL calls**
+- [x] **Step 4: Prove parity and absence of NCCL calls**
 
 Run through the queue:
 

@@ -138,6 +138,8 @@ if(MGT_ENABLE_CUDA)
         cuda/device_context.cu
         cuda/random_walk_kernel.cu
         cuda/batch_norm.cu
+        cuda/local_batch_norm.cu
+        cuda/local_mlp_batch_norm.cu
         cuda/batch_norm_activation.cu
         cuda/bf16_activation.cu
         cuda/bf16_batch_norm_epilogue.cu
@@ -154,6 +156,15 @@ if(MGT_ENABLE_CUDA)
         cuda/input_embedding_bf16.cu
         cuda/bf16_fixed_gemm_plan.cu
     )
+
+    add_executable(test_local_batch_norm tests/cuda/test_local_batch_norm.cu)
+    target_link_libraries(test_local_batch_norm PRIVATE mgt_cuda)
+    add_test(NAME local_batch_norm COMMAND test_local_batch_norm)
+    add_executable(test_local_mlp_batch_norm_full_step
+        tests/cuda/test_local_mlp_batch_norm_full_step.cu)
+    target_link_libraries(test_local_mlp_batch_norm_full_step PRIVATE mgt_cuda)
+    add_test(NAME local_mlp_batch_norm_full_step
+        COMMAND test_local_mlp_batch_norm_full_step)
     target_include_directories(mgt_cuda PUBLIC include cuda)
     target_link_libraries(mgt_cuda PUBLIC mgt_core CUDA::cublas CUDA::cublasLt)
     find_path(CUTLASS_INCLUDE_DIR cutlass/cutlass.h PATHS

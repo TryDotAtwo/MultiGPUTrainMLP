@@ -1,5 +1,23 @@
+#ifdef MGT_LOCAL_MLP_IMPLEMENTATION
+#define MlpBatchNormForwardWorkspaceFloats LocalMlpBatchNormForwardWorkspaceFloatsImpl
+#define LaunchMlpBatchNormForward LaunchLocalMlpBatchNormForwardImpl
+#define LaunchMlpBatchNormOutputLossGrad LaunchLocalMlpBatchNormOutputLossGradImpl
+#define LaunchMlpBatchNormResidualFc2Backward LaunchLocalMlpBatchNormResidualFc2BackwardImpl
+#define LaunchMlpBatchNormResidualStackBackward LaunchLocalMlpBatchNormResidualStackBackwardImpl
+#define LaunchMlpBatchNormHiddenBackward LaunchLocalMlpBatchNormHiddenBackwardImpl
+#define LaunchMlpBatchNormInputBackward LaunchLocalMlpBatchNormInputBackwardImpl
+#define LaunchMlpBatchNormAdamStep LaunchLocalMlpBatchNormAdamStepImpl
+#define LaunchMlpBatchNormTrainStep LaunchLocalMlpBatchNormTrainStepImpl
+#define MGT_STRICT_INPUT_BACKWARD LaunchLocalMlpBatchNormInputBackwardStrictLegacy
+#else
+#define MGT_STRICT_INPUT_BACKWARD LaunchMlpBatchNormInputBackwardStrictLegacy
+#endif
 #include "mgt_cuda/mlp_batch_norm_forward.cuh"
+#ifdef MGT_LOCAL_MLP_IMPLEMENTATION
+#include "mgt_cuda/local_batch_norm.cuh"
+#else
 #include "mgt_cuda/allreduce_nccl.cuh"
+#endif
 #include "batch_norm_activation.cuh"
 #include "mgt_cuda/sync_batch_norm_selector.cuh"
 #include <algorithm>
@@ -8,6 +26,38 @@
 #include <cstdlib>
 #include <cstring>
 namespace mgt_cuda { namespace {
+#ifdef MGT_LOCAL_MLP_IMPLEMENTATION
+NcclRankContext* LocalBackendContext() {
+    return reinterpret_cast<NcclRankContext*>(1);
+}
+mgt::Status LocalNoopAllreduce(float*, std::uint64_t, NcclRankContext*, cudaStream_t) {
+    return mgt::Status::kOk;
+}
+mgt::Status LocalBnForward(
+    const float* x, int rows, int global_rows, int cols, int stride,
+    const float* gamma, const float* beta, float* running_mean,
+    float* running_var, float momentum, float epsilon, float* y, float* mean,
+    float* inv_std, float* normalized, float* scratch, NcclRankContext*,
+    cudaStream_t stream) {
+    if (rows != global_rows) return mgt::Status::kInvalidConfig;
+    return LaunchLocalStridedBatchNormForward(
+        x, rows, cols, stride, gamma, beta, running_mean, running_var,
+        momentum, epsilon, y, mean, inv_std, normalized, scratch, stream);
+}
+mgt::Status LocalBnBackward(
+    const float* dy, int rows, int global_rows, int cols, int stride,
+    const float* gamma, const float* inv_std, const float* normalized,
+    float* dx, float* dgamma, float* dbeta, float* scratch,
+    NcclRankContext*, cudaStream_t stream) {
+    if (rows != global_rows) return mgt::Status::kInvalidConfig;
+    return LaunchLocalStridedBatchNormBackward(
+        dy, rows, cols, stride, gamma, inv_std, normalized, dx, dgamma,
+        dbeta, scratch, stream);
+}
+#define NcclAllreduceSumFloat LocalNoopAllreduce
+#define LaunchSelectedStridedSyncBatchNormForward LocalBnForward
+#define LaunchSelectedStridedSyncBatchNormBackward LocalBnBackward
+#endif
 constexpr unsigned T=256;
 __host__ __device__ std::uint64_t RB(CudaMlpShape s){return 2ULL*(static_cast<std::uint64_t>(s.hd2)*s.hd2+s.hd2);}__host__ __device__ std::uint64_t IB(CudaMlpShape s){return static_cast<std::uint64_t>(s.state_len)*s.state_value_pad*s.hd1;}__host__ __device__ std::uint64_t HW(CudaMlpShape s){return IB(s)+s.hd1;}__host__ __device__ std::uint64_t HB(CudaMlpShape s){return HW(s)+static_cast<std::uint64_t>(s.hd1)*s.hd2;}__host__ __device__ std::uint64_t R0(CudaMlpShape s){return HB(s)+s.hd2;}__host__ __device__ std::uint64_t OW(CudaMlpShape s){return R0(s)+static_cast<std::uint64_t>(s.residual_blocks)*RB(s);}__host__ __device__ std::uint64_t OB(CudaMlpShape s){return OW(s)+static_cast<std::uint64_t>(s.hd2)*s.output_dim;}__host__ __device__ std::uint64_t F1W(CudaMlpShape s,unsigned b){return R0(s)+static_cast<std::uint64_t>(b)*RB(s);}__host__ __device__ std::uint64_t F1B(CudaMlpShape s,unsigned b){return F1W(s,b)+static_cast<std::uint64_t>(s.hd2)*s.hd2;}__host__ __device__ std::uint64_t F2W(CudaMlpShape s,unsigned b){return F1B(s,b)+s.hd2;}__host__ __device__ std::uint64_t F2B(CudaMlpShape s,unsigned b){return F2W(s,b)+static_cast<std::uint64_t>(s.hd2)*s.hd2;}
 __global__ void Input(CudaMlpShape s,unsigned logical,const float*w,const mgt::TrainStateStorage*states,unsigned rows,float*out){unsigned q=blockIdx.x*blockDim.x+threadIdx.x;if(q>=rows*s.hd1)return;unsigned r=q/s.hd1,h=q-r*s.hd1;if(h>=logical){out[q]=0;return;}float v=w[IB(s)+h];for(unsigned p=0;p<s.state_len;p++)v+=w[(static_cast<std::uint64_t>(p)*s.state_value_pad+states[r].v[p])*s.hd1+h];out[q]=v;}
@@ -219,9 +269,17 @@ static mgt::Status ResidualFc2Impl(const CudaMlpShape&s,const float*w,const floa
 mgt::Status LaunchMlpBatchNormResidualFc2Backward(const CudaMlpShape&s,const float*w,const float*aff,std::uint32_t b,std::uint32_t lr,std::uint32_t gr,float*fw,const mgt::BatchNormTrainingPlan&p,float*block_grad,float*weight_grad,float*affine_grad,float*d_fc1,float*d_residual,NcclRankContext*ctx,cublasHandle_t blas,cudaStream_t st){return ResidualFc2Impl(s,w,aff,b,lr,gr,fw,p,block_grad,weight_grad,affine_grad,d_fc1,d_residual,ctx,blas,st,true);}
 static mgt::Status ResidualFc1Impl(const CudaMlpShape&s,const float*w,const float*aff,std::uint32_t b,std::uint32_t lr,std::uint32_t gr,float*fw,const mgt::BatchNormTrainingPlan&p,float*d_fc1,float*weight_grad,float*affine_grad,const float*d_residual,float*block_grad,NcclRankContext*ctx,cublasHandle_t blas,cudaStream_t st){const std::uint64_t bh2=static_cast<std::uint64_t>(lr)*s.hd2;float*block_inputs=fw+static_cast<std::uint64_t>(lr)*s.hd1;float*fc1_activations=block_inputs+static_cast<std::uint64_t>(s.residual_blocks+1U)*bh2;float*bn=fc1_activations+static_cast<std::uint64_t>(s.residual_blocks)*bh2;float*activated=fc1_activations+static_cast<std::uint64_t>(b)*bh2;float*input=block_inputs+static_cast<std::uint64_t>(b)*bh2;const auto&q=p.sites[2+2*b];if(LaunchBatchNormReluBackward(activated,d_fc1,d_fc1,bh2,st)!=mgt::Status::kOk||LaunchSelectedStridedSyncBatchNormBackward(d_fc1,lr,gr,q.logical_features,q.physical_stride,aff+q.affine_offset,bn+q.inv_std_offset,bn+q.normalized_offset,d_fc1,affine_grad+q.affine_offset,affine_grad+p.logical_feature_count+q.affine_offset,bn+p.reduction_offset,ctx,st)!=mgt::Status::kOk)return mgt::Status::kCudaFailure;const std::uint64_t wc=static_cast<std::uint64_t>(s.hd2)*s.hd2,pc=wc+s.hd2;if(cudaMemsetAsync(weight_grad+F1W(s,b),0,pc*sizeof(float),st)!=cudaSuccess)return mgt::Status::kCudaFailure;float alpha=1,beta=0;if(cublasSgemm(blas,CUBLAS_OP_N,CUBLAS_OP_T,s.hd2,s.hd2,lr,&alpha,d_fc1,s.hd2,input,s.hd2,&beta,weight_grad+F1W(s,b),s.hd2)!=CUBLAS_STATUS_SUCCESS||cublasSgemm(blas,CUBLAS_OP_T,CUBLAS_OP_N,s.hd2,lr,s.hd2,&alpha,w+F1W(s,b),s.hd2,d_fc1,s.hd2,&beta,block_grad,s.hd2)!=CUBLAS_STATUS_SUCCESS)return mgt::Status::kCudaFailure;ColumnSum<<<s.hd2,T,0,st>>>(d_fc1,lr,q.logical_features,s.hd2,weight_grad+F1B(s,b));AddInPlace<<<static_cast<unsigned>((bh2+T-1)/T),T,0,st>>>(block_grad,d_residual,bh2);return launch()?mgt::Status::kOk:mgt::Status::kCudaFailure;}
 mgt::Status LaunchMlpBatchNormResidualStackBackward(const CudaMlpShape&s,const float*w,const float*aff,std::uint32_t lr,std::uint32_t gr,float*fw,const mgt::BatchNormTrainingPlan&p,float*block_grad,float*weight_grad,float*affine_grad,float*d_fc1,float*d_residual,NcclRankContext*ctx,cublasHandle_t blas,cudaStream_t st){if(ValidateCudaMlpShape(s)!=mgt::Status::kOk||!w||!aff||!lr||gr<lr||!fw||p.sites.size()!=2+2*s.residual_blocks||!block_grad||!weight_grad||!affine_grad||!d_fc1||!d_residual||!ctx||!blas)return mgt::Status::kInvalidConfig;for(std::uint32_t b=s.residual_blocks;b-->0;){auto z=ResidualFc2Impl(s,w,aff,b,lr,gr,fw,p,block_grad,weight_grad,affine_grad,d_fc1,d_residual,ctx,blas,st,false);if(z!=mgt::Status::kOk)return z;z=ResidualFc1Impl(s,w,aff,b,lr,gr,fw,p,d_fc1,weight_grad,affine_grad,d_residual,block_grad,ctx,blas,st);if(z!=mgt::Status::kOk)return z;}return NcclAllreduceSumFloat(weight_grad+R0(s),OW(s)-R0(s),ctx,st);}mgt::Status LaunchMlpBatchNormHiddenBackward(const CudaMlpShape&s,const float*w,const float*aff,std::uint32_t lr,std::uint32_t gr,float*fw,const mgt::BatchNormTrainingPlan&p,float*hidden_grad,float*weight_grad,float*affine_grad,float*input_grad,NcclRankContext*ctx,cublasHandle_t blas,cudaStream_t st){if(ValidateCudaMlpShape(s)!=mgt::Status::kOk||!w||!aff||!lr||gr<lr||!fw||p.sites.size()!=2+2*s.residual_blocks||!hidden_grad||!weight_grad||!affine_grad||!input_grad||!ctx||!blas)return mgt::Status::kInvalidConfig;if(cublasSetStream(blas,st)!=CUBLAS_STATUS_SUCCESS)return mgt::Status::kCudaFailure;const std::uint64_t bh2=static_cast<std::uint64_t>(lr)*s.hd2;float*a1=fw;float*hidden=fw+static_cast<std::uint64_t>(lr)*s.hd1;float*fc1=hidden+static_cast<std::uint64_t>(s.residual_blocks+1U)*bh2;float*bn=fc1+static_cast<std::uint64_t>(s.residual_blocks)*bh2;const auto&q=p.sites[1];if(LaunchBatchNormReluBackward(hidden,hidden_grad,hidden_grad,bh2,st)!=mgt::Status::kOk||LaunchSelectedStridedSyncBatchNormBackward(hidden_grad,lr,gr,q.logical_features,q.physical_stride,aff+q.affine_offset,bn+q.inv_std_offset,bn+q.normalized_offset,hidden_grad,affine_grad+q.affine_offset,affine_grad+p.logical_feature_count+q.affine_offset,bn+p.reduction_offset,ctx,st)!=mgt::Status::kOk)return mgt::Status::kCudaFailure;const std::uint64_t pc=static_cast<std::uint64_t>(s.hd1)*s.hd2+s.hd2;if(cudaMemsetAsync(weight_grad+HW(s),0,pc*sizeof(float),st)!=cudaSuccess)return mgt::Status::kCudaFailure;float alpha=1,beta=0;if(cublasSgemm(blas,CUBLAS_OP_N,CUBLAS_OP_T,s.hd2,s.hd1,lr,&alpha,hidden_grad,s.hd2,a1,s.hd1,&beta,weight_grad+HW(s),s.hd2)!=CUBLAS_STATUS_SUCCESS||cublasSgemm(blas,CUBLAS_OP_T,CUBLAS_OP_N,s.hd1,lr,s.hd2,&alpha,w+HW(s),s.hd2,hidden_grad,s.hd2,&beta,input_grad,s.hd1)!=CUBLAS_STATUS_SUCCESS)return mgt::Status::kCudaFailure;ColumnSum<<<s.hd2,T,0,st>>>(hidden_grad,lr,q.logical_features,s.hd2,weight_grad+HB(s));if(!launch()||NcclAllreduceSumFloat(weight_grad+HW(s),pc,ctx,st)!=mgt::Status::kOk)return mgt::Status::kCudaFailure;return mgt::Status::kOk;}
+#ifdef MGT_LOCAL_MLP_IMPLEMENTATION
+#undef LaunchMlpBatchNormInputBackward
+#define LaunchMlpBatchNormInputBackward LaunchLocalMlpBatchNormInputBackwardStrictLegacy
+#else
 #define LaunchMlpBatchNormInputBackward LaunchMlpBatchNormInputBackwardStrictLegacy
+#endif
 mgt::Status LaunchMlpBatchNormInputBackward(const CudaMlpShape&s,const float*aff,const mgt::TrainStateStorage*states,std::uint32_t lr,std::uint32_t gr,float*fw,const mgt::BatchNormTrainingPlan&p,float*input_grad,float*weight_grad,float*affine_grad,NcclRankContext*ctx,cudaStream_t st){if(ValidateCudaMlpShape(s)!=mgt::Status::kOk||!aff||!states||!lr||gr<lr||!fw||p.sites.size()!=2+2*s.residual_blocks||!input_grad||!weight_grad||!affine_grad||!ctx)return mgt::Status::kInvalidConfig;float*a1=fw;float*fc1=fw+static_cast<std::uint64_t>(lr)*s.hd1+static_cast<std::uint64_t>(s.residual_blocks+1U)*lr*s.hd2;float*bn=fc1+static_cast<std::uint64_t>(s.residual_blocks)*lr*s.hd2;const auto&q=p.sites[0];const std::uint64_t n=static_cast<std::uint64_t>(lr)*s.hd1;if(LaunchBatchNormReluBackward(a1,input_grad,input_grad,n,st)!=mgt::Status::kOk||LaunchSelectedStridedSyncBatchNormBackward(input_grad,lr,gr,q.logical_features,q.physical_stride,aff+q.affine_offset,bn+q.inv_std_offset,bn+q.normalized_offset,input_grad,affine_grad+q.affine_offset,affine_grad+p.logical_feature_count+q.affine_offset,bn+p.reduction_offset,ctx,st)!=mgt::Status::kOk)return mgt::Status::kCudaFailure;const std::uint64_t pc=HW(s);if(cudaMemsetAsync(weight_grad,0,pc*sizeof(float),st)!=cudaSuccess)return mgt::Status::kCudaFailure;dim3 grid((s.hd1+INPUT_T-1)/INPUT_T,s.state_len);std::size_t shared=static_cast<std::size_t>(INPUT_T)*(s.state_value_pad+1U)*sizeof(float);SparseInputGrad<<<grid,INPUT_T,shared,st>>>(s,states,input_grad,lr,weight_grad);ColumnSum<<<s.hd1,T,0,st>>>(input_grad,lr,q.logical_features,s.hd1,weight_grad+IB(s));if(!launch()||NcclAllreduceSumFloat(weight_grad,pc,ctx,st)!=mgt::Status::kOk)return mgt::Status::kCudaFailure;return mgt::Status::kOk;}
 #undef LaunchMlpBatchNormInputBackward
+#ifdef MGT_LOCAL_MLP_IMPLEMENTATION
+#define LaunchMlpBatchNormInputBackward LaunchLocalMlpBatchNormInputBackwardImpl
+#endif
 mgt::Status LaunchMlpBatchNormInputBackward(
     const CudaMlpShape& s, const float* aff, const mgt::TrainStateStorage* states,
     std::uint32_t lr, std::uint32_t gr, float* fw,
@@ -233,7 +291,7 @@ mgt::Status LaunchMlpBatchNormInputBackward(
     const InputGradLaunchConfig input_launch = ResolveInputGradLaunch(s);
     if (input_launch.status != mgt::Status::kOk) return input_launch.status;
     if (!input_launch.exact) {
-        return LaunchMlpBatchNormInputBackwardStrictLegacy(
+        return MGT_STRICT_INPUT_BACKWARD(
             s, aff, states, lr, gr, fw, p, input_grad, weight_grad, affine_grad, ctx, st);
     }
     float* a1 = fw;
