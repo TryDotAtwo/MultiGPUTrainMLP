@@ -73,6 +73,14 @@ semantic and numerical gates before it are green.
 - PyTorch parity for all 34 sites, tail rows, running statistics, affine grads,
   aliasing, and padding.
 - Attribute reduction/apply kernels, memory traffic, and launch count.
+- Current status: **green correctness / acceptable performance**. The shared
+  strided implementation is selected by all 34 plan sites. CPU/CUDA forward and
+  backward parity now covers the production `2556/2560` input site, the
+  `218/224` residual sites, a 4095-row tail, running statistics, affine grads,
+  and exact zero padding; memcheck is clean. A four-step Nsight Systems window
+  recorded exactly 136 instances of each of the five BN kernels (34 per step).
+  Their summed GPU time is about 4.52 ms/step: apply 2.92 ms, reductions 1.46
+  ms, finalize 0.14 ms. This is material but no longer the first red gate.
 
 ## A5. Hidden and residual forward
 

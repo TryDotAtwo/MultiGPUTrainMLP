@@ -4,6 +4,7 @@
 #include <cuda_runtime.h>
 
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <vector>
 
@@ -13,7 +14,7 @@ bool Near(float actual, float expected, float tolerance = 2.0e-4f) {
 }
 }  // namespace
 
-int main() {
+int RunSmallCase() {
     constexpr int kRows = 4;
     constexpr int kCols = 3;
     constexpr int kStride = 4;
@@ -120,4 +121,45 @@ int main() {
             !Near(dbeta[col], expected_dbeta[col])) return 5;
     }
     return 0;
+}
+
+
+bool RunProductionGeometry(int rows, int cols, int stride) {
+    const std::uint64_t count = static_cast<std::uint64_t>(rows) * stride;
+    std::vector<float> x(count), dy(count), gamma(cols), beta(cols);
+    for (int r = 0; r < rows; ++r) for (int c = 0; c < stride; ++c) {
+        x[static_cast<std::uint64_t>(r) * stride + c] = c < cols
+            ? static_cast<float>(((r * 17 + c * 13) % 101) - 50) / 32.0f : 91.0f;
+        dy[static_cast<std::uint64_t>(r) * stride + c] = c < cols
+            ? static_cast<float>(((r * 7 + c * 19) % 67) - 33) / 64.0f : 91.0f;
+    }
+    for (int c = 0; c < cols; ++c) { gamma[c] = 0.75f + (c % 5) * 0.1f; beta[c] = (c % 7) * 0.03f; }
+    std::vector<float> packed_x(static_cast<std::uint64_t>(rows) * cols);
+    std::vector<float> packed_dy(packed_x.size());
+    for (int r = 0; r < rows; ++r) for (int c = 0; c < cols; ++c) {
+        packed_x[static_cast<std::uint64_t>(r) * cols + c] = x[static_cast<std::uint64_t>(r) * stride + c];
+        packed_dy[static_cast<std::uint64_t>(r) * cols + c] = dy[static_cast<std::uint64_t>(r) * stride + c];
+    }
+    std::vector<float> expected_y(packed_x.size()), expected_dx(packed_x.size());
+    std::vector<float> expected_mean(cols), expected_var(cols, 1.0f), expected_dg(cols), expected_db(cols);
+    mgt::BatchNormCache cache;
+    mgt::batch_norm_forward_cpu(packed_x.data(), rows, cols, gamma.data(), beta.data(), expected_mean.data(), expected_var.data(), 0.1f, 1e-5f, true, expected_y.data(), &cache);
+    mgt::batch_norm_backward_cpu(packed_dy.data(), cache, gamma.data(), expected_dx.data(), expected_dg.data(), expected_db.data());
+    float *dx=nullptr,*ddy=nullptr,*dgamma=nullptr,*dbeta=nullptr,*drm=nullptr,*drv=nullptr,*dyout=nullptr,*dmean=nullptr,*dinv=nullptr,*dnorm=nullptr,*ddx=nullptr,*dws=nullptr;
+    if(cudaMalloc(&dx,count*4)!=cudaSuccess||cudaMalloc(&ddy,count*4)!=cudaSuccess||cudaMalloc(&dgamma,cols*4)!=cudaSuccess||cudaMalloc(&dbeta,cols*4)!=cudaSuccess||cudaMalloc(&drm,cols*4)!=cudaSuccess||cudaMalloc(&drv,cols*4)!=cudaSuccess||cudaMalloc(&dyout,count*4)!=cudaSuccess||cudaMalloc(&dmean,cols*4)!=cudaSuccess||cudaMalloc(&dinv,cols*4)!=cudaSuccess||cudaMalloc(&dnorm,count*4)!=cudaSuccess||cudaMalloc(&ddx,count*4)!=cudaSuccess||cudaMalloc(&dws,2ULL*cols*4)!=cudaSuccess)return false;
+    cudaMemcpy(dx,x.data(),count*4,cudaMemcpyHostToDevice);cudaMemcpy(ddy,dy.data(),count*4,cudaMemcpyHostToDevice);cudaMemcpy(dgamma,gamma.data(),cols*4,cudaMemcpyHostToDevice);cudaMemcpy(dbeta,beta.data(),cols*4,cudaMemcpyHostToDevice);cudaMemset(drm,0,cols*4);std::vector<float> ones(cols,1);cudaMemcpy(drv,ones.data(),cols*4,cudaMemcpyHostToDevice);
+    bool ok=mgt_cuda::LaunchLocalStridedBatchNormForward(dx,rows,cols,stride,dgamma,dbeta,drm,drv,.1f,1e-5f,dyout,dmean,dinv,dnorm,dws,nullptr)==mgt::Status::kOk&&cudaDeviceSynchronize()==cudaSuccess;
+    std::vector<float> actual_running_mean(cols),actual_running_var(cols);cudaMemcpy(actual_running_mean.data(),drm,cols*4,cudaMemcpyDeviceToHost);cudaMemcpy(actual_running_var.data(),drv,cols*4,cudaMemcpyDeviceToHost);
+    ok=ok&&mgt_cuda::LaunchLocalStridedBatchNormBackward(ddy,rows,cols,stride,dgamma,dinv,dnorm,ddx,dmean,drv,dws,nullptr)==mgt::Status::kOk&&cudaDeviceSynchronize()==cudaSuccess;
+    std::vector<float> actual_y(count),actual_dx(count),actual_dg(cols),actual_db(cols);cudaMemcpy(actual_y.data(),dyout,count*4,cudaMemcpyDeviceToHost);cudaMemcpy(actual_dx.data(),ddx,count*4,cudaMemcpyDeviceToHost);cudaMemcpy(actual_dg.data(),dmean,cols*4,cudaMemcpyDeviceToHost);cudaMemcpy(actual_db.data(),drv,cols*4,cudaMemcpyDeviceToHost);
+    for(int r=0;ok&&r<rows;++r)for(int c=0;c<stride;++c){const auto si=static_cast<std::uint64_t>(r)*stride+c;if(c<cols){const auto pi=static_cast<std::uint64_t>(r)*cols+c;ok=Near(actual_y[si],expected_y[pi],2e-3f)&&Near(actual_dx[si],expected_dx[pi],2e-3f);}else ok=actual_y[si]==0&&actual_dx[si]==0;}
+    for(int c=0;ok&&c<cols;++c)ok=Near(actual_running_mean[c],expected_mean[c],2e-3f)&&Near(actual_running_var[c],expected_var[c],2e-3f)&&Near(actual_dg[c],expected_dg[c],2e-2f)&&Near(actual_db[c],expected_db[c],2e-2f);
+    cudaFree(dws);cudaFree(ddx);cudaFree(dnorm);cudaFree(dinv);cudaFree(dmean);cudaFree(dyout);cudaFree(drv);cudaFree(drm);cudaFree(dbeta);cudaFree(dgamma);cudaFree(ddy);cudaFree(dx);return ok;
+}
+
+int main() {
+    if (RunSmallCase() != 0) return EXIT_FAILURE;
+    if (!RunProductionGeometry(17, 2556, 2560)) return EXIT_FAILURE;
+    if (!RunProductionGeometry(4095, 218, 224)) return EXIT_FAILURE;
+    return EXIT_SUCCESS;
 }
