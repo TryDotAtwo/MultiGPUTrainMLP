@@ -11,6 +11,15 @@ std::uint64_t LocalMlpBatchNormForwardWorkspaceFloats(
     const mgt::BatchNormTrainingPlan& plan,
     std::uint32_t rows);
 
+mgt::Status LaunchLocalMlpInputHalf(
+    const CudaMlpShape& physical_shape,
+    std::uint32_t logical_hd1,
+    const __half* weights,
+    const mgt::TrainStateStorage* states,
+    std::uint32_t rows,
+    float* output,
+    cudaStream_t stream);
+
 mgt::Status LaunchLocalMlpBatchNormTrainStep(
     const CudaMlpShape& physical_shape,
     std::uint32_t logical_hd1,

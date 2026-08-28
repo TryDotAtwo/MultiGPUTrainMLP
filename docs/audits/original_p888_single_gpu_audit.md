@@ -58,12 +58,15 @@ semantic and numerical gates before it are green.
 - Audit FP16 table/master ownership, load pattern, cache behavior, accumulation
   error, padding lanes, and produced activation layout.
 - Measure useful bytes/s and NCU memory-stall counters.
-- Current status: **green correctness / red performance**. Existing FP16 full
-  step parity is green. NCU 2025.1.1 measured 4.01 ms, 212.22 GB/s, 77.48%
-  memory-pipe utilization, 96.38% achieved occupancy, 21.7/32 useful bytes per
-  global-load sector, 32.4% long-scoreboard stall share, and 362.4M executed
-  instructions. The next candidate is a row-owned/shared-state, half2-vectorized
-  gather that removes replicated state loads and halves address/control work.
+- Current status: **green**. The promoted FP16 path assigns one block to each
+  row, loads its 72 table offsets once into shared memory, and processes two
+  features per thread with `half2`; odd physical/logical widths retain the
+  scalar fallback. Direct scalar/CUDA comparison is bitwise exact for production
+  rows 1/17/4096 and four parity combinations; memcheck reports 0 errors and
+  racecheck reports 0 hazards. NCU 2025.1.1 changed the kernel from 4.01 to
+  2.25 ms, 212.22 to 349.35 GB/s, and 362.4M to 123.6M executed instructions.
+  Three unprofiled 20-step runs measured 43.7567--44.0184 ms/step versus the
+  frozen 44.9383 ms baseline.
 
 ## A4. BatchNorm and activation
 

@@ -16,6 +16,16 @@ std::uint64_t LocalMlpBatchNormForwardWorkspaceFloats(
     return LocalMlpBatchNormForwardWorkspaceFloatsImpl(shape, plan, rows);
 }
 
+mgt::Status LaunchLocalMlpInputHalf(
+    const CudaMlpShape& shape, std::uint32_t logical_hd1,
+    const __half* weights, const mgt::TrainStateStorage* states,
+    std::uint32_t rows, float* output, cudaStream_t stream) {
+    if (ValidateCudaMlpShape(shape) != mgt::Status::kOk)
+        return mgt::Status::kInvalidConfig;
+    return LaunchInputHalfInternal(
+        shape, logical_hd1, weights, states, rows, output, stream);
+}
+
 mgt::Status LaunchLocalMlpBatchNormTrainStep(
     const CudaMlpShape& shape,
     std::uint32_t logical_hd1,

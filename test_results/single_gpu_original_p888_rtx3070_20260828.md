@@ -27,6 +27,19 @@ as a production-data baseline. The benchmark now rejects that fixture. The
 number above uses real p888 moves and the audited equal-depth, inverse-excluding
 single-GPU schedule.
 
+## Sparse input projection promotion
+
+The row-owned/shared-offset `half2` gather is bitwise equal to a scalar CUDA
+reference for production shape at 1, 17, and 4096 rows. Three unprofiled runs
+with 5 warmup and 20 measured steps produced 44.0124, 44.0184, and 43.7567
+ms/step (median 44.0124 ms, 93,064.6 samples/s), a 2.06% median step-time
+reduction from the frozen baseline.
+
+NCU 2025.1.1 measured the isolated gather at 2.25 ms, 349.35 GB/s, 91.06% DRAM
+throughput, and 123,645,952 executed instructions. The prior kernel measured
+4.01 ms, 212.22 GB/s, and 362,414,080 instructions. Memcheck reported 0 errors;
+racecheck reported 0 hazards, 0 errors, and 0 warnings.
+
 ## Nsight Systems attribution
 
 The profile used 2 warmup plus 5 measured steps. Dominant GPU kernels:
@@ -55,4 +68,6 @@ The prior feature-major local BN kernels accounted for 43.3% of GPU time. The co
 - C ABI lifecycle: pass
 - Rust RAII owner integration: 1 passed, 0 failed
 
-Next optimization target is the exact sparse input-gradient kernel, not GEMM or BN.
+The sequential audit continues at A4 BatchNorm/activation. Sparse input gradient
+remains the largest already-known performance target, but is gated behind the
+intermediate correctness audit.

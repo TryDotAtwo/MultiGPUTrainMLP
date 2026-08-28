@@ -68,10 +68,36 @@ __host__ __device__ std::uint64_t RB(CudaMlpShape s){return 2ULL*(static_cast<st
 __global__ void Input(CudaMlpShape s,unsigned logical,const float*w,const mgt::TrainStateStorage*states,unsigned rows,float*out){unsigned q=blockIdx.x*blockDim.x+threadIdx.x;if(q>=rows*s.hd1)return;unsigned r=q/s.hd1,h=q-r*s.hd1;if(h>=logical){out[q]=0;return;}float v=w[IB(s)+h];for(unsigned p=0;p<s.state_len;p++)v+=w[(static_cast<std::uint64_t>(p)*s.state_value_pad+states[r].v[p])*s.hd1+h];out[q]=v;}
 #ifdef MGT_LOCAL_MLP_IMPLEMENTATION
 __global__ void InputHalf(CudaMlpShape s,unsigned logical,const __half*w,const mgt::TrainStateStorage*states,unsigned rows,float*out){unsigned q=blockIdx.x*blockDim.x+threadIdx.x;if(q>=rows*s.hd1)return;unsigned r=q/s.hd1,h=q-r*s.hd1;if(h>=logical){out[q]=0;return;}float v=__half2float(w[IB(s)+h]);for(unsigned p=0;p<s.state_len;p++)v+=__half2float(w[(static_cast<std::uint64_t>(p)*s.state_value_pad+states[r].v[p])*s.hd1+h]);out[q]=v;}
+
+__global__ void InputHalf2Row(CudaMlpShape s,unsigned logical,const __half*w,const mgt::TrainStateStorage*states,unsigned rows,float*out){
+    __shared__ std::uint64_t offsets[mgt::kStateStorageLen];
+    const unsigned row=blockIdx.x;
+    if(row>=rows)return;
+    if(threadIdx.x<s.state_len)offsets[threadIdx.x]=(static_cast<std::uint64_t>(threadIdx.x)*s.state_value_pad+states[row].v[threadIdx.x])*s.hd1;
+    __syncthreads();
+    for(unsigned h=2U*threadIdx.x;h<s.hd1;h+=2U*blockDim.x){
+        float2 value{};
+        if(h<logical){
+            value=__half22float2(*reinterpret_cast<const __half2*>(w+IB(s)+h));
+            for(unsigned p=0;p<s.state_len;++p){
+                const float2 add=__half22float2(*reinterpret_cast<const __half2*>(w+offsets[p]+h));
+                value.x+=add.x; value.y+=add.y;
+            }
+        }
+        *reinterpret_cast<float2*>(out+static_cast<std::uint64_t>(row)*s.hd1+h)=value;
+    }
+}
+
+mgt::Status LaunchInputHalfInternal(CudaMlpShape s,unsigned logical,const __half*w,const mgt::TrainStateStorage*states,unsigned rows,float*out,cudaStream_t st){
+    if(!w||!states||!out||rows==0||logical>s.hd1)return mgt::Status::kInvalidConfig;
+    if((s.hd1&1U)==0&&(logical&1U)==0)InputHalf2Row<<<rows,T,0,st>>>(s,logical,w,states,rows,out);
+    else { const unsigned blocks=(rows*s.hd1+T-1)/T; InputHalf<<<blocks,T,0,st>>>(s,logical,w,states,rows,out); }
+    return cudaPeekAtLastError()==cudaSuccess?mgt::Status::kOk:mgt::Status::kCudaFailure;
+}
 #endif
 mgt::Status LaunchInputBackend(CudaMlpShape s,unsigned logical,const float*w,const mgt::TrainStateStorage*states,unsigned rows,float*out,NcclRankContext*ctx,cudaStream_t st){unsigned blocks=(rows*s.hd1+T-1)/T;
 #ifdef MGT_LOCAL_MLP_IMPLEMENTATION
-if(auto*fp=LocalFp16(ctx))InputHalf<<<blocks,T,0,st>>>(s,logical,fp->weight_mirror,states,rows,out);else
+if(auto*fp=LocalFp16(ctx))return LaunchInputHalfInternal(s,logical,fp->weight_mirror,states,rows,out,st);else
 #endif
 Input<<<blocks,T,0,st>>>(s,logical,w,states,rows,out);return cudaPeekAtLastError()==cudaSuccess?mgt::Status::kOk:mgt::Status::kCudaFailure;}
 __global__ void Bias(float*x,const float*b,unsigned rows,unsigned stride,unsigned logical){unsigned q=blockIdx.x*blockDim.x+threadIdx.x;if(q>=rows*stride)return;unsigned c=q%stride;x[q]=c<logical?x[q]+b[c]:0;}

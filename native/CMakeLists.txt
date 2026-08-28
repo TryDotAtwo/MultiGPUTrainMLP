@@ -176,6 +176,10 @@ if(MGT_ENABLE_CUDA)
     target_link_libraries(test_local_mlp_batch_norm_fp16_full_step PRIVATE mgt_cuda)
     add_test(NAME local_mlp_batch_norm_fp16_full_step
         COMMAND test_local_mlp_batch_norm_fp16_full_step)
+    add_executable(test_local_mlp_input_half
+        tests/cuda/test_local_mlp_input_half.cu)
+    target_link_libraries(test_local_mlp_input_half PRIVATE mgt_cuda)
+    add_test(NAME local_mlp_input_half COMMAND test_local_mlp_input_half)
     add_executable(test_single_gpu_trainer_lifecycle
         tests/cuda/test_single_gpu_trainer_lifecycle.cu)
     target_link_libraries(test_single_gpu_trainer_lifecycle PRIVATE mgt_cuda)

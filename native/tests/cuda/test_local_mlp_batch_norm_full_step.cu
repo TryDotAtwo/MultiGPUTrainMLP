@@ -39,7 +39,7 @@ int main() {
         states[row].v[1] = (row + 1) % 4;
     }
     const float labels[4]{1.f, 3.f, -1.f, 2.f};
-    const auto workspace_count = mgt_cuda::MlpBatchNormForwardWorkspaceFloats(shape, plan, 4);
+    const auto workspace_count = mgt_cuda::LocalMlpBatchNormForwardWorkspaceFloats(shape, plan, 4);
     auto* d_weights = Device<float>(parameter_count);
     auto* d_weight_grad = Device<float>(parameter_count);
     auto* d_weight_m = Device<float>(parameter_count);
