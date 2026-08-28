@@ -127,7 +127,8 @@ semantic and numerical gates before it are green.
   lists for every `(position,value)` in dead BN workspace, then launches
   shared-free gathers which preserve the original FP32 accumulation order.
   NCU measures 8.19 ms, 98.31% occupancy, 370.31 GB/s, and 221.4M instructions.
-  Production memcheck reports 0 errors; FP32/FP16 fixed-step regressions pass.
+  Production memcheck reports 0 errors and racecheck reports 0 hazards;
+  FP32/FP16 fixed-step regressions pass.
   Three 20-step runs measured 36.4226--37.2828 ms/step, versus 44.0124 ms after
   A3. Auto selection is intentionally limited to SM86; T4/A100 require their
   own measurements.
@@ -136,6 +137,12 @@ semantic and numerical gates before it are green.
 
 - Adam semantics, bias correction, step numbering, FP32 master/m/v, FP16 mirror,
   finite checks, and checkpoint contents. Verify one update against PyTorch.
+- Current status: **green for the live step**. CUDA AdamW matches the CPU
+  reference including weight decay and bias correction. The local complete-step
+  fixture checks the first master-weight and affine updates; the fused weight
+  update writes the FP16 mirror in the same kernel and its lifecycle test passes.
+  Checkpoint/resume byte identity belongs to the later runner audit, outside this
+  in-memory step gate.
 
 ## A10. Runtime scheduling
 
