@@ -142,6 +142,7 @@ if(MGT_ENABLE_CUDA)
         cuda/local_batch_norm.cu
         cuda/local_mlp_batch_norm.cu
         cuda/single_gpu_trainer.cu
+        cuda/fp16_linear_train_ops.cu
         cuda/batch_norm_activation.cu
         cuda/bf16_activation.cu
         cuda/bf16_batch_norm_epilogue.cu
@@ -172,6 +173,9 @@ if(MGT_ENABLE_CUDA)
     target_link_libraries(test_single_gpu_trainer_lifecycle PRIVATE mgt_cuda)
     add_test(NAME single_gpu_trainer_lifecycle
         COMMAND test_single_gpu_trainer_lifecycle)
+    add_executable(test_fp16_linear_train_ops tests/cuda/test_fp16_linear_train_ops.cu)
+    target_link_libraries(test_fp16_linear_train_ops PRIVATE mgt_cuda)
+    add_test(NAME fp16_linear_train_ops COMMAND test_fp16_linear_train_ops)
     target_include_directories(mgt_cuda PUBLIC include cuda)
     set_target_properties(mgt_cuda PROPERTIES POSITION_INDEPENDENT_CODE ON)
     target_link_libraries(mgt_cuda PUBLIC mgt_core CUDA::cublas CUDA::cublasLt)
