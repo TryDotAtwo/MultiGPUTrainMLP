@@ -15,10 +15,11 @@ constexpr std::uint64_t kAlignment = 256;
 std::atomic<std::uint64_t> g_allocation_count{0};
 
 struct ArenaLayout {
-    std::uint64_t weights, weight_grad, weight_m, weight_v;
+    std::uint64_t weights, weight_half, weight_grad, weight_m, weight_v;
     std::uint64_t affine, affine_grad, affine_m, affine_v, running;
     std::uint64_t moves, target, states, labels, walk_meta, outputs, forward_workspace, loss;
     std::uint64_t output_dy, block_grad, fc1_grad, residual_grad, input_grad;
+    std::uint64_t fp16_operand_a, fp16_operand_b;
     std::uint64_t bytes, parameter_count, forward_workspace_floats;
 };
 
@@ -68,6 +69,7 @@ mgt::Status BuildLayout(const SingleGpuTrainerCreateInfo& info,
         return AddSlice(count, sizeof(float), &cursor, offset);
     };
     if (!floats(parameter_count, &out.weights) ||
+        !AddSlice(parameter_count, sizeof(__half), &cursor, &out.weight_half) ||
         !floats(parameter_count, &out.weight_grad) ||
         !floats(parameter_count, &out.weight_m) ||
         !floats(parameter_count, &out.weight_v) ||
@@ -87,7 +89,11 @@ mgt::Status BuildLayout(const SingleGpuTrainerCreateInfo& info,
         !floats(static_cast<std::uint64_t>(info.capacity_rows) * shape.hd2, &out.block_grad) ||
         !floats(static_cast<std::uint64_t>(info.capacity_rows) * shape.hd2, &out.fc1_grad) ||
         !floats(static_cast<std::uint64_t>(info.capacity_rows) * shape.hd2, &out.residual_grad) ||
-        !floats(static_cast<std::uint64_t>(info.capacity_rows) * shape.hd1, &out.input_grad))
+        !floats(static_cast<std::uint64_t>(info.capacity_rows) * shape.hd1, &out.input_grad) ||
+        !AddSlice(static_cast<std::uint64_t>(info.capacity_rows) * shape.hd1,
+                  sizeof(__half), &cursor, &out.fp16_operand_a) ||
+        !AddSlice(static_cast<std::uint64_t>(info.capacity_rows) * shape.hd2,
+                  sizeof(__half), &cursor, &out.fp16_operand_b))
         return mgt::Status::kCapacityExceeded;
     out.bytes = (cursor + kAlignment - 1) & ~(kAlignment - 1);
     *layout = out;
@@ -97,6 +103,17 @@ mgt::Status BuildLayout(const SingleGpuTrainerCreateInfo& info,
 __global__ void FillOnes(float* values, std::uint64_t count) {
     const auto index = static_cast<std::uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (index < count) values[index] = 1.0f;
+}
+
+__global__ void InitializeWeights(float* values, std::uint64_t count, std::uint64_t seed) {
+    const auto index = static_cast<std::uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (index < count) {
+        std::uint64_t bits = index + seed + 0x9e3779b97f4a7c15ULL;
+        bits = (bits ^ (bits >> 30)) * 0xbf58476d1ce4e5b9ULL;
+        bits = (bits ^ (bits >> 27)) * 0x94d049bb133111ebULL;
+        bits ^= bits >> 31;
+        values[index] = (static_cast<int>(bits & 2047U) - 1024) * (1.0f / 1048576.0f);
+    }
 }
 
 template <class T>
@@ -186,9 +203,18 @@ mgt::Status PrepareSingleGpuTrainer(SingleGpuTrainer* trainer) {
     const auto logical = trainer->plan.logical_feature_count;
     const unsigned threads = 256;
     const unsigned blocks = static_cast<unsigned>((logical + threads - 1) / threads);
+    const unsigned weight_blocks = static_cast<unsigned>(
+        (trainer->layout.parameter_count + threads - 1) / threads);
+    InitializeWeights<<<weight_blocks, threads, 0, trainer->stream>>>(
+        At<float>(trainer->arena, trainer->layout.weights),
+        trainer->layout.parameter_count, trainer->info.base_seed);
     FillOnes<<<blocks, threads, 0, trainer->stream>>>(affine, logical);
     FillOnes<<<blocks, threads, 0, trainer->stream>>>(running + logical, logical);
-    if (cudaPeekAtLastError() != cudaSuccess ||
+    if (LaunchFloatToHalf(
+            At<float>(trainer->arena, trainer->layout.weights),
+            At<__half>(trainer->arena, trainer->layout.weight_half),
+            trainer->layout.parameter_count, trainer->stream) != mgt::Status::kOk ||
+        cudaPeekAtLastError() != cudaSuccess ||
         cudaStreamSynchronize(trainer->stream) != cudaSuccess) return mgt::Status::kCudaFailure;
     trainer->prepared = true;
     return mgt::Status::kOk;
@@ -232,13 +258,19 @@ mgt::Status LaunchSingleGpuTrainStep(
         At<float>(arena, trainer->layout.labels),
         At<mgt::WalkMeta>(arena, trainer->layout.walk_meta), trainer->stream);
     if (status != mgt::Status::kOk) return status;
-    status = LaunchLocalMlpBatchNormTrainStep(
+    LocalMlpFp16Context fp16{
+        buffers.weights, At<__half>(arena, trainer->layout.weight_half),
+        At<__half>(arena, trainer->layout.fp16_operand_a),
+        At<__half>(arena, trainer->layout.fp16_operand_b),
+        static_cast<std::uint64_t>(trainer->info.capacity_rows) * trainer->shape.hd1,
+        static_cast<std::uint64_t>(trainer->info.capacity_rows) * trainer->shape.hd2};
+    status = LaunchLocalMlpBatchNormTrainStepFp16(
         trainer->shape, trainer->info.contract.logical_hd1,
         trainer->info.contract.logical_hd2,
         At<mgt::TrainStateStorage>(arena, trainer->layout.states),
         At<float>(arena, trainer->layout.labels), request.active_rows, trainer->plan,
-        trainer->layout.forward_workspace_floats, adam, buffers, trainer->blas,
-        trainer->stream);
+        trainer->layout.forward_workspace_floats, adam, buffers,
+        &fp16, trainer->blas, trainer->stream);
     if (status != mgt::Status::kOk ||
         cudaEventRecord(trainer->completion, trainer->stream) != cudaSuccess)
         return status == mgt::Status::kOk ? mgt::Status::kCudaFailure : status;

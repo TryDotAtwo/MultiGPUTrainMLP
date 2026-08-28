@@ -28,4 +28,24 @@ mgt::Status LaunchLocalMlpBatchNormTrainStep(
         forward_workspace_floats, adam, buffers, local_backend, blas, stream);
 }
 
+mgt::Status LaunchLocalMlpBatchNormTrainStepFp16(
+    const CudaMlpShape& shape, std::uint32_t logical_hd1,
+    std::uint32_t logical_hd2, const mgt::TrainStateStorage* states,
+    const float* labels, std::uint32_t rows,
+    const mgt::BatchNormTrainingPlan& plan,
+    std::uint64_t forward_workspace_floats, const AdamWKernelConfig& adam,
+    MlpBatchNormStepBuffers buffers, LocalMlpFp16Context* fp16,
+    cublasHandle_t blas, cudaStream_t stream) {
+    if (!fp16 || fp16->master_weights != buffers.weights || !fp16->weight_mirror)
+        return mgt::Status::kInvalidConfig;
+    auto* local_backend = LocalBackendContext(fp16);
+    auto status = LaunchLocalMlpBatchNormTrainStepImpl(
+        shape, logical_hd1, logical_hd2, states, labels, rows, rows, plan,
+        forward_workspace_floats, adam, buffers, local_backend, blas, stream);
+    if (status != mgt::Status::kOk) return status;
+    return LaunchFloatToHalf(
+        buffers.weights, fp16->weight_mirror,
+        MlpBatchNormParameterCount(shape), stream);
+}
+
 }  // namespace mgt_cuda

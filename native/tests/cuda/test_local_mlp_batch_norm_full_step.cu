@@ -13,7 +13,12 @@ template <class T> T* Device(std::size_t count) {
     T* pointer = nullptr;
     return cudaMalloc(&pointer, count * sizeof(T)) == cudaSuccess ? pointer : nullptr;
 }
-bool Near(float actual, float expected, float tolerance = 6e-5f) {
+bool Near(float actual, float expected,
+#ifdef MGT_TEST_LOCAL_FP16
+          float tolerance = 2e-3f) {
+#else
+          float tolerance = 6e-5f) {
+#endif
     return std::fabs(actual - expected) <= tolerance;
 }
 }
@@ -54,10 +59,19 @@ int main() {
     auto* d_input_grad = Device<float>(12);
     auto* d_states = Device<mgt::TrainStateStorage>(4);
     auto* d_labels = Device<float>(4);
+#ifdef MGT_TEST_LOCAL_FP16
+    auto* d_weight_half = Device<__half>(parameter_count);
+    auto* d_operand_a = Device<__half>(12);
+    auto* d_operand_b = Device<__half>(8);
+#endif
     if (!d_weights || !d_weight_grad || !d_weight_m || !d_weight_v || !d_affine ||
         !d_affine_grad || !d_affine_m || !d_affine_v || !d_running || !d_outputs ||
         !d_workspace || !d_loss || !d_output_dy || !d_block_grad || !d_fc1_grad ||
-        !d_residual_grad || !d_input_grad || !d_states || !d_labels) return 1;
+        !d_residual_grad || !d_input_grad || !d_states || !d_labels
+#ifdef MGT_TEST_LOCAL_FP16
+        || !d_weight_half || !d_operand_a || !d_operand_b
+#endif
+        ) return 1;
     cudaMemcpy(d_weights, weights.data(), weights.size() * sizeof(float), cudaMemcpyHostToDevice);
     cudaMemcpy(d_affine, bn.affine.data(), bn.affine.size() * sizeof(float), cudaMemcpyHostToDevice);
     cudaMemcpy(d_running, bn.running.data(), bn.running.size() * sizeof(float), cudaMemcpyHostToDevice);
@@ -69,6 +83,11 @@ int main() {
     cudaMemset(d_affine_grad, 0, bn.affine.size() * sizeof(float));
     cudaMemset(d_affine_m, 0, bn.affine.size() * sizeof(float));
     cudaMemset(d_affine_v, 0, bn.affine.size() * sizeof(float));
+#ifdef MGT_TEST_LOCAL_FP16
+    if (mgt_cuda::LaunchFloatToHalf(
+            d_weights, d_weight_half, parameter_count, nullptr) != mgt::Status::kOk)
+        return 1;
+#endif
     cublasHandle_t blas = nullptr;
     if (cublasCreate(&blas) != CUBLAS_STATUS_SUCCESS) return 1;
     const mgt_cuda::AdamWKernelConfig adam{0, 1, .001f, .9f, .999f, 1e-8f, 0.f};
@@ -77,10 +96,18 @@ int main() {
         d_affine_grad, d_affine_m, d_affine_v, d_running, d_outputs,
         d_workspace, d_loss, d_output_dy, d_block_grad, d_fc1_grad,
         d_residual_grad, d_input_grad};
-    if (mgt_cuda::LaunchLocalMlpBatchNormTrainStep(
+#ifdef MGT_TEST_LOCAL_FP16
+    mgt_cuda::LocalMlpFp16Context fp16{
+        d_weights, d_weight_half, d_operand_a, d_operand_b, 12, 8};
+    const auto launch_status = mgt_cuda::LaunchLocalMlpBatchNormTrainStepFp16(
             shape, 3, 2, d_states, d_labels, 4, plan, workspace_count,
-            adam, buffers, blas, nullptr) != mgt::Status::kOk ||
-        cudaDeviceSynchronize() != cudaSuccess) return 1;
+            adam, buffers, &fp16, blas, nullptr);
+#else
+    const auto launch_status = mgt_cuda::LaunchLocalMlpBatchNormTrainStep(
+            shape, 3, 2, d_states, d_labels, 4, plan, workspace_count,
+            adam, buffers, blas, nullptr);
+#endif
+    if (launch_status != mgt::Status::kOk || cudaDeviceSynchronize() != cudaSuccess) return 1;
     float gradient[27]{}, affine_gradient[6]{};
     cudaMemcpy(gradient, d_weight_grad, sizeof(gradient), cudaMemcpyDeviceToHost);
     cudaMemcpy(affine_gradient, d_affine_grad, 3 * sizeof(float), cudaMemcpyDeviceToHost);
@@ -105,8 +132,19 @@ int main() {
     cudaMemcpy(&updated_weight, d_weights, sizeof(float), cudaMemcpyDeviceToHost);
     cudaMemcpy(&updated_affine, d_affine, sizeof(float), cudaMemcpyDeviceToHost);
     cublasDestroy(blas);
-    if (!Near(updated_weight, -.1209999999f, 2e-6f) ||
-        !Near(updated_affine, .9990000725f, 2e-6f)) {
+    if (!Near(updated_weight, -.1209999999f,
+#ifdef MGT_TEST_LOCAL_FP16
+              2e-3f
+#else
+              2e-6f
+#endif
+              ) || !Near(updated_affine, .9990000725f,
+#ifdef MGT_TEST_LOCAL_FP16
+              2e-3f
+#else
+              2e-6f
+#endif
+              )) {
         std::fprintf(stderr, "updated weight=%.9g affine=%.9g\n", updated_weight, updated_affine);
         return 1;
     }

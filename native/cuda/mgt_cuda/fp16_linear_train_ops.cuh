@@ -10,6 +10,15 @@
 
 namespace mgt_cuda {
 
+struct LocalMlpFp16Context {
+    float* master_weights = nullptr;
+    __half* weight_mirror = nullptr;
+    __half* operand_a = nullptr;
+    __half* operand_b = nullptr;
+    std::uint64_t operand_a_capacity = 0;
+    std::uint64_t operand_b_capacity = 0;
+};
+
 mgt::Status LaunchFloatToHalf(
     const float* input, __half* output, std::uint64_t count, cudaStream_t stream);
 mgt::Status LaunchFp16LinearForward(
