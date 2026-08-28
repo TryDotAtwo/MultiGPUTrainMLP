@@ -109,9 +109,21 @@ int main() {
 #endif
     if (launch_status != mgt::Status::kOk || cudaDeviceSynchronize() != cudaSuccess) return 1;
     float gradient[27]{}, affine_gradient[6]{};
+    float loss = 0.0f;
+    cudaMemcpy(&loss, d_loss, sizeof(loss), cudaMemcpyDeviceToHost);
     cudaMemcpy(gradient, d_weight_grad, sizeof(gradient), cudaMemcpyDeviceToHost);
     cudaMemcpy(affine_gradient, d_affine_grad, 3 * sizeof(float), cudaMemcpyDeviceToHost);
     cudaMemcpy(affine_gradient + 3, d_affine_grad + 9, 3 * sizeof(float), cudaMemcpyDeviceToHost);
+    if (!Near(loss, 3.6869926453f,
+#ifdef MGT_TEST_LOCAL_FP16
+              2e-3f
+#else
+              3e-5f
+#endif
+              )) {
+        std::fprintf(stderr, "loss=%.9g expected %.9g\n", loss, 3.6869926453f);
+        return 1;
+    }
     const float expected_gradient[27]{
         .3715080619f,.1338969618f,-.1037141159f,-.0928778797f,-.0334745273f,.0259287991f,
         -.1857523322f,-.0669478998f,.0518565141f,-.0928778797f,-.0334745273f,.0259287991f,

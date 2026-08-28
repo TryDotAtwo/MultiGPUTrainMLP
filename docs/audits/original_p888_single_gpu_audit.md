@@ -87,11 +87,24 @@ semantic and numerical gates before it are green.
 - Per-layer shape/layout/dtype/leading dimensions and FP32 reference parity.
 - Record selected cuBLAS/CUTLASS algorithms, Tensor Core eligibility, issued
   versus useful FLOPs, and epilogue/materialization traffic.
+- Current status: **green correctness / profiled**. The local FP16 and FP32 full
+  steps match the frozen CPU-derived fixture, including all residual parameter
+  gradients. SM86 selects `ampere_s168*` Tensor Core kernels (plus CUTLASS for
+  the hidden weight-gradient shape). Physical dense work is about 53.56 GFLOP
+  per complete train step; the GEMM kernels consume about 5.87 ms, or 9.12
+  issued TFLOP/s inside GEMMs. Against the full 44.01 ms median step this is
+  only 1.22 issued TFLOP/s, confirming that non-GEMM stages dominate.
 
 ## A6. Output and loss
 
 - Scalar head, bias, MSE normalization, loss reduction, and label alignment.
 - Compare output/loss/dY against the reference on fixed real states.
+- Current status: **green for scalar-head semantics**. The fixed CPU-derived
+  fixture checks scalar output, MSE loss `3.6869926453`, output weight/bias
+  gradients, and both FP32 and FP16 complete local steps. Nsight measures the
+  output bias, scalar loss reduction, output-input gradient, and two GEMVs as
+  negligible relative to the step. A larger real-state fixture remains useful
+  evidence hardening, not the first correctness blocker.
 
 ## A7. Dense and BatchNorm backward
 
