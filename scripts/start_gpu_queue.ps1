@@ -1,5 +1,5 @@
 param(
-  [string]$Image = "gpu-dev-cutlass-nsight:2026-05-24",
+  [string]$Image = "mgt-single-gpu-dev:2026-08-28",
   [string]$Name = "mgt-gpu-queue",
   [string]$Root = "D:/MultiGPUTrainMLP",
   [int]$CooldownSec = 10

@@ -1,0 +1,15 @@
+FROM gpu-dev-cutlass-nsight:2026-05-24
+
+ARG RUST_TOOLCHAIN=1.89.0
+ENV CARGO_HOME=/opt/rust/cargo \
+    RUSTUP_HOME=/opt/rust/rustup \
+    PATH=/opt/rust/cargo/bin:${PATH}
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --profile minimal --default-toolchain "${RUST_TOOLCHAIN}" \
+    && apt-get purge -y --auto-remove curl \
+    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* \
+    && rustc --version \
+    && cargo --version

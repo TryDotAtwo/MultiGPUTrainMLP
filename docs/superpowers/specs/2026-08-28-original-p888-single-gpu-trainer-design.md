@@ -43,7 +43,7 @@ CUDA Graph capture is optional and may be retained only after an uninstrumented 
 
 ## Development and acceptance targets
 
-Local development uses the existing `mgt-gpu-queue` container on RTX 3070 Laptop GPU, CUDA architecture 86, and available Nsight Systems/Compute tools. Every GPU command goes through the queue.
+Local development uses `mgt-single-gpu-dev:2026-08-28`, a minimal Rust layer over the existing CUDA/CUTLASS/Nsight image, in the `mgt-gpu-queue` container on RTX 3070 Laptop GPU, CUDA architecture 86. Every GPU command goes through the queue.
 
 Local profiling identifies launch gaps, synchronization, GEMM selection, memory traffic, and dominant kernels. RTX 3070 results are diagnostic only.
 

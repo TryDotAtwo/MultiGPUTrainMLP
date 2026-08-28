@@ -23,6 +23,7 @@
 
 ## File Structure
 
+- `Dockerfile.single-gpu-rust`: pinned minimal Rust layer over the existing CUDA/CUTLASS/Nsight image.
 - `native/include/mgt/single_gpu_contract.hpp`, `native/src/single_gpu_contract.cpp`: fixed original-p888 logical/physical contract and validation.
 - `native/cuda/mgt_cuda/local_batch_norm.cuh`, `native/cuda/local_batch_norm.cu`: collective-free local BatchNorm forward/backward.
 - `native/cuda/mgt_cuda/local_mlp_batch_norm.cuh`, `native/cuda/local_mlp_batch_norm.cu`: one-GPU original-model orchestration with no reference to the NCCL implementation unit.
@@ -31,6 +32,19 @@
 - `crates/trainer-cli/src/single_gpu_ffi.rs`: safe Rust owner and ABI conversion.
 - `scripts/profile_original_p888_single_gpu.ps1`: host entrypoint that submits build, correctness, baseline, and profile jobs to the shared queue.
 - `scripts/summarize_single_gpu_profile.py`: deterministic JSON summary from benchmark output.
+
+---
+
+### Task 0: Add Rust to the shared CUDA development image
+
+**Files:**
+- Create: `Dockerfile.single-gpu-rust`
+- Modify: `scripts/start_gpu_queue.ps1`
+
+- [x] **Step 1: Verify RED** — the base image reports `cargo: command not found`.
+- [x] **Step 2: Build `mgt-single-gpu-dev:2026-08-28`** — install pinned Rust 1.89 with the minimal rustup profile and remove installer packages/lists in the same layer.
+- [x] **Step 3: Recreate the empty queue container** — preserve `.gpu_queue` and workspace through the existing bind mount.
+- [x] **Step 4: Verify GREEN** — Rust/Cargo, Nsight, RTX 3070 SM86, and all six `trainer-cli` tests pass inside the queue.
 
 ---
 
