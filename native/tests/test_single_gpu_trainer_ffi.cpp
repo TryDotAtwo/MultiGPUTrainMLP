@@ -37,6 +37,8 @@ int main() {
     step.struct_size = sizeof(step);
     step.active_rows = 4;
     step.optimizer_step = 1;
+    step.semantic_epoch = 0;
+    step.epoch_sample_offset = 0;
     MgtSingleGpuMetricsV1 metrics{};
     metrics.struct_size = sizeof(metrics);
     if (mgt_single_gpu_v1_train_step(handle, &step, &metrics) != MGT_STATUS_INVALID_CONFIG)

@@ -226,6 +226,9 @@ mgt::Status LaunchSingleGpuTrainStep(
     if (!trainer || !ticket || !trainer->prepared || !request.active_rows ||
         request.optimizer_step != trainer->sequence + 1) return mgt::Status::kInvalidConfig;
     if (request.active_rows > trainer->info.capacity_rows) return mgt::Status::kCapacityExceeded;
+    if (request.epoch_sample_offset > mgt::P888TrainingContract::kSamplesPerEpoch ||
+        request.active_rows > mgt::P888TrainingContract::kSamplesPerEpoch -
+            request.epoch_sample_offset) return mgt::Status::kInvalidConfig;
     auto* arena = trainer->arena;
     MlpBatchNormStepBuffers buffers{
         At<float>(arena, trainer->layout.weights), At<float>(arena, trainer->layout.weight_grad),
@@ -239,9 +242,11 @@ mgt::Status LaunchSingleGpuTrainStep(
         At<float>(arena, trainer->layout.input_grad)};
     auto adam = trainer->info.adam;
     adam.step = request.optimizer_step;
-    const RandomWalkKernelConfig walk{
+    RandomWalkKernelConfig walk{
         request.active_rows, trainer->info.k_min, trainer->info.k_max,
         mgt::kMoveCount, trainer->info.contract.state_len, mgt::kStateStorageLen};
+    walk.epoch_sample_offset = request.epoch_sample_offset;
+    walk.original_p888_schedule = 1;
     auto status = LaunchRandomWalkKernel(
         walk, trainer->info.base_seed, request.epoch, request.optimizer_step,
         trainer->info.global_rank,

@@ -51,19 +51,22 @@ int main() {
         return 7;
     const auto allocations = mgt_cuda::SingleGpuTrainerAllocationCountForTest();
     for (std::uint64_t step = 1; step <= 3; ++step) {
-        if (mgt_cuda::LaunchSingleGpuTrainStep(trainer, {4, step, 0}, &ticket) !=
+        if (mgt_cuda::LaunchSingleGpuTrainStep(trainer, {4, step, 0, (step - 1) * 4}, &ticket) !=
             mgt::Status::kOk) return 8;
         if (!ticket.completion_event || ticket.sequence != step ||
             cudaEventSynchronize(ticket.completion_event) != cudaSuccess) return 9;
     }
     if (mgt_cuda::SingleGpuTrainerAllocationCountForTest() != allocations)
         return 10;
-    if (mgt_cuda::LaunchSingleGpuTrainStep(trainer, {3, 4, 0}, &ticket) != mgt::Status::kOk ||
+    if (mgt_cuda::LaunchSingleGpuTrainStep(trainer, {3, 4, 0, 12}, &ticket) != mgt::Status::kOk ||
         cudaEventSynchronize(ticket.completion_event) != cudaSuccess) return 11;
     if (mgt_cuda::LaunchSingleGpuTrainStep(trainer, {5, 5, 0}, &ticket) !=
         mgt::Status::kCapacityExceeded) return 11;
     if (mgt_cuda::LaunchSingleGpuTrainStep(trainer, {4, 6, 0}, &ticket) !=
         mgt::Status::kInvalidConfig) return 12;
+    if (mgt_cuda::LaunchSingleGpuTrainStep(
+            trainer, {4, 5, 0, mgt::P888TrainingContract::kSamplesPerEpoch},
+            &ticket) != mgt::Status::kInvalidConfig) return 12;
     mgt_cuda::SingleGpuTrainerMetrics metrics{};
     if (mgt_cuda::ReadSingleGpuMetrics(trainer, &metrics) != mgt::Status::kOk ||
         metrics.completed_sequence != 4 || metrics.optimizer_step != 4 ||

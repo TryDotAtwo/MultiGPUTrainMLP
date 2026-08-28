@@ -11,9 +11,15 @@ semantic and numerical gates before it are green.
   change the move table.
 - Validate 18 named permutations, 72 positions, target range, inverse map, and
   model parameter count.
-- Current status: **partial**. Production moves and archived target exist. The
-  benchmark now rejects an identity-only move set. Parser/schema and hashes are
-  not yet frozen in the benchmark artifact.
+- Current status: **partial/green inputs**. Production moves and archived target
+  exist; the binary target was checked against the archived PyTorch tensor. The
+  benchmark rejects an identity-only move set and loading rejects noncanonical
+  inverse pairs. Structured parser hardening and automatic hashes in benchmark
+  output remain open.
+- Frozen SHA256: group JSON
+  `f2d7cae9a387d8acbe7e4082711179dc5a309232e4278733c90853534c649e02`;
+  target binary
+  `107de2bc788e11029f7851f8e1b0b5afb4e34379c709fc840689ebd3d1f51b5b`.
 
 ## A1. Batch generation semantics
 
@@ -24,8 +30,13 @@ semantic and numerical gates before it are green.
   and resume position.
 - CPU golden versus CUDA exact state/label/meta bytes; depth histogram,
   duplicates, cancellation rate, and cross-rank overlap.
-- Current status: **red**. The current generator samples depth independently and
-  excludes repeated move IDs instead of inverse moves.
+- Current status: **green for single-GPU generation**. CPU and CUDA use a
+  deterministic bijection over all 999,978 epoch positions, producing exactly
+  34,482 rows per depth. Both implement canonical inverse exclusion including
+  the move-zero quirk. A fixed production-input slice is byte-identical for
+  CPU/CUDA `state`, `label`, and `meta`. C++, C ABI, and Rust carry semantic
+  epoch plus epoch-sample offset. Multi-rank shard overlap remains an A1 gate
+  for the later 2xT4 phase.
 
 ## A2. Generated storage and handoff
 

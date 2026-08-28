@@ -29,6 +29,7 @@ struct SingleGpuTrainStepRequest {
     std::uint32_t active_rows = 0;
     std::uint64_t optimizer_step = 0;
     std::uint64_t epoch = 0;
+    std::uint64_t epoch_sample_offset = 0;
 };
 
 struct SingleGpuTrainStepTicket {

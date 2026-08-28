@@ -93,6 +93,8 @@ Status LoadPuzzleDefinition(const std::filesystem::path& group_json,
         out->target.v[i] = 0;
     }
 
+    if (!HasCanonicalInverseMovePairs(*out)) return Status::kInvalidPuzzle;
+
     return Status::kOk;
 }
 
@@ -103,6 +105,19 @@ bool HasNonIdentityMove(const PuzzleDefinition& puzzle) {
         }
     }
     return false;
+}
+
+bool HasCanonicalInverseMovePairs(const PuzzleDefinition& puzzle) {
+    if (kMoveCount % 2U != 0) return false;
+    for (std::uint32_t first = 0; first < kMoveCount; first += 2U) {
+        const auto& direct = puzzle.moves[first];
+        const auto& inverse = puzzle.moves[first + 1U];
+        for (std::uint32_t i = 0; i < kStateLen; ++i) {
+            if (direct.v[inverse.v[i]] != i || inverse.v[direct.v[i]] != i)
+                return false;
+        }
+    }
+    return true;
 }
 
 }  // namespace mgt

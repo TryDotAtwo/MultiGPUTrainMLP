@@ -27,6 +27,10 @@ int main() {
         &production);
     if (production_status != mgt::Status::kOk ||
         !mgt::HasNonIdentityMove(production)) return EXIT_FAILURE;
+    if (!mgt::HasCanonicalInverseMovePairs(production)) return EXIT_FAILURE;
+    auto wrong_inverse_order = production;
+    std::swap(wrong_inverse_order.moves[1], wrong_inverse_order.moves[2]);
+    if (mgt::HasCanonicalInverseMovePairs(wrong_inverse_order)) return EXIT_FAILURE;
 
     const std::filesystem::path bad_json = "build-native/bad-p888.json";
     {

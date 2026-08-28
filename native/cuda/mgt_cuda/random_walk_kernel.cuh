@@ -13,6 +13,8 @@ struct RandomWalkKernelConfig {
     std::uint32_t move_count = mgt::kMoveCount;
     std::uint32_t state_len = mgt::kStateLen;
     std::uint32_t state_storage_len = mgt::kStateStorageLen;
+    std::uint64_t epoch_sample_offset = 0;
+    std::uint32_t original_p888_schedule = 0;
 };
 
 __host__ mgt::Status ValidateRandomWalkKernelConfig(const RandomWalkKernelConfig& config);

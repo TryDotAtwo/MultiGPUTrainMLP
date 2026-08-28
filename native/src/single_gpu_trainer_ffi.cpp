@@ -77,13 +77,15 @@ extern "C" MgtStatus mgt_single_gpu_v1_prepare(MgtSingleGpuHandle* h) {
 extern "C" MgtStatus mgt_single_gpu_v1_train_step(
     MgtSingleGpuHandle* h, const MgtSingleGpuStepV1* step, MgtSingleGpuMetricsV1* metrics) {
     if (!h || !h->trainer || !step || step->struct_size != sizeof(*step) ||
-        step->reserved_u64[0] || step->reserved_u64[1] ||
         (metrics && metrics->struct_size != sizeof(*metrics)))
         return Fail(h, MGT_STATUS_INVALID_CONFIG, "invalid train-step layout");
     return Guard(h, [&] {
         mgt_cuda::SingleGpuTrainStepTicket ticket{};
         auto status = mgt_cuda::LaunchSingleGpuTrainStep(
-            h->trainer, {step->active_rows, step->optimizer_step}, &ticket);
+            h->trainer,
+            {step->active_rows, step->optimizer_step, step->semantic_epoch,
+             step->epoch_sample_offset},
+            &ticket);
         if (status != mgt::Status::kOk) return Fail(h, Convert(status), "train-step enqueue failed");
         if (metrics) {
             mgt_cuda::SingleGpuTrainerMetrics native{};

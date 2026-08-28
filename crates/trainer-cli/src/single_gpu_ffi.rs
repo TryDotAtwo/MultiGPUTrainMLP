@@ -29,7 +29,8 @@ struct RawStep {
     struct_size: u32,
     active_rows: u32,
     optimizer_step: u64,
-    reserved_u64: [u64; 2],
+    semantic_epoch: u64,
+    epoch_sample_offset: u64,
 }
 
 #[repr(C)]
@@ -167,12 +168,19 @@ impl SingleGpuTrainer {
         Ok(())
     }
 
-    pub fn train_step(&mut self, active_rows: u32, optimizer_step: u64) -> Result<SingleGpuMetrics> {
+    pub fn train_step(
+        &mut self,
+        active_rows: u32,
+        optimizer_step: u64,
+        semantic_epoch: u64,
+        epoch_sample_offset: u64,
+    ) -> Result<SingleGpuMetrics> {
         let step = RawStep {
             struct_size: std::mem::size_of::<RawStep>() as u32,
             active_rows,
             optimizer_step,
-            reserved_u64: [0; 2],
+            semantic_epoch,
+            epoch_sample_offset,
         };
         let mut metrics = RawMetrics {
             struct_size: std::mem::size_of::<RawMetrics>() as u32,

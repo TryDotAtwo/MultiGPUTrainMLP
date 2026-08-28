@@ -19,13 +19,13 @@ Date: 2026-08-28
 ## Unprofiled result
 
 ```json
-{"gpu":"NVIDIA GeForce RTX 3070 Laptop GPU","arch":86,"batch":4096,"warmup":2,"steps":10,"step_ms":47.3734,"samples_s":86462,"memory_bytes":681086464,"loss":242.552,"status":"ok"}
+{"gpu":"NVIDIA GeForce RTX 3070 Laptop GPU","arch":86,"batch":4096,"warmup":2,"steps":10,"step_ms":44.9383,"samples_s":91147.1,"memory_bytes":681086464,"loss":239.155,"status":"ok"}
 ```
 
 An earlier 45.1725 ms result used an identity-only test move set and is invalid
 as a production-data baseline. The benchmark now rejects that fixture. The
-number above uses real p888 moves, but is still provisional until the A1 random
-walk semantic audit is green.
+number above uses real p888 moves and the audited equal-depth, inverse-excluding
+single-GPU schedule.
 
 ## Nsight Systems attribution
 

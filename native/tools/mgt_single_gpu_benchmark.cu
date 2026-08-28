@@ -45,14 +45,16 @@ int main(int argc, char** argv) {
     std::uint64_t sequence = 0;
     for (std::uint32_t i = 0; i < warmup; ++i) {
         ++sequence;
-        if (mgt_cuda::LaunchSingleGpuTrainStep(trainer, {batch, sequence, 0}, &ticket) !=
+        if (mgt_cuda::LaunchSingleGpuTrainStep(
+                trainer, {batch, sequence, 0, (sequence - 1) * batch}, &ticket) !=
             mgt::Status::kOk) return 6;
     }
     if (warmup && cudaEventSynchronize(ticket.completion_event) != cudaSuccess) return 7;
     const auto begin = std::chrono::steady_clock::now();
     for (std::uint32_t i = 0; i < steps; ++i) {
         ++sequence;
-        if (mgt_cuda::LaunchSingleGpuTrainStep(trainer, {batch, sequence, 0}, &ticket) !=
+        if (mgt_cuda::LaunchSingleGpuTrainStep(
+                trainer, {batch, sequence, 0, (sequence - 1) * batch}, &ticket) !=
             mgt::Status::kOk) return 8;
     }
     if (cudaEventSynchronize(ticket.completion_event) != cudaSuccess) return 9;

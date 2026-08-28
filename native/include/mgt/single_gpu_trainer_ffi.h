@@ -44,7 +44,8 @@ typedef struct MgtSingleGpuStepV1 {
     uint32_t struct_size;
     uint32_t active_rows;
     uint64_t optimizer_step;
-    uint64_t reserved_u64[2];
+    uint64_t semantic_epoch;
+    uint64_t epoch_sample_offset;
 } MgtSingleGpuStepV1;
 
 typedef struct MgtSingleGpuMetricsV1 {
