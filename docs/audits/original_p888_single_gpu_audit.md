@@ -11,11 +11,13 @@ semantic and numerical gates before it are green.
   change the move table.
 - Validate 18 named permutations, 72 positions, target range, inverse map, and
   model parameter count.
-- Current status: **partial/green inputs**. Production moves and archived target
+- Current status: **green**. Production moves and archived target
   exist; the binary target was checked against the archived PyTorch tensor. The
   benchmark rejects an identity-only move set and loading rejects noncanonical
-  inverse pairs. Structured parser hardening and automatic hashes in benchmark
-  output remain open.
+  inverse pairs. The parser reads named schema fields independently of field
+  order, ignores unrelated numeric text, accepts exactly one `moves`/`actions`
+  table, and validates exact dimensions/permutations. Automatic hashes in the
+  benchmark JSON remain a reporting improvement, not a correctness gate.
 - Frozen SHA256: group JSON
   `f2d7cae9a387d8acbe7e4082711179dc5a309232e4278733c90853534c649e02`;
   target binary
@@ -44,6 +46,11 @@ semantic and numerical gates before it are green.
   `meta[rows]` 16 bytes.
 - Verify alignment, coalescing, bytes written, padding, lifetime, and that meta is
   required downstream. Check whether generation can overlap the previous step.
+- Current status: **green correctness / acceptable performance**. Static
+  contracts prove 80-byte/16-byte layouts; CPU/CUDA exact-byte parity and
+  memcheck pass. At batch 4096 NCU measured 0.276 ms. The 32-block grid reaches
+  only 7.9% occupancy and uses 127 registers/thread, but the stage is below 1%
+  of the end-to-end step, so it is not an optimization target.
 
 ## A3. Sparse input projection
 
@@ -51,6 +58,12 @@ semantic and numerical gates before it are green.
 - Audit FP16 table/master ownership, load pattern, cache behavior, accumulation
   error, padding lanes, and produced activation layout.
 - Measure useful bytes/s and NCU memory-stall counters.
+- Current status: **green correctness / red performance**. Existing FP16 full
+  step parity is green. NCU 2025.1.1 measured 4.01 ms, 212.22 GB/s, 77.48%
+  memory-pipe utilization, 96.38% achieved occupancy, 21.7/32 useful bytes per
+  global-load sector, 32.4% long-scoreboard stall share, and 362.4M executed
+  instructions. The next candidate is a row-owned/shared-state, half2-vectorized
+  gather that removes replicated state loads and halves address/control work.
 
 ## A4. BatchNorm and activation
 

@@ -53,5 +53,24 @@ int main() {
         &puzzle);
     if (bad_status != mgt::Status::kInvalidPuzzle) return EXIT_FAILURE;
 
+    const std::filesystem::path reordered_json = "build-native/reordered-p888.json";
+    {
+        std::ofstream out(reordered_json, std::ios::binary);
+        out << "{\"noise\":\"999 -42\",\"move_count\":18,\"actions\":[";
+        for (std::uint32_t move = 0; move < mgt::kMoveCount; ++move) {
+            if (move) out << ",";
+            out << "[";
+            for (std::uint32_t i = 0; i < mgt::kStateLen; ++i) {
+                if (i) out << ",";
+                out << i;
+            }
+            out << "]";
+        }
+        out << "],\"group_id\":888,\"state_len\":72}";
+    }
+    if (mgt::LoadPuzzleDefinition(
+            reordered_json, fixture_dir / "p888-target.bin", &puzzle) !=
+        mgt::Status::kOk) return EXIT_FAILURE;
+
     return EXIT_SUCCESS;
 }
