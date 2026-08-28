@@ -151,6 +151,13 @@ semantic and numerical gates before it are green.
 - No steady-state allocation or host readback; explicit stream/event ownership.
 - NVTX ranges per stage, CUDA Graph opportunity, CPU launch gaps, overlap, and
   stable clocks/power during measurements.
+- Current status: **first unresolved performance gate**. The prepared lifecycle
+  performs allocation before timed steps and the fresh timeline has no semantic
+  failure, but the step still issues hundreds of conversion/BN kernels and has
+  no accepted CUDA Graph or stage-overlap policy. During a 100-step run the
+  laptop GPU held 96--99% utilization at only 780 MHz and 80--81 C, producing
+  37.1181 ms/step versus the shorter-run 35.7755 ms median. Scheduling and the
+  thermal/power envelope must be frozen before attributing smaller deltas.
 
 ## A11. Training behavior
 
@@ -164,3 +171,10 @@ semantic and numerical gates before it are green.
   stage throughput, and end-to-end samples/s.
 - Freeze hardware, power/clocks, binary hash, inputs, batch/tail shape, warmup,
   measurement window, Nsight report, and NCU counters.
+- Current SM86 snapshot: 53.558 GFLOP of physically issued dense work and
+  51.074 GFLOP of logical/useful dense work per train step. At 35.7755 ms this
+  is 1.497 issued and 1.428 useful end-to-end TFLOP/s, plus non-dense work not
+  represented by those FLOP counts. GEMM-only throughput is about 9.12 TFLOP/s.
+  At the observed 780 MHz, the 40-SM FP16 Tensor Core envelope is about 15.97
+  TFLOP/s: GEMMs reach roughly 57%, while the full step reaches roughly 9.4%
+  because sparse gather, BN, conversions, and optimizer are not dense GEMMs.
