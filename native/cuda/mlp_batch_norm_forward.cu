@@ -140,6 +140,25 @@ __global__ void SparseInputGradCoalesced96(
     }
 }
 
+__global__ void BuildGroupedInputRows(CudaMlpShape s,const mgt::TrainStateStorage*states,unsigned rows,unsigned*counts,unsigned*row_ids){
+    const unsigned position=blockIdx.x,value=threadIdx.x;
+    if(position>=s.state_len||value>=s.state_value_pad)return;
+    const std::uint64_t bin=static_cast<std::uint64_t>(position)*s.state_value_pad+value;
+    unsigned count=0;
+    for(unsigned row=0;row<rows;++row)if(states[row].v[position]==value)row_ids[bin*rows+count++]=row;
+    counts[bin]=count;
+}
+
+__global__ void SparseInputGradGroupedRows(CudaMlpShape s,const float*dz,unsigned rows,const unsigned*counts,const unsigned*row_ids,float*grad){
+    const unsigned h=blockIdx.x*blockDim.x+threadIdx.x;
+    const std::uint64_t bin=blockIdx.y;
+    if(h>=s.hd1)return;
+    float sum=0.0f;
+    const unsigned count=counts[bin];
+    for(unsigned i=0;i<count;++i)sum+=dz[static_cast<std::uint64_t>(row_ids[bin*rows+i])*s.hd1+h];
+    grad[bin*s.hd1+h]=sum;
+}
+
 constexpr unsigned GROUPED_INPUT_MAX_POSITIONS = 4;
 
 __global__ void SparseInputGradExactGrouped(
@@ -198,6 +217,7 @@ struct InputGradLaunchConfig {
     bool exact;
     unsigned positions;
     std::size_t shared;
+    bool grouped_rows;
 };
 
 InputGradLaunchConfig ResolveInputGradLaunch(CudaMlpShape shape) {
@@ -209,14 +229,14 @@ InputGradLaunchConfig ResolveInputGradLaunch(CudaMlpShape shape) {
     static thread_local InputGradLaunchConfig cached{};
     int device = 0;
     if (cudaGetDevice(&device) != cudaSuccess) {
-        return {mgt::Status::kCudaFailure, false, 1, 0};
+        return {mgt::Status::kCudaFailure, false, 1, 0, false};
     }
     if (initialized && device == cached_device && shape.state_len == cached_state_len &&
         shape.state_value_pad == cached_value_pad && shape.hd1 == cached_hd1) {
         return cached;
     }
 
-    cached = {mgt::Status::kInvalidConfig, false, 1, 0};
+    cached = {mgt::Status::kInvalidConfig, false, 1, 0, false};
     const char* mode = std::getenv("MGT_BN_INPUT_GRAD_KERNEL");
     const char* requested_text =
         std::getenv("MGT_BN_INPUT_GRAD_POSITIONS_PER_BLOCK");
@@ -224,6 +244,7 @@ InputGradLaunchConfig ResolveInputGradLaunch(CudaMlpShape shape) {
     const bool automatic = mode == nullptr || std::strcmp(mode, "auto") == 0;
     const bool coalesced = mode != nullptr && std::strcmp(mode, "coalesced") == 0;
     const bool exact = mode != nullptr && std::strcmp(mode, "exact") == 0;
+    const bool grouped_rows = mode != nullptr && std::strcmp(mode, "grouped_rows") == 0;
     unsigned requested = 0;
     bool requested_valid = true;
     if (requested_text != nullptr) {
@@ -234,15 +255,24 @@ InputGradLaunchConfig ResolveInputGradLaunch(CudaMlpShape shape) {
         if (requested_valid) requested = static_cast<unsigned>(parsed);
     }
 
-    if ((strict || automatic || exact || coalesced) && requested_valid &&
+    if ((strict || automatic || exact || coalesced || grouped_rows) && requested_valid &&
         (!(strict || coalesced) || requested == 0)) {
-        if (coalesced) {
+        if (grouped_rows && requested == 0) {
+            cached = {mgt::Status::kOk, false, 0, 0, true};
+        } else if (coalesced) {
             cached = {mgt::Status::kOk, true, 0,
-                      static_cast<std::size_t>(INPUT_T) * shape.state_value_pad * sizeof(float)};
+                      static_cast<std::size_t>(INPUT_T) * shape.state_value_pad * sizeof(float), false};
         } else if (strict) {
-            cached = {mgt::Status::kOk, false, 1, 0};
+            cached = {mgt::Status::kOk, false, 1, 0, false};
         } else if (automatic && requested == 0) {
-            cached = {mgt::Status::kOk, false, 1, 0};
+            cudaDeviceProp properties{};
+            if (cudaGetDeviceProperties(&properties, device) != cudaSuccess) {
+                cached.status = mgt::Status::kCudaFailure;
+            } else if (properties.major == 8 && properties.minor == 6) {
+                cached = {mgt::Status::kOk, false, 0, 0, true};
+            } else {
+                cached = {mgt::Status::kOk, false, 1, 0, false};
+            }
         } else {
             cudaDeviceProp properties{};
             if (cudaGetDeviceProperties(&properties, device) != cudaSuccess) {
@@ -250,7 +280,7 @@ InputGradLaunchConfig ResolveInputGradLaunch(CudaMlpShape shape) {
             } else if (automatic && requested == 0 && properties.major >= 8) {
                 // The owner-write kernel is ~2.6x faster than grouped exact on A100.
                 // Keep grouped exact available explicitly and as the T4 auto policy.
-                cached = {mgt::Status::kOk, false, 1, 0};
+                cached = {mgt::Status::kOk, false, 1, 0, false};
             } else {
                 const mgt::InputGradGroupingLimits limits{
                     static_cast<std::uint64_t>(properties.sharedMemPerBlock),
@@ -291,7 +321,8 @@ InputGradLaunchConfig ResolveInputGradLaunch(CudaMlpShape shape) {
         stderr,
         "mgt input_grad kernel=%s positions=%u shared=%zu status=%u\n",
         cached.status == mgt::Status::kOk
-            ? (cached.exact ? (cached.positions == 0 ? "coalesced" : "exact") : "strict")
+            ? (cached.grouped_rows ? "grouped_rows" :
+               (cached.exact ? (cached.positions == 0 ? "coalesced" : "exact") : "strict"))
             : "invalid",
         cached.positions,
         cached.shared,
@@ -360,7 +391,7 @@ mgt::Status LaunchMlpBatchNormInputBackward(
         !weight_grad || !affine_grad || !ctx) return mgt::Status::kInvalidConfig;
     const InputGradLaunchConfig input_launch = ResolveInputGradLaunch(s);
     if (input_launch.status != mgt::Status::kOk) return input_launch.status;
-    if (!input_launch.exact) {
+    if (!input_launch.exact && !input_launch.grouped_rows) {
         return MGT_STRICT_INPUT_BACKWARD(
             s, aff, states, lr, gr, fw, p, input_grad, weight_grad, affine_grad, ctx, st);
     }
@@ -380,9 +411,25 @@ mgt::Status LaunchMlpBatchNormInputBackward(
         return mgt::Status::kCudaFailure;
     }
     const std::uint64_t parameter_count = HW(s);
-    if (cudaMemsetAsync(weight_grad, 0, parameter_count * sizeof(float), st) != cudaSuccess)
+    if (input_launch.grouped_rows) {
+        const std::uint64_t bins=static_cast<std::uint64_t>(s.state_len)*s.state_value_pad;
+        const std::uint64_t index_count=static_cast<std::uint64_t>(lr)*bins;
+        const std::uint64_t scratch_floats=bins+index_count;
+        if(scratch_floats>p.workspace_floats){
+            if(cudaMemsetAsync(weight_grad,0,parameter_count*sizeof(float),st)!=cudaSuccess)return mgt::Status::kCudaFailure;
+            const dim3 grid((s.hd1+INPUT_T-1U)/INPUT_T,s.state_len);
+            const std::size_t shared=static_cast<std::size_t>(INPUT_T)*(s.state_value_pad+1U)*sizeof(float);
+            SparseInputGrad<<<grid,INPUT_T,shared,st>>>(s,states,input_grad,lr,weight_grad);
+        }else{
+            auto*counts=reinterpret_cast<unsigned*>(bn);
+            auto*row_ids=counts+bins;
+            BuildGroupedInputRows<<<s.state_len,s.state_value_pad,0,st>>>(s,states,lr,counts,row_ids);
+            const dim3 grid((s.hd1+T-1U)/T,static_cast<unsigned>(bins));
+            SparseInputGradGroupedRows<<<grid,T,0,st>>>(s,input_grad,lr,counts,row_ids,weight_grad);
+        }
+    } else if (cudaMemsetAsync(weight_grad, 0, parameter_count * sizeof(float), st) != cudaSuccess) {
         return mgt::Status::kCudaFailure;
-    if (input_launch.positions == 0) {
+    } else if (input_launch.positions == 0) {
         const dim3 grid((s.hd1 + INPUT_T - 1U) / INPUT_T, s.state_len);
         SparseInputGradCoalesced96<<<grid, INPUT_T, input_launch.shared, st>>>(
             s, states, input_grad, lr, weight_grad);
@@ -411,5 +458,14 @@ static mgt::Status LaunchAdamBackend(const CudaMlpShape&s,const mgt::BatchNormTr
 if(auto*fp=LocalFp16(ctx)){AdamWKernelConfig wc=base;wc.param_count=OB(s)+s.output_dim;AdamWKernelConfig ac=base;ac.param_count=2ULL*p.logical_feature_count;if(LaunchAdamWKernelWithHalfMirror(wc,b.weights,fp->weight_mirror,b.weight_grad,b.weight_m,b.weight_v,st)!=mgt::Status::kOk||LaunchAdamWKernel(ac,b.affine,b.affine_grad,b.affine_m,b.affine_v,st)!=mgt::Status::kOk)return mgt::Status::kCudaFailure;return mgt::Status::kOk;}
 #endif
 return LaunchMlpBatchNormAdamStep(s,p,base,b.weights,b.weight_grad,b.weight_m,b.weight_v,b.affine,b.affine_grad,b.affine_m,b.affine_v,st);}
-mgt::Status LaunchMlpBatchNormTrainStep(const CudaMlpShape&s,std::uint32_t lh1,std::uint32_t lh2,const mgt::TrainStateStorage*states,const float*labels,std::uint32_t lr,std::uint32_t gr,const mgt::BatchNormTrainingPlan&p,std::uint64_t fw_count,const AdamWKernelConfig&adam,MlpBatchNormStepBuffers b,NcclRankContext*ctx,cublasHandle_t blas,cudaStream_t st){if(!states||!labels||!b.weights||!b.weight_grad||!b.weight_m||!b.weight_v||!b.affine||!b.affine_grad||!b.affine_m||!b.affine_v||!b.running||!b.outputs||!b.forward_workspace||!b.loss||!b.output_dy||!b.block_grad||!b.fc1_grad||!b.residual_grad||!b.input_grad)return mgt::Status::kInvalidConfig;auto z=LaunchMlpBatchNormForward(s,lh1,lh2,b.weights,b.affine,b.running,states,lr,gr,b.outputs,b.forward_workspace,fw_count,p,ctx,blas,st);if(z!=mgt::Status::kOk)return z;float*final_activation=b.forward_workspace+static_cast<std::uint64_t>(lr)*s.hd1+static_cast<std::uint64_t>(s.residual_blocks)*lr*s.hd2;z=LaunchMlpBatchNormOutputLossGrad(s,b.weights,labels,b.outputs,final_activation,lr,gr,b.loss,b.weight_grad,b.output_dy,b.block_grad,ctx,blas,st);if(z!=mgt::Status::kOk)return z;z=LaunchMlpBatchNormResidualStackBackward(s,b.weights,b.affine,lr,gr,b.forward_workspace,p,b.block_grad,b.weight_grad,b.affine_grad,b.fc1_grad,b.residual_grad,ctx,blas,st);if(z!=mgt::Status::kOk)return z;z=LaunchMlpBatchNormHiddenBackward(s,b.weights,b.affine,lr,gr,b.forward_workspace,p,b.block_grad,b.weight_grad,b.affine_grad,b.input_grad,ctx,blas,st);if(z!=mgt::Status::kOk)return z;z=LaunchMlpBatchNormInputBackward(s,b.affine,states,lr,gr,b.forward_workspace,p,b.input_grad,b.weight_grad,b.affine_grad,ctx,st);if(z!=mgt::Status::kOk)return z;return LaunchAdamBackend(s,p,adam,b,ctx,st);}
+mgt::Status LaunchMlpBatchNormTrainStep(const CudaMlpShape&s,std::uint32_t lh1,std::uint32_t lh2,const mgt::TrainStateStorage*states,const float*labels,std::uint32_t lr,std::uint32_t gr,const mgt::BatchNormTrainingPlan&p,std::uint64_t fw_count,const AdamWKernelConfig&adam,MlpBatchNormStepBuffers b,NcclRankContext*ctx,cublasHandle_t blas,cudaStream_t st){
+    if(!states||!labels||!b.weights||!b.weight_grad||!b.weight_m||!b.weight_v||!b.affine||!b.affine_grad||!b.affine_m||!b.affine_v||!b.running||!b.outputs||!b.forward_workspace||!b.loss||!b.output_dy||!b.block_grad||!b.fc1_grad||!b.residual_grad||!b.input_grad)return mgt::Status::kInvalidConfig;
+    auto z=LaunchMlpBatchNormForward(s,lh1,lh2,b.weights,b.affine,b.running,states,lr,gr,b.outputs,b.forward_workspace,fw_count,p,ctx,blas,st);if(z!=mgt::Status::kOk)return z;
+    float*final_activation=b.forward_workspace+static_cast<std::uint64_t>(lr)*s.hd1+static_cast<std::uint64_t>(s.residual_blocks)*lr*s.hd2;
+    z=LaunchMlpBatchNormOutputLossGrad(s,b.weights,labels,b.outputs,final_activation,lr,gr,b.loss,b.weight_grad,b.output_dy,b.block_grad,ctx,blas,st);if(z!=mgt::Status::kOk)return z;
+    z=LaunchMlpBatchNormResidualStackBackward(s,b.weights,b.affine,lr,gr,b.forward_workspace,p,b.block_grad,b.weight_grad,b.affine_grad,b.fc1_grad,b.residual_grad,ctx,blas,st);if(z!=mgt::Status::kOk)return z;
+    z=LaunchMlpBatchNormHiddenBackward(s,b.weights,b.affine,lr,gr,b.forward_workspace,p,b.block_grad,b.weight_grad,b.affine_grad,b.input_grad,ctx,blas,st);if(z!=mgt::Status::kOk)return z;
+    z=LaunchMlpBatchNormInputBackward(s,b.affine,states,lr,gr,b.forward_workspace,p,b.input_grad,b.weight_grad,b.affine_grad,ctx,st);if(z!=mgt::Status::kOk)return z;
+    return LaunchAdamBackend(s,p,adam,b,ctx,st);
+}
 }

@@ -176,6 +176,15 @@ if(MGT_ENABLE_CUDA)
     target_link_libraries(test_local_mlp_batch_norm_fp16_full_step PRIVATE mgt_cuda)
     add_test(NAME local_mlp_batch_norm_fp16_full_step
         COMMAND test_local_mlp_batch_norm_fp16_full_step)
+    add_executable(test_local_mlp_batch_norm_grouped_rows_full_step
+        tests/cuda/test_local_mlp_batch_norm_full_step.cu)
+    target_compile_definitions(test_local_mlp_batch_norm_grouped_rows_full_step PRIVATE
+        MGT_TEST_LOCAL_FP16=1)
+    target_link_libraries(test_local_mlp_batch_norm_grouped_rows_full_step PRIVATE mgt_cuda)
+    add_test(NAME local_mlp_batch_norm_grouped_rows_full_step
+        COMMAND test_local_mlp_batch_norm_grouped_rows_full_step)
+    set_tests_properties(local_mlp_batch_norm_grouped_rows_full_step PROPERTIES
+        ENVIRONMENT "MGT_BN_INPUT_GRAD_KERNEL=grouped_rows")
     add_executable(test_local_mlp_input_half
         tests/cuda/test_local_mlp_input_half.cu)
     target_link_libraries(test_local_mlp_input_half PRIVATE mgt_cuda)

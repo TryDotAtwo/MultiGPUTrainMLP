@@ -110,13 +110,27 @@ semantic and numerical gates before it are green.
 
 - Gradient parity per site and layer, accumulation ownership, zeroing, aliases,
   FP16 conversion traffic, and launch topology.
+- Current status: **green correctness / profiled**. Frozen CPU-derived fixtures
+  cover output, residual-stack, hidden, BN affine, and optimizer-visible weight
+  gradients in FP32 and FP16 local steps. The 32 residual layers issue the
+  expected Tensor Core dW/dX pairs; conversion/materialization remains visible
+  overhead but no correctness gate is open here.
 
 ## A8. Sparse table gradient
 
 - Exact CPU/CUDA parity including collisions and tail rows.
 - Audit algorithmic complexity, memory layout, atomics/reductions, occupancy,
-  and NCU bandwidth/stall counters. Current Nsight bottleneck: about 40% of GPU
-  time at batch 4096.
+  and NCU bandwidth/stall counters.
+- Current status: **green correctness / promoted on SM86**. The former
+  owner-write kernel took 17.36 ms, achieved 18.19% occupancy, and executed
+  457.3M instructions. The replacement deterministically builds ascending row
+  lists for every `(position,value)` in dead BN workspace, then launches
+  shared-free gathers which preserve the original FP32 accumulation order.
+  NCU measures 8.19 ms, 98.31% occupancy, 370.31 GB/s, and 221.4M instructions.
+  Production memcheck reports 0 errors; FP32/FP16 fixed-step regressions pass.
+  Three 20-step runs measured 36.4226--37.2828 ms/step, versus 44.0124 ms after
+  A3. Auto selection is intentionally limited to SM86; T4/A100 require their
+  own measurements.
 
 ## A9. Optimizer and mirrors
 
