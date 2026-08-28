@@ -42,6 +42,7 @@ add_library(mgt_core STATIC
     src/trainer_inputs.cpp
     src/training_evaluation.cpp
 )
+set_target_properties(mgt_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 target_include_directories(mgt_core PUBLIC include)
 
@@ -172,6 +173,7 @@ if(MGT_ENABLE_CUDA)
     add_test(NAME single_gpu_trainer_lifecycle
         COMMAND test_single_gpu_trainer_lifecycle)
     target_include_directories(mgt_cuda PUBLIC include cuda)
+    set_target_properties(mgt_cuda PROPERTIES POSITION_INDEPENDENT_CODE ON)
     target_link_libraries(mgt_cuda PUBLIC mgt_core CUDA::cublas CUDA::cublasLt)
     find_path(CUTLASS_INCLUDE_DIR cutlass/cutlass.h PATHS
         "${MGT_CUTLASS_ROOT}/include"
@@ -404,4 +406,10 @@ if(MGT_ENABLE_CUDA)
     set_tests_properties(native_train_periodic_artifacts PROPERTIES DEPENDS native_train_periodic_smoke)
     add_test(NAME native_train_artifacts COMMAND bash ${CMAKE_SOURCE_DIR}/tests/scripts/check_native_train_artifacts.sh native-train-smoke-run)
     set_tests_properties(native_train_artifacts PROPERTIES DEPENDS native_train_smoke)
+    add_library(mgt_single_gpu_trainer SHARED src/single_gpu_trainer_ffi.cpp)
+    target_link_libraries(mgt_single_gpu_trainer PRIVATE mgt_cuda)
+    target_include_directories(mgt_single_gpu_trainer PUBLIC include)
+    add_executable(test_single_gpu_trainer_ffi tests/test_single_gpu_trainer_ffi.cpp)
+    target_link_libraries(test_single_gpu_trainer_ffi PRIVATE mgt_single_gpu_trainer)
+    add_test(NAME single_gpu_trainer_ffi COMMAND test_single_gpu_trainer_ffi)
 endif()
