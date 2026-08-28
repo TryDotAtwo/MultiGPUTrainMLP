@@ -17,6 +17,11 @@ struct RawConfig {
     epsilon: f32,
     weight_decay: f32,
     reserved_u32: [u32; 3],
+    group_json_utf8: *const c_char,
+    target_bin_utf8: *const c_char,
+    base_seed: u64,
+    k_min: u32,
+    k_max: u32,
 }
 
 #[repr(C)]
@@ -54,7 +59,7 @@ unsafe extern "C" {
     ) -> usize;
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct SingleGpuConfig {
     pub device_id: u32,
     pub capacity_rows: u32,
@@ -63,6 +68,11 @@ pub struct SingleGpuConfig {
     pub beta2: f32,
     pub epsilon: f32,
     pub weight_decay: f32,
+    pub group_json: String,
+    pub target_bin: String,
+    pub base_seed: u64,
+    pub k_min: u32,
+    pub k_max: u32,
 }
 
 impl SingleGpuConfig {
@@ -80,6 +90,11 @@ impl Default for SingleGpuConfig {
             beta2: 0.999,
             epsilon: 1e-8,
             weight_decay: 0.0,
+            group_json: "native/tests/fixtures/p888.json".into(),
+            target_bin: "native/tests/fixtures/p888-target.bin".into(),
+            base_seed: 0x8881,
+            k_min: 1,
+            k_max: 29,
         }
     }
 }
@@ -119,6 +134,8 @@ fn error_text(handle: *mut c_void, context: &str, status: i32) -> anyhow::Error 
 
 impl SingleGpuTrainer {
     pub fn create(config: SingleGpuConfig) -> Result<Self> {
+        let group_json = CString::new(config.group_json)?;
+        let target_bin = CString::new(config.target_bin)?;
         let raw = RawConfig {
             struct_size: std::mem::size_of::<RawConfig>() as u32,
             abi_version: SingleGpuConfig::ABI_VERSION,
@@ -130,6 +147,11 @@ impl SingleGpuTrainer {
             epsilon: config.epsilon,
             weight_decay: config.weight_decay,
             reserved_u32: [0; 3],
+            group_json_utf8: group_json.as_ptr(),
+            target_bin_utf8: target_bin.as_ptr(),
+            base_seed: config.base_seed,
+            k_min: config.k_min,
+            k_max: config.k_max,
         };
         let mut handle = ptr::null_mut();
         let status = unsafe { mgt_single_gpu_v1_create(&raw, &mut handle) };

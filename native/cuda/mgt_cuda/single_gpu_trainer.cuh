@@ -1,6 +1,7 @@
 #pragma once
 
 #include "mgt/single_gpu_contract.hpp"
+#include "mgt/puzzle_io.hpp"
 #include "mgt/status.hpp"
 #include "mgt_cuda/adamw.cuh"
 
@@ -17,11 +18,17 @@ struct SingleGpuTrainerCreateInfo {
     std::uint32_t device_id = 0;
     std::uint32_t capacity_rows = 0;
     AdamWKernelConfig adam{};
+    const mgt::PuzzleDefinition* puzzle = nullptr;
+    std::uint64_t base_seed = 0;
+    std::uint32_t k_min = 1;
+    std::uint32_t k_max = 29;
+    std::uint32_t global_rank = 0;
 };
 
 struct SingleGpuTrainStepRequest {
     std::uint32_t active_rows = 0;
     std::uint64_t optimizer_step = 0;
+    std::uint64_t epoch = 0;
 };
 
 struct SingleGpuTrainStepTicket {

@@ -33,6 +33,11 @@ typedef struct MgtSingleGpuConfigV1 {
     float epsilon;
     float weight_decay;
     uint32_t reserved_u32[3];
+    const char* group_json_utf8;
+    const char* target_bin_utf8;
+    uint64_t base_seed;
+    uint32_t k_min;
+    uint32_t k_max;
 } MgtSingleGpuConfigV1;
 
 typedef struct MgtSingleGpuStepV1 {

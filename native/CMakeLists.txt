@@ -411,5 +411,7 @@ if(MGT_ENABLE_CUDA)
     target_include_directories(mgt_single_gpu_trainer PUBLIC include)
     add_executable(test_single_gpu_trainer_ffi tests/test_single_gpu_trainer_ffi.cpp)
     target_link_libraries(test_single_gpu_trainer_ffi PRIVATE mgt_single_gpu_trainer)
+    target_compile_definitions(test_single_gpu_trainer_ffi PRIVATE
+        MGT_TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
     add_test(NAME single_gpu_trainer_ffi COMMAND test_single_gpu_trainer_ffi)
 endif()

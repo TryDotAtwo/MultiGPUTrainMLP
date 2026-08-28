@@ -2,6 +2,7 @@
 
 #include "mgt/batch_norm_training.hpp"
 #include "mgt_cuda/local_mlp_batch_norm.cuh"
+#include "mgt_cuda/random_walk_kernel.cuh"
 
 #include <atomic>
 #include <limits>
@@ -16,7 +17,7 @@ std::atomic<std::uint64_t> g_allocation_count{0};
 struct ArenaLayout {
     std::uint64_t weights, weight_grad, weight_m, weight_v;
     std::uint64_t affine, affine_grad, affine_m, affine_v, running;
-    std::uint64_t states, labels, outputs, forward_workspace, loss;
+    std::uint64_t moves, target, states, labels, walk_meta, outputs, forward_workspace, loss;
     std::uint64_t output_dy, block_grad, fc1_grad, residual_grad, input_grad;
     std::uint64_t bytes, parameter_count, forward_workspace_floats;
 };
@@ -44,7 +45,8 @@ mgt::Status BuildLayout(const SingleGpuTrainerCreateInfo& info,
     auto adam = info.adam;
     adam.param_count = 1;
     adam.step = 1;
-    if (!plan || !layout || !info.capacity_rows ||
+    if (!plan || !layout || !info.capacity_rows || !info.puzzle || !info.base_seed ||
+        !info.k_min || info.k_min > info.k_max ||
         mgt::ValidateSingleGpuModelContract(info.contract) != mgt::Status::kOk ||
         ValidateAdamWKernelConfig(adam) != mgt::Status::kOk)
         return mgt::Status::kInvalidConfig;
@@ -74,8 +76,11 @@ mgt::Status BuildLayout(const SingleGpuTrainerCreateInfo& info,
         !floats(plan->trainable_count, &out.affine_m) ||
         !floats(plan->trainable_count, &out.affine_v) ||
         !floats(plan->running_count, &out.running) ||
+        !AddSlice(mgt::kMoveCount, sizeof(mgt::TrainStateStorage), &cursor, &out.moves) ||
+        !AddSlice(1, sizeof(mgt::TrainStateStorage), &cursor, &out.target) ||
         !AddSlice(info.capacity_rows, sizeof(mgt::TrainStateStorage), &cursor, &out.states) ||
         !floats(static_cast<std::uint64_t>(info.capacity_rows) * shape.output_dim, &out.labels) ||
+        !AddSlice(info.capacity_rows, sizeof(mgt::WalkMeta), &cursor, &out.walk_meta) ||
         !floats(static_cast<std::uint64_t>(info.capacity_rows) * shape.output_dim, &out.outputs) ||
         !floats(workspace, &out.forward_workspace) || !floats(1, &out.loss) ||
         !floats(static_cast<std::uint64_t>(info.capacity_rows) * shape.output_dim, &out.output_dy) ||
@@ -103,6 +108,7 @@ T* At(void* arena, std::uint64_t offset) {
 
 struct SingleGpuTrainer {
     SingleGpuTrainerCreateInfo info{};
+    mgt::PuzzleDefinition puzzle{};
     CudaMlpShape shape{};
     mgt::BatchNormTrainingPlan plan{};
     ArenaLayout layout{};
@@ -137,6 +143,8 @@ mgt::Status CreateSingleGpuTrainer(
     auto status = BuildLayout(info, &trainer->plan, &trainer->layout);
     if (status != mgt::Status::kOk) { delete trainer; return status; }
     trainer->info = info;
+    trainer->puzzle = *info.puzzle;
+    trainer->info.puzzle = &trainer->puzzle;
     trainer->shape = Shape(info.contract);
     int device_count = 0;
     if (cudaGetDeviceCount(&device_count) != cudaSuccess ||
@@ -165,6 +173,13 @@ mgt::Status CreateSingleGpuTrainer(
 mgt::Status PrepareSingleGpuTrainer(SingleGpuTrainer* trainer) {
     if (!trainer || trainer->prepared || !trainer->arena) return mgt::Status::kInvalidConfig;
     if (cudaMemsetAsync(trainer->arena, 0, trainer->layout.bytes, trainer->stream) != cudaSuccess)
+        return mgt::Status::kCudaFailure;
+    if (cudaMemcpyAsync(At<mgt::TrainStateStorage>(trainer->arena, trainer->layout.moves),
+                        trainer->puzzle.moves.data(), sizeof(trainer->puzzle.moves),
+                        cudaMemcpyHostToDevice, trainer->stream) != cudaSuccess ||
+        cudaMemcpyAsync(At<mgt::TrainStateStorage>(trainer->arena, trainer->layout.target),
+                        &trainer->puzzle.target, sizeof(trainer->puzzle.target),
+                        cudaMemcpyHostToDevice, trainer->stream) != cudaSuccess)
         return mgt::Status::kCudaFailure;
     auto* affine = At<float>(trainer->arena, trainer->layout.affine);
     auto* running = At<float>(trainer->arena, trainer->layout.running);
@@ -205,7 +220,19 @@ mgt::Status LaunchSingleGpuTrainStep(
         At<float>(arena, trainer->layout.input_grad)};
     auto adam = trainer->info.adam;
     adam.step = request.optimizer_step;
-    const auto status = LaunchLocalMlpBatchNormTrainStep(
+    const RandomWalkKernelConfig walk{
+        request.active_rows, trainer->info.k_min, trainer->info.k_max,
+        mgt::kMoveCount, trainer->info.contract.state_len, mgt::kStateStorageLen};
+    auto status = LaunchRandomWalkKernel(
+        walk, trainer->info.base_seed, request.epoch, request.optimizer_step,
+        trainer->info.global_rank,
+        At<mgt::TrainStateStorage>(arena, trainer->layout.moves),
+        At<mgt::TrainStateStorage>(arena, trainer->layout.target),
+        At<mgt::TrainStateStorage>(arena, trainer->layout.states),
+        At<float>(arena, trainer->layout.labels),
+        At<mgt::WalkMeta>(arena, trainer->layout.walk_meta), trainer->stream);
+    if (status != mgt::Status::kOk) return status;
+    status = LaunchLocalMlpBatchNormTrainStep(
         trainer->shape, trainer->info.contract.logical_hd1,
         trainer->info.contract.logical_hd2,
         At<mgt::TrainStateStorage>(arena, trainer->layout.states),

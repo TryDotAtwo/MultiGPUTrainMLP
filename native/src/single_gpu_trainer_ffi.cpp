@@ -1,5 +1,6 @@
 #include "mgt/single_gpu_trainer_ffi.h"
 #include "mgt/single_gpu_contract.hpp"
+#include "mgt/puzzle_io.hpp"
 #include "mgt_cuda/single_gpu_trainer.cuh"
 
 #include <algorithm>
@@ -36,14 +37,28 @@ extern "C" MgtStatus mgt_single_gpu_v1_create(
     if (!out) return Fail(nullptr, MGT_STATUS_INVALID_CONFIG, "out handle is null");
     *out = nullptr;
     if (!c || c->struct_size != sizeof(*c) || c->abi_version != MGT_SINGLE_GPU_ABI_V1 ||
-        !ReservedZero(*c)) return Fail(nullptr, MGT_STATUS_INVALID_CONFIG, "invalid ABI config layout");
+        !ReservedZero(*c) || !c->group_json_utf8 || !c->group_json_utf8[0] ||
+        !c->target_bin_utf8 || !c->target_bin_utf8[0] || !c->base_seed || !c->k_min ||
+        c->k_min > c->k_max)
+        return Fail(nullptr, MGT_STATUS_INVALID_CONFIG, "invalid ABI config layout");
     return Guard(nullptr, [&] {
         auto* h = new MgtSingleGpuHandle;
+        mgt::PuzzleDefinition puzzle{};
+        const auto load = mgt::LoadPuzzleDefinition(
+            c->group_json_utf8, c->target_bin_utf8, &puzzle);
+        if (load != mgt::Status::kOk) {
+            delete h;
+            return Fail(nullptr, Convert(load), "puzzle load failed");
+        }
         mgt_cuda::SingleGpuTrainerCreateInfo info{};
         info.contract = mgt::OriginalP888SingleGpuContract();
         info.device_id = c->device_id;
         info.capacity_rows = c->capacity_rows;
         info.adam = {0, 1, c->learning_rate, c->beta1, c->beta2, c->epsilon, c->weight_decay};
+        info.puzzle = &puzzle;
+        info.base_seed = c->base_seed;
+        info.k_min = c->k_min;
+        info.k_max = c->k_max;
         const auto status = mgt_cuda::CreateSingleGpuTrainer(info, &h->trainer);
         if (status != mgt::Status::kOk) { delete h; return Fail(nullptr, Convert(status), "native trainer creation failed"); }
         *out = h;

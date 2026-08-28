@@ -2,6 +2,10 @@
 
 #include <cstring>
 
+#ifndef MGT_TEST_SOURCE_DIR
+#define MGT_TEST_SOURCE_DIR "."
+#endif
+
 int main() {
     if (mgt_single_gpu_v1_abi_version() != MGT_SINGLE_GPU_ABI_V1) return 1;
     MgtSingleGpuConfigV1 config{};
@@ -13,6 +17,11 @@ int main() {
     config.beta1 = .9f;
     config.beta2 = .999f;
     config.epsilon = 1e-8f;
+    config.group_json_utf8 = MGT_TEST_SOURCE_DIR "/tests/fixtures/p888.json";
+    config.target_bin_utf8 = MGT_TEST_SOURCE_DIR "/tests/fixtures/p888-target.bin";
+    config.base_seed = 0x8881;
+    config.k_min = 1;
+    config.k_max = 29;
     MgtSingleGpuHandle* handle = nullptr;
     auto bad = config;
     bad.struct_size -= 1;
