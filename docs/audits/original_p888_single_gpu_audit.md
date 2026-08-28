@@ -113,8 +113,10 @@ semantic and numerical gates before it are green.
 - Current status: **green correctness / profiled**. Frozen CPU-derived fixtures
   cover output, residual-stack, hidden, BN affine, and optimizer-visible weight
   gradients in FP32 and FP16 local steps. The 32 residual layers issue the
-  expected Tensor Core dW/dX pairs; conversion/materialization remains visible
-  overhead but no correctness gate is open here.
+  expected Tensor Core dW/dX pairs. Reusing each freshly converted `dY` for its
+  adjacent dW/dX pair removes exactly 33 `FloatToHalf` launches per step (529 to
+  397 instances over four profiled steps) without changing the fixture. Three
+  20-step runs measured 35.7139--35.8679 ms/step after this promotion.
 
 ## A8. Sparse table gradient
 

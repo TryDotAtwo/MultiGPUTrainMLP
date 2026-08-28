@@ -348,13 +348,19 @@ cublasStatus_t LocalSgemm(cublasHandle_t h,cublasOperation_t opa,cublasOperation
     if(fp&&opa==CUBLAS_OP_N&&opb==CUBLAS_OP_T){
         const auto xc=static_cast<std::uint64_t>(k)*n,dyc=static_cast<std::uint64_t>(k)*m;
         if(xc>fp->operand_a_capacity||dyc>fp->operand_b_capacity||LaunchFloatToHalf(b,fp->operand_a,xc,st)!=mgt::Status::kOk||LaunchFloatToHalf(a,fp->operand_b,dyc,st)!=mgt::Status::kOk)return CUBLAS_STATUS_EXECUTION_FAILED;
+        fp->cached_operand_b_source=a;
+        fp->cached_operand_b_count=dyc;
         return LaunchFp16LinearGradWeight(h,fp->operand_a,fp->operand_b,c,k,n,m,st)==mgt::Status::kOk?CUBLAS_STATUS_SUCCESS:CUBLAS_STATUS_EXECUTION_FAILED;
     }
     if(fp&&opa==CUBLAS_OP_T&&opb==CUBLAS_OP_N){
         const std::uint64_t dyc=static_cast<std::uint64_t>(n)*k;
         const auto offset=a-fp->master_weights;
-        if(offset<0||dyc>fp->operand_b_capacity||LaunchFloatToHalf(b,fp->operand_b,dyc,st)!=mgt::Status::kOk)return CUBLAS_STATUS_EXECUTION_FAILED;
-        return LaunchFp16LinearGradInput(h,fp->operand_b,fp->weight_mirror+offset,c,n,m,k,*beta,st)==mgt::Status::kOk?CUBLAS_STATUS_SUCCESS:CUBLAS_STATUS_EXECUTION_FAILED;
+        if(offset<0||dyc>fp->operand_b_capacity)return CUBLAS_STATUS_EXECUTION_FAILED;
+        if((fp->cached_operand_b_source!=b||fp->cached_operand_b_count!=dyc)&&LaunchFloatToHalf(b,fp->operand_b,dyc,st)!=mgt::Status::kOk)return CUBLAS_STATUS_EXECUTION_FAILED;
+        const auto status=LaunchFp16LinearGradInput(h,fp->operand_b,fp->weight_mirror+offset,c,n,m,k,*beta,st);
+        fp->cached_operand_b_source=nullptr;
+        fp->cached_operand_b_count=0;
+        return status==mgt::Status::kOk?CUBLAS_STATUS_SUCCESS:CUBLAS_STATUS_EXECUTION_FAILED;
     }
     return cublasSgemm(h,opa,opb,m,n,k,alpha,a,lda,b,ldb,beta,c,ldc);
 }

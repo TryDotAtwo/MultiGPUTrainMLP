@@ -17,6 +17,8 @@ struct LocalMlpFp16Context {
     __half* operand_b = nullptr;
     std::uint64_t operand_a_capacity = 0;
     std::uint64_t operand_b_capacity = 0;
+    const float* cached_operand_b_source = nullptr;
+    std::uint64_t cached_operand_b_count = 0;
 };
 
 mgt::Status LaunchFloatToHalf(
