@@ -11,16 +11,21 @@ Date: 2026-08-28
 - Physical alignment: `2560 / 224`
 - Batch: 4096
 - Warmup: 2 steps
+- Inputs: `native/production_inputs/p888.json` plus the archived-equivalent
+  identity target `native/tests/fixtures/p888-target.bin`
 - Measurement: 10 serially enqueued steps, one terminal synchronization
 - Arena: 681,086,464 bytes, allocated before steady state
 
 ## Unprofiled result
 
 ```json
-{"gpu":"NVIDIA GeForce RTX 3070 Laptop GPU","arch":86,"batch":4096,"warmup":2,"steps":10,"step_ms":45.1725,"samples_s":90674.7,"memory_bytes":681086464,"loss":298.72,"status":"ok"}
+{"gpu":"NVIDIA GeForce RTX 3070 Laptop GPU","arch":86,"batch":4096,"warmup":2,"steps":10,"step_ms":47.3734,"samples_s":86462,"memory_bytes":681086464,"loss":242.552,"status":"ok"}
 ```
 
-The NCCL-enabled development build measured 44.6885 ms/step and 91,656.7 samples/s with the same workload. The NCCL-free number above is the release baseline.
+An earlier 45.1725 ms result used an identity-only test move set and is invalid
+as a production-data baseline. The benchmark now rejects that fixture. The
+number above uses real p888 moves, but is still provisional until the A1 random
+walk semantic audit is green.
 
 ## Nsight Systems attribution
 

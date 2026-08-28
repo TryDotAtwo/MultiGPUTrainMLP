@@ -96,4 +96,13 @@ Status LoadPuzzleDefinition(const std::filesystem::path& group_json,
     return Status::kOk;
 }
 
+bool HasNonIdentityMove(const PuzzleDefinition& puzzle) {
+    for (const auto& move : puzzle.moves) {
+        for (std::uint32_t i = 0; i < kStateLen; ++i) {
+            if (move.v[i] != static_cast<StateValue>(i)) return true;
+        }
+    }
+    return false;
+}
+
 }  // namespace mgt

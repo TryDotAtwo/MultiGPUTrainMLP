@@ -21,6 +21,10 @@ int main(int argc, char** argv) {
     mgt::PuzzleDefinition puzzle{};
     if (mgt::LoadPuzzleDefinition(argv[4], argv[5], &puzzle) != mgt::Status::kOk)
         return 3;
+    if (!mgt::HasNonIdentityMove(puzzle)) {
+        std::cerr << "refusing degenerate identity-only move set\n";
+        return 12;
+    }
     mgt_cuda::SingleGpuTrainerCreateInfo info{};
     info.contract = mgt::OriginalP888SingleGpuContract();
     info.device_id = 0;

@@ -18,6 +18,15 @@ int main() {
         if (puzzle.target.v[i] != 0) return EXIT_FAILURE;
         if (puzzle.moves[0].v[i] != static_cast<mgt::StateValue>(i)) return EXIT_FAILURE;
     }
+    if (mgt::HasNonIdentityMove(puzzle)) return EXIT_FAILURE;
+
+    mgt::PuzzleDefinition production{};
+    const auto production_status = mgt::LoadPuzzleDefinition(
+        "native/production_inputs/p888.json",
+        fixture_dir / "p888-target.bin",
+        &production);
+    if (production_status != mgt::Status::kOk ||
+        !mgt::HasNonIdentityMove(production)) return EXIT_FAILURE;
 
     const std::filesystem::path bad_json = "build-native/bad-p888.json";
     {
