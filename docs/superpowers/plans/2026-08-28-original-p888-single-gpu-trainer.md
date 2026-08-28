@@ -60,7 +60,7 @@
 - Produces: `mgt::OriginalP888SingleGpuContract() -> SingleGpuModelContract`.
 - Produces: `mgt::ValidateSingleGpuModelContract(const SingleGpuModelContract&) -> Status`.
 
-- [ ] **Step 1: Write the failing contract test**
+- [x] **Step 1: Write the failing contract test**
 
 ```cpp
 const auto c = mgt::OriginalP888SingleGpuContract();
@@ -76,13 +76,13 @@ bad.input_features = 6336;
 CHECK(mgt::ValidateSingleGpuModelContract(bad) == mgt::Status::kInvalidConfig);
 ```
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run: `cmake --build native/build-cpu-codex --config Release --target test_single_gpu_contract`
 
 Expected: FAIL because the target/header does not exist.
 
-- [ ] **Step 3: Implement the immutable contract**
+- [x] **Step 3: Implement the immutable contract**
 
 ```cpp
 struct SingleGpuModelContract {
@@ -102,13 +102,13 @@ struct SingleGpuModelContract {
 
 Validation requires schema 1, `input_features == state_len * state_value_count`, logical widths not larger than physical widths, physical widths divisible by 8, 16 blocks, 34 BN sites, and scalar output.
 
-- [ ] **Step 4: Run GREEN**
+- [x] **Step 4: Run GREEN**
 
 Run: `ctest --test-dir native/build-cpu-codex -C Release -R '^single_gpu_contract$' --output-on-failure --no-tests=error`
 
 Expected: one passing test.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add native/include/mgt/single_gpu_contract.hpp native/src/single_gpu_contract.cpp native/tests/test_single_gpu_contract.cpp native/CMakeLists.txt

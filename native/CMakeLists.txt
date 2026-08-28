@@ -20,6 +20,7 @@ endif()
 
 add_library(mgt_core STATIC
     src/static_contracts.cpp
+    src/single_gpu_contract.cpp
     src/distributed_batch.cpp
     src/puzzle_io.cpp
     src/benchmark_snapshot.cpp
@@ -47,8 +48,12 @@ target_include_directories(mgt_core PUBLIC include)
 add_executable(test_static_contracts tests/test_static_contracts.cpp)
 target_link_libraries(test_static_contracts PRIVATE mgt_core)
 
+add_executable(test_single_gpu_contract tests/test_single_gpu_contract.cpp)
+target_link_libraries(test_single_gpu_contract PRIVATE mgt_core)
+
 enable_testing()
 add_test(NAME static_contracts COMMAND test_static_contracts)
+add_test(NAME single_gpu_contract COMMAND test_single_gpu_contract)
 add_executable(test_puzzle_io tests/test_puzzle_io.cpp)
 target_link_libraries(test_puzzle_io PRIVATE mgt_core)
 add_test(NAME puzzle_io COMMAND test_puzzle_io)

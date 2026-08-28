@@ -63,7 +63,8 @@ struct ModelSpec {
 };
 
 struct P888TrainingContract {
-    static constexpr std::uint32_t kInputFeatures = 6336;
+    static constexpr std::uint32_t kStateValueCount = 72;
+    static constexpr std::uint32_t kInputFeatures = kStateLen * kStateValueCount;
     static constexpr std::uint32_t kHidden1 = 2556;
     static constexpr std::uint32_t kHidden2 = 218;
     static constexpr std::uint32_t kResidualBlocks = 16;

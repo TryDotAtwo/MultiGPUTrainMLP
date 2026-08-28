@@ -5,7 +5,8 @@
 
 int main() {
     using Contract = mgt::P888TrainingContract;
-    if (Contract::kInputFeatures != 6336) return EXIT_FAILURE;
+    if (Contract::kStateValueCount != 72) return EXIT_FAILURE;
+    if (Contract::kInputFeatures != 5184) return EXIT_FAILURE;
     if (Contract::kHidden1 != 2556) return EXIT_FAILURE;
     if (Contract::kHidden2 != 218) return EXIT_FAILURE;
     if (Contract::kResidualBlocks != 16) return EXIT_FAILURE;
