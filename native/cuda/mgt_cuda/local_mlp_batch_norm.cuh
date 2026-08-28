@@ -6,6 +6,10 @@
 namespace mgt_cuda {
 
 std::uint64_t MlpBatchNormParameterCount(const CudaMlpShape& physical_shape);
+std::uint64_t LocalMlpBatchNormForwardWorkspaceFloats(
+    const CudaMlpShape& physical_shape,
+    const mgt::BatchNormTrainingPlan& plan,
+    std::uint32_t rows);
 
 mgt::Status LaunchLocalMlpBatchNormTrainStep(
     const CudaMlpShape& physical_shape,

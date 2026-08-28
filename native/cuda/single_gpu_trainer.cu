@@ -58,7 +58,7 @@ mgt::Status BuildLayout(const SingleGpuTrainerCreateInfo& info,
             info.contract.physical_hd1, info.contract.physical_hd2,
             info.contract.residual_blocks, info.capacity_rows, plan) != mgt::Status::kOk)
         return mgt::Status::kInvalidConfig;
-    const auto workspace = MlpBatchNormForwardWorkspaceFloats(
+    const auto workspace = LocalMlpBatchNormForwardWorkspaceFloats(
         shape, *plan, info.capacity_rows);
     if (!workspace) return mgt::Status::kCapacityExceeded;
     ArenaLayout out{};
@@ -226,13 +226,6 @@ mgt::Status LaunchSingleGpuTrainStep(
     if (!trainer || !ticket || !trainer->prepared || !request.active_rows ||
         request.optimizer_step != trainer->sequence + 1) return mgt::Status::kInvalidConfig;
     if (request.active_rows > trainer->info.capacity_rows) return mgt::Status::kCapacityExceeded;
-    if (trainer->in_flight) {
-        const auto ready = cudaEventQuery(trainer->completion);
-        if (ready == cudaErrorNotReady) return mgt::Status::kInvalidConfig;
-        if (ready != cudaSuccess) return mgt::Status::kCudaFailure;
-        trainer->completed = trainer->sequence;
-        trainer->in_flight = false;
-    }
     auto* arena = trainer->arena;
     MlpBatchNormStepBuffers buffers{
         At<float>(arena, trainer->layout.weights), At<float>(arena, trainer->layout.weight_grad),

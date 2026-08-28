@@ -9,6 +9,13 @@ std::uint64_t MlpBatchNormParameterCount(const CudaMlpShape& shape) {
         ? OB(shape) + shape.output_dim : 0;
 }
 
+std::uint64_t LocalMlpBatchNormForwardWorkspaceFloats(
+    const CudaMlpShape& shape,
+    const mgt::BatchNormTrainingPlan& plan,
+    std::uint32_t rows) {
+    return LocalMlpBatchNormForwardWorkspaceFloatsImpl(shape, plan, rows);
+}
+
 mgt::Status LaunchLocalMlpBatchNormTrainStep(
     const CudaMlpShape& shape,
     std::uint32_t logical_hd1,
@@ -39,13 +46,9 @@ mgt::Status LaunchLocalMlpBatchNormTrainStepFp16(
     if (!fp16 || fp16->master_weights != buffers.weights || !fp16->weight_mirror)
         return mgt::Status::kInvalidConfig;
     auto* local_backend = LocalBackendContext(fp16);
-    auto status = LaunchLocalMlpBatchNormTrainStepImpl(
+    return LaunchLocalMlpBatchNormTrainStepImpl(
         shape, logical_hd1, logical_hd2, states, labels, rows, rows, plan,
         forward_workspace_floats, adam, buffers, local_backend, blas, stream);
-    if (status != mgt::Status::kOk) return status;
-    return LaunchFloatToHalf(
-        buffers.weights, fp16->weight_mirror,
-        MlpBatchNormParameterCount(shape), stream);
 }
 
 }  // namespace mgt_cuda
