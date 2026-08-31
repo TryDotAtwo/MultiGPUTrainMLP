@@ -181,6 +181,11 @@ full-step latency28.9696 ->27.3462ms (+5.94% throughput). Arena and precision
 are unchanged; all confirmation active telemetry samples were780MHz (clocks
 were not locked). Original p888/SM86 only.
 
+The [ownership/layout follow-up](2026-08-31-sparse-gradient-warp-bins.md)
+rejects WarpBins32/64 after exact correctness gates but +1.005%/+0.238% paired
+step latency. X2's +0.11% throughput is not promoted either. Production remains
+byte-identical to the accepted BN-mask baseline; the candidates are test-only.
+
 ## A9. Optimizer and mirrors
 
 - Adam semantics, bias correction, step numbering, FP32 master/m/v, FP16 mirror,

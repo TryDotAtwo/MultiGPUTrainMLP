@@ -211,6 +211,22 @@ if(MGT_ENABLE_CUDA)
     target_link_libraries(test_sparse_input_grad_grouped_rows PRIVATE mgt_cuda)
     add_test(NAME sparse_input_grad_grouped_rows
         COMMAND test_sparse_input_grad_grouped_rows)
+    add_executable(test_sparse_input_grad_grouped_rows_cols2
+        tests/cuda/test_sparse_input_grad_grouped_rows.cu)
+    target_compile_definitions(test_sparse_input_grad_grouped_rows_cols2
+        PRIVATE MGT_TEST_SPARSE_COLS2=1)
+    target_link_libraries(test_sparse_input_grad_grouped_rows_cols2 PRIVATE mgt_cuda)
+    add_test(NAME sparse_input_grad_grouped_rows_cols2
+        COMMAND test_sparse_input_grad_grouped_rows_cols2)
+    foreach(feature_tile IN ITEMS 32 64)
+        add_executable(test_sparse_input_grad_grouped_rows_warp${feature_tile}
+            tests/cuda/test_sparse_input_grad_grouped_rows.cu)
+        target_compile_definitions(test_sparse_input_grad_grouped_rows_warp${feature_tile}
+            PRIVATE MGT_TEST_SPARSE_WARP_BINS=${feature_tile})
+        target_link_libraries(test_sparse_input_grad_grouped_rows_warp${feature_tile} PRIVATE mgt_cuda)
+        add_test(NAME sparse_input_grad_grouped_rows_warp${feature_tile}
+            COMMAND test_sparse_input_grad_grouped_rows_warp${feature_tile})
+    endforeach()
     add_executable(test_grouped_input_rows
         tests/cuda/test_grouped_input_rows.cu)
     target_link_libraries(test_grouped_input_rows PRIVATE mgt_cuda)
