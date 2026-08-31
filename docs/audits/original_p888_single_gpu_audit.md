@@ -135,9 +135,15 @@ semantic and numerical gates before it are green.
   A3. Auto selection is intentionally limited to SM86; T4/A100 require their
   own measurements.
 
-Latest A8 follow-up: the [SM86 tile-major traversal audit](2026-08-31-sparse-gradient-tile-major.md)
+The [SM86 tile-major traversal audit](2026-08-31-sparse-gradient-tile-major.md)
 preserves exact sparse-gradient accumulation, lowers measured DRAM reads from
 2.97GB to0.60GB and reduces full-step latency34.2866 ->28.9943ms.
+
+Latest A8 follow-up: the [stable warp-ballot builder audit](2026-08-31-stable-grouped-row-builder.md)
+preserves exact ascending row IDs, reduces grouping1.8416 ->0.2281ms and
+full-step latency28.9696 ->27.3462ms (+5.94% throughput). Arena and precision
+are unchanged; all confirmation active telemetry samples were780MHz (clocks
+were not locked). Original p888/SM86 only.
 
 ## A9. Optimizer and mirrors
 

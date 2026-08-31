@@ -20,6 +20,7 @@
 #include "mgt_cuda/allreduce_nccl.cuh"
 #endif
 #include "batch_norm_activation.cuh"
+#include "grouped_input_rows.cuh"
 #include "sparse_input_grad_grouped_rows.cuh"
 #include "mgt_cuda/sync_batch_norm_selector.cuh"
 #include <algorithm>
@@ -129,15 +130,7 @@ __global__ void SparseInputGradCoalesced96(
     }
 }
 
-__global__ void BuildGroupedInputRows(CudaMlpShape s,const mgt::TrainStateStorage*states,unsigned rows,unsigned*counts,unsigned*row_ids){
-    const unsigned position=blockIdx.x,value=threadIdx.x;
-    if(position>=s.state_len||value>=s.state_value_pad)return;
-    const std::uint64_t bin=static_cast<std::uint64_t>(position)*s.state_value_pad+value;
-    unsigned count=0;
-    for(unsigned row=0;row<rows;++row)if(states[row].v[position]==value)row_ids[bin*rows+count++]=row;
-    counts[bin]=count;
-}
-
+using detail::BuildGroupedInputRows;
 using detail::SparseInputGradGroupedRows;
 
 constexpr unsigned GROUPED_INPUT_MAX_POSITIONS = 4;
@@ -525,7 +518,10 @@ mgt::Status LaunchMlpBatchNormInputBackward(
         }else{
             auto*counts=reinterpret_cast<unsigned*>(bn);
             auto*row_ids=counts+bins;
-            BuildGroupedInputRows<<<s.state_len,s.state_value_pad,0,st>>>(s,states,lr,counts,row_ids);
+            const unsigned builder_blocks=static_cast<unsigned>(
+                (bins+detail::kGroupedInputRowsWarps-1U)/detail::kGroupedInputRowsWarps);
+            BuildGroupedInputRows<<<builder_blocks,detail::kGroupedInputRowsThreads,0,st>>>(
+                s,states,lr,counts,row_ids);
             const dim3 grid(static_cast<unsigned>(bins),(s.hd1+T-1U)/T);
             SparseInputGradGroupedRows<<<grid,T,0,st>>>(s,input_grad,lr,counts,row_ids,weight_grad);
         }

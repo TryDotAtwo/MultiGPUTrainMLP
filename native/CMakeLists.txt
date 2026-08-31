@@ -199,6 +199,10 @@ if(MGT_ENABLE_CUDA)
     target_link_libraries(test_sparse_input_grad_grouped_rows PRIVATE mgt_cuda)
     add_test(NAME sparse_input_grad_grouped_rows
         COMMAND test_sparse_input_grad_grouped_rows)
+    add_executable(test_grouped_input_rows
+        tests/cuda/test_grouped_input_rows.cu)
+    target_link_libraries(test_grouped_input_rows PRIVATE mgt_cuda)
+    add_test(NAME grouped_input_rows COMMAND test_grouped_input_rows)
     add_executable(test_local_mlp_input_half
         tests/cuda/test_local_mlp_input_half.cu)
     target_link_libraries(test_local_mlp_input_half PRIVATE mgt_cuda)
