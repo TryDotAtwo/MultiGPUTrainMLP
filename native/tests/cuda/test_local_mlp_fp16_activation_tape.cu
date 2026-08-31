@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -13,6 +14,7 @@ namespace {
 using Values = std::vector<float>;
 constexpr std::uint32_t kCapacityRows = 4;
 constexpr std::size_t kGuardHalfs = 64;
+constexpr std::size_t kDeviceGuardElements = 64;
 constexpr std::uint16_t kPoison = 0xffff;
 
 void Cuda(cudaError_t status, const char* operation) {
@@ -21,13 +23,23 @@ void Cuda(cudaError_t status, const char* operation) {
 }
 
 template <class T> struct Device {
+    T* allocation = nullptr;
     T* pointer = nullptr;
     std::size_t count;
     explicit Device(std::size_t size) : count(size) {
-        Cuda(cudaMalloc(&pointer, count * sizeof(T)), "cudaMalloc");
-        Cuda(cudaMemset(pointer, 0, count * sizeof(T)), "cudaMemset");
+        Cuda(cudaMalloc(&allocation, (count + 2 * kDeviceGuardElements) * sizeof(T)), "cudaMalloc");
+        pointer = allocation + kDeviceGuardElements;
+        try {
+            Cuda(cudaMemset(allocation, 0xa5, (count + 2 * kDeviceGuardElements) * sizeof(T)),
+                 "initialize allocation canaries");
+            Cuda(cudaMemset(pointer, 0, count * sizeof(T)), "cudaMemset");
+        } catch (...) {
+            cudaFree(allocation);
+            allocation = pointer = nullptr;
+            throw;
+        }
     }
-    ~Device() { if (pointer) cudaFree(pointer); }
+    ~Device() { if (allocation) cudaFree(allocation); }
     Device(const Device&) = delete;
     Device& operator=(const Device&) = delete;
     void Upload(const std::vector<T>& source) {
@@ -35,12 +47,31 @@ template <class T> struct Device {
         Cuda(cudaMemcpy(pointer, source.data(), source.size() * sizeof(T), cudaMemcpyHostToDevice),
              "upload");
     }
+    void CheckGuards() const {
+        unsigned char guards[2 * kDeviceGuardElements * sizeof(T)];
+        Cuda(cudaMemcpy(guards, allocation, kDeviceGuardElements * sizeof(T), cudaMemcpyDeviceToHost),
+             "read leading allocation canary");
+        Cuda(cudaMemcpy(guards + kDeviceGuardElements * sizeof(T), pointer + count,
+                        kDeviceGuardElements * sizeof(T), cudaMemcpyDeviceToHost),
+             "read trailing allocation canary");
+        for (unsigned char value : guards)
+            if (value != 0xa5) throw std::runtime_error("allocation canary changed");
+    }
     std::vector<T> Read() const {
+        CheckGuards();
         std::vector<T> result(count);
         Cuda(cudaMemcpy(result.data(), pointer, count * sizeof(T), cudaMemcpyDeviceToHost), "read");
         return result;
     }
 };
+
+template <class T> void RequireSameBytes(const std::vector<T>& actual,
+                                        const std::vector<T>& expected,
+                                        const std::string& context) {
+    if (actual.size() != expected.size() ||
+        std::memcmp(actual.data(), expected.data(), actual.size() * sizeof(T)) != 0)
+        throw std::runtime_error(context + " changed bytes");
+}
 
 struct Blas {
     cublasHandle_t handle = nullptr;
@@ -273,6 +304,59 @@ bool CheckWeightMirror(const Values& master, const std::vector<__half>& mirror) 
     return true;
 }
 
+void RequireEmptyGradientCache(const mgt_cuda::LocalMlpFp16Context& fp16,
+                               const char* phase) {
+    if (fp16.cached_operand_b_source != nullptr || fp16.cached_operand_b_count != 0) {
+        std::fprintf(stderr, "gradient cache not empty after %s: source=%p count=%llu\n",
+            phase, static_cast<const void*>(fp16.cached_operand_b_source),
+            static_cast<unsigned long long>(fp16.cached_operand_b_count));
+        throw std::runtime_error("gradient cache escaped its training-step lifetime");
+    }
+}
+
+void PoisonGradientCache(mgt_cuda::LocalMlpFp16Context& fp16,
+                         Device<__half>& operand_b, const float* stale_source,
+                         std::uint64_t stale_count) {
+    Cuda(cudaMemset(operand_b.pointer, 0xff, operand_b.count * sizeof(__half)),
+         "poison gradient operand and canary");
+    fp16.cached_operand_b_source = stale_source;
+    fp16.cached_operand_b_count = stale_count;
+}
+
+bool CheckLastDenseGradientMirror(const Values& block_gradient,
+                                 const std::vector<__half>& operand_b,
+                                 std::size_t hidden_elements,
+                                 std::size_t active_dense_capacity) {
+    // Hidden BN is the last dense-gradient producer. The later input BN must
+    // not overwrite this scratch, even when hd1==hd2 makes its extent fit.
+    if (block_gradient.size() < hidden_elements ||
+        operand_b.size() < active_dense_capacity || hidden_elements > active_dense_capacity)
+        throw std::runtime_error("gradient mirror test extent");
+    for (std::size_t i = 0; i < hidden_elements; ++i) {
+        std::uint16_t actual;
+        std::memcpy(&actual, &operand_b[i], sizeof(actual));
+        const auto expected = HalfBits(block_gradient[i]);
+        if (!std::isfinite(block_gradient[i]) || actual != expected) {
+            std::fprintf(stderr, "last dense gradient mirror[%zu]=0x%04x expected=0x%04x "
+                         "block_grad=%.9g\n", i, static_cast<unsigned>(actual),
+                         static_cast<unsigned>(expected), block_gradient[i]);
+            return false;
+        }
+    }
+    // A vector head wider than hd2 may have used the middle suffix legitimately.
+    // Only the area beyond every active dense operand is an untouched canary.
+    for (std::size_t i = active_dense_capacity; i < operand_b.size(); ++i) {
+        std::uint16_t actual;
+        std::memcpy(&actual, &operand_b[i], sizeof(actual));
+        if (actual != kPoison) {
+            std::fprintf(stderr, "gradient operand canary[%zu]=0x%04x expected=0xffff\n",
+                         i, static_cast<unsigned>(actual));
+            return false;
+        }
+    }
+    return true;
+}
+
 std::uint64_t TapeCount(const mgt_cuda::CudaMlpShape& s, std::uint32_t rows) {
     // No final half slot for the FP32 scalar head; vector-head dW needs it.
     return static_cast<std::uint64_t>(rows) *
@@ -320,11 +404,13 @@ bool CheckTape(const mgt_cuda::CudaMlpShape& s, unsigned rows, const Values& sav
 }
 
 // Catches zero-block overflow, missing vector-head activation, wrong residual
-// slots, stale cross-step rows, omitted capacity checks, and corrupted dense dW.
+// slots, stale cross-step rows/gradient-cache tags, omitted capacity checks,
+// overwritten final dense mirrors, and corrupted dense dW.
 bool RunCase(unsigned blocks, unsigned output_dim, unsigned hd1 = 3, unsigned hd2 = 2) {
     const mgt_cuda::CudaMlpShape shape{2, 4, hd1, hd2, blocks, output_dim};
     const Layout layout(shape);
     unsigned active_rows = 0;
+    bool equal_width_input_is_distinct = hd1 != hd2;
     try {
         mgt::BatchNormTrainingPlan plan;
         if (mgt::BuildBatchNormTrainingPlan(hd1, hd2, hd1, hd2, blocks, kCapacityRows, &plan)
@@ -358,8 +444,9 @@ bool RunCase(unsigned blocks, unsigned output_dim, unsigned hd1 = 3, unsigned hd
             fc1_grad(kCapacityRows * hd2), residual_grad(kCapacityRows * hd2), input_grad(kCapacityRows * hd1),
             labels(kCapacityRows * output_dim);
         Device<mgt::TrainStateStorage> states(kCapacityRows);
+        const std::uint64_t gradient_capacity = kCapacityRows * std::max(hd2, output_dim);
         Device<__half> weight_half(layout.count), tape(TapeCount(shape, kCapacityRows) + kGuardHalfs),
-            operand_b(kCapacityRows * std::max(hd2, output_dim));
+            operand_b(gradient_capacity + kGuardHalfs);
         weights.Upload(initial_weights);
         affine.Upload(bn.affine);
         running.Upload(bn.running);
@@ -372,7 +459,183 @@ bool RunCase(unsigned blocks, unsigned output_dim, unsigned hd1 = 3, unsigned hd
             running.pointer, outputs.pointer, workspace.pointer, loss.pointer, output_dy.pointer,
             block_grad.pointer, fc1_grad.pointer, residual_grad.pointer, input_grad.pointer};
         mgt_cuda::LocalMlpFp16Context fp16{weights.pointer, weight_half.pointer, tape.pointer,
-            operand_b.pointer, TapeCount(shape, kCapacityRows), operand_b.count};
+            operand_b.pointer, TapeCount(shape, kCapacityRows), gradient_capacity};
+        auto alias_preflight = [&](unsigned rows) {
+            const std::size_t live_b = static_cast<std::size_t>(rows) * std::max(hd2, output_dim);
+            const std::size_t live_labels = static_cast<std::size_t>(rows) * output_dim;
+            Cuda(cudaMemset(operand_b.pointer, 0xff, operand_b.count * sizeof(__half)),
+                 "poison alias-test gradient scratch");
+            Device<float>* floats[]{&weights, &weight_grad, &weight_m, &weight_v,
+                &affine, &affine_grad, &affine_m, &affine_v, &running, &outputs,
+                &workspace, &loss, &output_dy, &block_grad, &fc1_grad, &residual_grad,
+                &input_grad, &labels};
+            const char* names[]{"weights", "weight_grad", "weight_m", "weight_v",
+                "affine", "affine_grad", "affine_m", "affine_v", "running", "outputs",
+                "forward_workspace", "loss", "output_dy", "block_grad", "fc1_grad",
+                "residual_grad", "input_grad", "labels"};
+            std::vector<Values> before;
+            for (auto* array : floats) before.push_back(array->Read());
+            const auto before_states = states.Read();
+            const auto before_half = weight_half.Read(), before_tape = tape.Read(),
+                       before_b = operand_b.Read();
+            const mgt_cuda::AdamWKernelConfig probe_adam{0, 1, .0001f, .9f, .999f, 1e-8f, 0.f};
+            unsigned rejected = 0, accepted = 0;
+            auto trial_context = [&] {
+                auto trial = fp16;
+                trial.operand_a_capacity = TapeCount(shape, rows);
+                trial.operand_b_capacity = live_b;
+                trial.cached_operand_b_source = buffers.output_dy;
+                trial.cached_operand_b_count = live_labels;
+                return trial;
+            };
+            auto unchanged = [&](const std::string& name) {
+                for (std::size_t i = 0; i < before.size(); ++i)
+                    RequireSameBytes(floats[i]->Read(), before[i], name + ": " + names[i]);
+                RequireSameBytes(states.Read(), before_states, name + ": states");
+                RequireSameBytes(weight_half.Read(), before_half, name + ": weight half");
+                RequireSameBytes(tape.Read(), before_tape, name + ": activation tape");
+                RequireSameBytes(operand_b.Read(), before_b, name + ": gradient scratch");
+            };
+            auto reject = [&](const char* name, mgt_cuda::LocalMlpFp16Context trial,
+                              mgt_cuda::MlpBatchNormStepBuffers views,
+                              mgt::Status expected = mgt::Status::kInvalidConfig,
+                              const mgt::BatchNormTrainingPlan* alternate_plan = nullptr,
+                              unsigned logical_hd2 = 0) {
+                const auto status = mgt_cuda::LaunchLocalMlpBatchNormTrainStepFp16(shape,
+                    hd1, logical_hd2 ? logical_hd2 : hd2, states.pointer, labels.pointer,
+                    rows, alternate_plan ? *alternate_plan : plan, workspace_count,
+                    probe_adam, views, &trial, blas.handle, nullptr);
+                Cuda(cudaDeviceSynchronize(), "synchronize alias-preflight rejection");
+                unchanged(name);
+                RequireEmptyGradientCache(trial, name);
+                if (status != expected) {
+                    std::fprintf(stderr, "alias preflight %s status=%d expected=%d\n", name,
+                                 static_cast<int>(status), static_cast<int>(expected));
+                    throw std::runtime_error("alias preflight accepted invalid live views");
+                }
+                ++rejected;
+            };
+            // Equal-pointer coverage names every protected category. Buffer
+            // canaries make even the loss-scalar alias safe to diagnose when a
+            // broken preflight lets the larger half write cross its payload.
+            for (std::size_t i = 0; i < before.size(); ++i) {
+                if (blocks == 0 && (floats[i] == &fc1_grad || floats[i] == &residual_grad)) continue;
+                auto trial = trial_context();
+                trial.operand_b = reinterpret_cast<__half*>(floats[i]->pointer);
+                reject(names[i], trial, buffers);
+            }
+            for (auto* target : {&weight_half, &tape}) {
+                auto trial = trial_context(); trial.operand_b = target->pointer;
+                reject(target == &tape ? "activation tape" : "weight half", trial, buffers);
+            }
+            { auto trial = trial_context(); trial.operand_b = reinterpret_cast<__half*>(states.pointer);
+              reject("states", trial, buffers); }
+            { auto trial = trial_context();
+              trial.operand_b = reinterpret_cast<__half*>(output_dy.pointer) + 2 * live_labels - 1;
+              reject("B begins at output_dy end-minus-one-half", trial, buffers); }
+            { auto trial = trial_context(); auto views = buffers;
+              views.output_dy = reinterpret_cast<float*>(operand_b.pointer + live_b - 2);
+              reject("output_dy begins inside B suffix", trial, views); }
+            { auto trial = trial_context(); auto views = buffers;
+              views.loss = reinterpret_cast<float*>(operand_b.pointer + live_b - 2);
+              reject("smaller loss view inside B suffix", trial, views); }
+            { auto trial = trial_context(); trial.operand_b = nullptr;
+              reject("null B", trial, buffers, mgt::Status::kCapacityExceeded); }
+            { auto trial = trial_context(); trial.operand_b_capacity = live_b - 1;
+              reject("short B", trial, buffers, mgt::Status::kCapacityExceeded); }
+            // These deliberately non-dereferenceable ranges must be rejected
+            // entirely on the host, before any kernel can observe the pointer.
+            { auto trial = trial_context();
+              trial.operand_b = reinterpret_cast<__half*>(
+                  std::numeric_limits<std::uintptr_t>::max() - 1);
+              reject("B byte extent overflows address space", trial, buffers); }
+            { auto views = buffers;
+              views.weight_grad = reinterpret_cast<float*>(
+                  std::numeric_limits<std::uintptr_t>::max() - 3);
+              reject("protected byte extent overflows address space", trial_context(), views); }
+            if (hd2 > output_dim) {
+                // Physical padding still belongs to the dense mirror. A
+                // logical-width-only B range would miss this loss overlap.
+                mgt::BatchNormTrainingPlan padded;
+                if (mgt::BuildBatchNormTrainingPlan(hd1, hd2 - 1, hd1, hd2, blocks,
+                                                   kCapacityRows, &padded) != mgt::Status::kOk)
+                    throw std::runtime_error("build padded alias fixture");
+                auto trial = trial_context(); auto views = buffers;
+                views.loss = reinterpret_cast<float*>(operand_b.pointer + live_b - 2);
+                reject("physical-only B tail overlaps loss", trial, views,
+                       mgt::Status::kInvalidConfig, &padded, hd2 - 1);
+            }
+            { auto broken = plan; broken.sites[0].normalized_offset = broken.workspace_floats;
+              reject("normalized slice outside BN workspace", trial_context(), buffers,
+                     mgt::Status::kInvalidConfig, &broken); }
+            { auto broken = plan; broken.sites[1].physical_stride = hd2 + 1;
+              reject("BN site stride differs from physical shape", trial_context(), buffers,
+                     mgt::Status::kInvalidConfig, &broken); }
+            { auto broken = plan; broken.sites[1].logical_features = hd2 + 1;
+              reject("BN site logical extent exceeds physical shape", trial_context(), buffers,
+                     mgt::Status::kInvalidConfig, &broken); }
+
+            auto restore = [&] {
+                for (std::size_t i = 0; i < before.size(); ++i) {
+                    floats[i]->CheckGuards(); floats[i]->Upload(before[i]);
+                }
+                states.CheckGuards(); weight_half.CheckGuards(); tape.CheckGuards(); operand_b.CheckGuards();
+                states.Upload(before_states); weight_half.Upload(before_half);
+                tape.Upload(before_tape); operand_b.Upload(before_b);
+                Cuda(cudaDeviceSynchronize(), "restore isolated alias-probe state");
+            };
+            auto accept = [&](const char* name, mgt_cuda::LocalMlpFp16Context trial,
+                              const float* label_view) {
+                const auto status = mgt_cuda::LaunchLocalMlpBatchNormTrainStepFp16(shape,
+                    hd1, hd2, states.pointer, label_view, rows, plan, workspace_count,
+                    probe_adam, buffers, &trial, blas.handle, nullptr);
+                Cuda(cudaDeviceSynchronize(), "synchronize legal alias boundary");
+                RequireEmptyGradientCache(trial, name);
+                if (status != mgt::Status::kOk)
+                    throw std::runtime_error(std::string(name) + " rejected legal disjoint live views");
+                std::vector<__half> mirror(live_b);
+                Cuda(cudaMemcpy(mirror.data(), trial.operand_b, live_b * sizeof(__half),
+                                cudaMemcpyDeviceToHost), "read legal-boundary dense mirror");
+                if (!CheckLastDenseGradientMirror(block_grad.Read(), mirror,
+                        static_cast<std::size_t>(rows) * hd2, live_b))
+                    throw std::runtime_error(std::string(name) + " wrong dense mirror");
+                RequireSameBytes(states.Read(), before_states, "legal alias states");
+                RequireSameBytes(labels.Read(), before.back(), "legal alias original labels");
+                // Legal probes are full steps, but are isolated from the three
+                // oracle-checked steps by restoring all test-owned model state.
+                restore();
+                ++accepted;
+            };
+            // The backing allocation includes both views. Only active B bytes
+            // count: its advertised capacity may extend through the label view.
+            Device<__half> packed(live_b + 2 * live_labels);
+            for (bool b_first : {true, false}) {
+                auto trial = trial_context();
+                trial.operand_b = packed.pointer + (b_first ? 0 : 2 * live_labels);
+                trial.operand_b_capacity = b_first ? packed.count : live_b;
+                float* label_view = reinterpret_cast<float*>(packed.pointer + (b_first ? live_b : 0));
+                Cuda(cudaMemset(trial.operand_b, 0xff, live_b * sizeof(__half)), "poison packed B view");
+                Cuda(cudaMemcpy(label_view, labels.pointer, live_labels * sizeof(float),
+                                cudaMemcpyDeviceToDevice), "prepare adjacent label view");
+                accept(b_first ? "B ends exactly at labels" : "labels end exactly at B", trial, label_view);
+                std::vector<float> actual_labels(live_labels);
+                Cuda(cudaMemcpy(actual_labels.data(), label_view, live_labels * sizeof(float),
+                                cudaMemcpyDeviceToHost), "read adjacent labels");
+                RequireSameBytes(actual_labels, Values(before.back().begin(), before.back().begin() + live_labels),
+                                 "adjacent label payload");
+                packed.CheckGuards();
+            }
+            if (blocks == 0) for (auto* target : {&fc1_grad, &residual_grad}) {
+                auto trial = trial_context();
+                trial.operand_b = reinterpret_cast<__half*>(target->pointer);
+                trial.operand_b_capacity = target->count * 2;
+                accept(target == &fc1_grad ? "unused FC1 storage" : "unused residual storage",
+                       trial, labels.pointer);
+            }
+            unchanged("alias-probe restoration");
+            std::fprintf(stdout, "PASS alias-preflight hd1=%u hd2=%u nrd=%u out=%u rejects=%u legal=%u\n",
+                         hd1, hd2, blocks, output_dim, rejected, accepted);
+        };
         const unsigned row_sequence[]{4, 3, 4};
         const unsigned state_pairs[3][4][2]{
             {{0, 1}, {1, 3}, {2, 0}, {3, 2}},
@@ -391,13 +654,35 @@ bool RunCase(unsigned blocks, unsigned output_dim, unsigned hd1 = 3, unsigned hd
             }
             states.Upload(host_states);
             labels.Upload(host_labels);
+            if (step == 0) alias_preflight(active_rows);
             const auto host_weights = weights.Read(), host_affine = affine.Read(), host_running = running.Read();
             const auto fp32 = CpuReference(shape, host_weights, host_affine, host_running, host_states,
                                            host_labels, active_rows, false);
             const auto mixed = CpuReference(shape, host_weights, host_affine, host_running, host_states,
                                             host_labels, active_rows, true);
             Cuda(cudaMemset(tape.pointer, 0xff, tape.count * sizeof(__half)), "poison tape");
+            // Characterize overwrite independence before changing production clears.
+            // A missing write or beta=1 accumulation must not inherit either NaN
+            // or a finite nonzero sentinel from any preceding training step.
+            const unsigned char gradient_poison = step % 2 == 0 ? 0xff : 0x5a;
+            Cuda(cudaMemset(weight_grad.pointer, gradient_poison, weight_grad.count * sizeof(float)),
+                 "poison complete weight gradient before step");
+            Cuda(cudaMemset(affine_grad.pointer, gradient_poison, affine_grad.count * sizeof(float)),
+                 "poison complete affine gradient before step");
+            Cuda(cudaMemset(loss.pointer, gradient_poison, loss.count * sizeof(float)),
+                 "poison loss before step");
             fp16.operand_a_capacity = TapeCount(shape, active_rows);
+            const std::uint64_t active_gradient_capacity =
+                static_cast<std::uint64_t>(active_rows) * std::max(hd2, output_dim);
+            fp16.operand_b_capacity = active_gradient_capacity;
+            // The first vector-head dW precedes every BN mirror producer. A
+            // matching stale output_dy tag must never authorize these NaNs.
+            // Subsequent steps exercise a different source with matching extent,
+            // then the matching output source with the wrong element count.
+            const float* stale_source = step == 1 ? buffers.block_grad : buffers.output_dy;
+            const std::uint64_t stale_count = static_cast<std::uint64_t>(active_rows) *
+                (step == 1 ? hd2 : output_dim) + (step == 2 ? 1ULL : 0ULL);
+            PoisonGradientCache(fp16, operand_b, stale_source, stale_count);
             const mgt_cuda::AdamWKernelConfig adam{0, step + 1ULL, .0001f, .9f, .999f, 1e-8f, 0.f};
             const auto status = mgt_cuda::LaunchLocalMlpBatchNormTrainStepFp16(shape, hd1, hd2,
                 states.pointer, labels.pointer, active_rows, plan, workspace_count, adam, buffers,
@@ -411,7 +696,17 @@ bool RunCase(unsigned blocks, unsigned output_dim, unsigned hd1 = 3, unsigned hd
                              static_cast<int>(status));
                 throw std::runtime_error("training launch failed");
             }
+            RequireEmptyGradientCache(fp16, "successful full step");
             bool ok = CheckTape(shape, active_rows, workspace.Read(), tape_bits);
+            const auto final_block_gradient = block_grad.Read();
+            ok = CheckLastDenseGradientMirror(final_block_gradient, operand_b.Read(),
+                static_cast<std::size_t>(active_rows) * hd2, active_gradient_capacity) && ok;
+            if (hd1 == hd2) {
+                const auto final_input_gradient = input_grad.Read();
+                for (std::size_t i = 0; i < static_cast<std::size_t>(active_rows) * hd2; ++i)
+                    equal_width_input_is_distinct = equal_width_input_is_distinct ||
+                        HalfBits(final_input_gradient[i]) != HalfBits(final_block_gradient[i]);
+            }
             std::fprintf(stdout, "CHECK hd1=%u hd2=%u nrd=%u output_dim=%u rows=%u step=%u\n",
                          hd1, hd2, blocks, output_dim, active_rows, step + 1);
             const auto actual_loss = loss.Read(), actual_weight_grad = weight_grad.Read(),
@@ -435,6 +730,8 @@ bool RunCase(unsigned blocks, unsigned output_dim, unsigned hd1 = 3, unsigned hd
             const auto before_weights = weights.Read(), before_affine = affine.Read(), before_running = running.Read();
             Cuda(cudaMemset(tape.pointer, 0xff, tape.count * sizeof(__half)), "poison capacity check");
             fp16.operand_a_capacity = TapeCount(shape, active_rows) - 1;
+            PoisonGradientCache(fp16, operand_b, buffers.output_dy,
+                                static_cast<std::uint64_t>(active_rows) * output_dim);
             const auto short_status = mgt_cuda::LaunchLocalMlpBatchNormTrainStepFp16(shape, hd1, hd2,
                 states.pointer, labels.pointer, active_rows, plan, workspace_count, adam, buffers,
                 &fp16, blas.handle, nullptr);
@@ -445,13 +742,46 @@ bool RunCase(unsigned blocks, unsigned output_dim, unsigned hd1 = 3, unsigned hd
                     static_cast<unsigned long long>(TapeCount(shape, active_rows)));
                 throw std::runtime_error("capacity-1 accepted");
             }
+            RequireEmptyGradientCache(fp16, "early tape-capacity rejection");
             Cuda(cudaMemcpy(tape_bits.data(), tape.pointer, tape_bits.size() * sizeof(std::uint16_t),
                             cudaMemcpyDeviceToHost), "read rejected tape");
             if (!std::all_of(tape_bits.begin(), tape_bits.end(), [](std::uint16_t v) { return v == kPoison; }) ||
                 before_weights != weights.Read() || before_affine != affine.Read() || before_running != running.Read())
                 throw std::runtime_error("capacity rejection changed tape/weights/BN state");
+
+            // A scratch-capacity error must retire stale tags regardless of
+            // whether production detects it during preflight or later work.
+            fp16.operand_a_capacity = TapeCount(shape, active_rows);
+            fp16.operand_b_capacity = active_gradient_capacity - 1;
+            PoisonGradientCache(fp16, operand_b, buffers.block_grad,
+                                static_cast<std::uint64_t>(active_rows) * hd2);
+            const auto short_gradient_status = mgt_cuda::LaunchLocalMlpBatchNormTrainStepFp16(
+                shape, hd1, hd2, states.pointer, labels.pointer, active_rows, plan,
+                workspace_count, adam, buffers, &fp16, blas.handle, nullptr);
+            Cuda(cudaDeviceSynchronize(), "synchronize gradient-capacity rejection");
+            if (short_gradient_status == mgt::Status::kOk)
+                throw std::runtime_error("gradient scratch capacity-1 accepted");
+            RequireEmptyGradientCache(fp16, "gradient scratch-capacity rejection");
+
+            // With valid scratch, invalid Adam epsilon exercises a late failure
+            // in the existing optimizer gate. Running state/tape/gradients may
+            // already be updated: this test intentionally requires no rollback.
+            fp16.operand_b_capacity = active_gradient_capacity;
+            PoisonGradientCache(fp16, operand_b, buffers.output_dy,
+                                static_cast<std::uint64_t>(active_rows) * output_dim);
+            auto invalid_adam = adam;
+            invalid_adam.eps = 0.0f;
+            const auto late_status = mgt_cuda::LaunchLocalMlpBatchNormTrainStepFp16(
+                shape, hd1, hd2, states.pointer, labels.pointer, active_rows, plan,
+                workspace_count, invalid_adam, buffers, &fp16, blas.handle, nullptr);
+            Cuda(cudaDeviceSynchronize(), "synchronize invalid Adam rejection");
+            if (late_status == mgt::Status::kOk)
+                throw std::runtime_error("invalid Adam epsilon accepted");
+            RequireEmptyGradientCache(fp16, "invalid Adam failure exit");
         }
-        std::fprintf(stdout, "PASS hd1=%u hd2=%u nrd=%u output_dim=%u rows=4,3,4 tape/guards/all-gradients/capacity\n",
+        if (!equal_width_input_is_distinct)
+            throw std::runtime_error("equal-width fixture cannot distinguish input vs hidden gradient mirrors");
+        std::fprintf(stdout, "PASS hd1=%u hd2=%u nrd=%u output_dim=%u rows=4,3,4 tape/guards/all-gradients/poison-overwrite/capacity/cache-lifetime/last-dense-mirror\n",
                      hd1, hd2, blocks, output_dim);
         return true;
     } catch (const std::exception& error) {
@@ -470,5 +800,8 @@ int main() {
     ok = RunCase(2, 2) && ok;
     // The one-feature hidden path uses FP32 forward but still needs half dW operands.
     ok = RunCase(2, 2, 3, 1) && ok;
+    // Equal widths must not make input BN eligible to overwrite the dense cache.
+    // Zero residual blocks keep this fixture within the hand-seeded 65 weights.
+    ok = RunCase(0, 2, 3, 3) && ok;
     return ok ? 0 : 1;
 }

@@ -21,6 +21,9 @@ struct LocalMlpFp16Context {
     __half* operand_b = nullptr;
     std::uint64_t operand_a_capacity = 0;
     std::uint64_t operand_b_capacity = 0;
+    // Step-local producer tag: BN dX (or an explicit cast) writes operand_b;
+    // adjacent dense dW/dX consume it. Public step entry/exit invalidate this
+    // tag, including failures. It is not a cross-step pointer-identity cache.
     const float* cached_operand_b_source = nullptr;
     std::uint64_t cached_operand_b_count = 0;
     float* activation_workspace = nullptr;

@@ -34,6 +34,11 @@ mgt::Status LaunchLocalMlpBatchNormTrainStep(
     cublasHandle_t blas,
     cudaStream_t stream);
 
+// operand_b is a step-local gradient mirror of rows*max(hd2,output_dim) halfs.
+// Its live range must be disjoint from model, inputs, activations and gradients;
+// unused capacity suffixes may share allocation storage. Cache tags are cleared
+// on entry and every return, including validation failures. Device storage still
+// requires same-stream ordering (or an explicit completion dependency) for reuse.
 mgt::Status LaunchLocalMlpBatchNormTrainStepFp16(
     const CudaMlpShape& physical_shape,
     std::uint32_t logical_hd1,

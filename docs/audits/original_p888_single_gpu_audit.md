@@ -7,9 +7,9 @@ semantic and numerical gates before it are green.
 
 The A0-A12 entries below retain earlier-stage measurements; their old full-step
 timings are not the current performance snapshot. The latest validated original
-p888/SM86 batch4096 path is **25.2253ms/step** (median of three100-step run means,
-140 warmup steps/run), approximately162.4k samples/s, arena739806720 bytes.
-All active telemetry samples in that confirmation were780MHz; clocks were not
+p888/SM86 batch4096 path is **24.4922ms/step** (median of three100-step run means,
+140 warmup steps/run), approximately167.2k samples/s, arena739806720 bytes.
+All active telemetry samples in the latest A/B were780MHz; clocks were not
 locked and sparse samples do not prove a fully controlled timing window.
 
 - [Column-sum tiling](2026-08-31-column-sum-tiling.md): same256-leaf FP32 tree,
@@ -18,6 +18,13 @@ locked and sparse samples do not prove a fully controlled timing window.
 - [Input-gather feature tiling](2026-08-31-input-gather-feature-tiling.md): same
   ordered half2-to-FP32 sums; NCU DRAM reads746.3 ->12.0MB. Matched-sampled-clock
   full-step confirmation25.8899 ->25.2253ms (+2.63% throughput).
+- [Dense-gradient overwrite](2026-08-31-dense-gradient-overwrite.md): remove
+  redundant clears after proving complete physical dW/bias writes, including
+  padding.104 ->71 memsets,8,902,888 ->156,136 bytes/step; no kernel changes.
+- [BN-backward half mirror](2026-08-31-bn-backward-half-mirror.md): emit RN-half
+  dense operands with FP32 BN dX;33 casts disappear,463 ->430 kernels. A/B
+  25.0926 ->24.4922ms (+2.45% throughput), all sampled active clocks780MHz.
+  Nsight apply+cast time2.283121 ->1.686333ms; reductions/copies remain unchanged.
 
 No new precision/model approximation. CUDA exact oracles, targeted full-step
 regressions, sanitizer checks, Rust FFI and independent reviews passed. Neither

@@ -168,6 +168,10 @@ if(MGT_ENABLE_CUDA)
     add_executable(test_local_batch_norm_epilogue tests/cuda/test_local_batch_norm_epilogue.cu)
     target_link_libraries(test_local_batch_norm_epilogue PRIVATE mgt_cuda)
     add_test(NAME local_batch_norm_epilogue COMMAND test_local_batch_norm_epilogue)
+    add_executable(test_local_batch_norm_backward_epilogue
+        tests/cuda/test_local_batch_norm_backward_epilogue.cu)
+    target_link_libraries(test_local_batch_norm_backward_epilogue PRIVATE mgt_cuda)
+    add_test(NAME local_batch_norm_backward_epilogue COMMAND test_local_batch_norm_backward_epilogue)
     add_executable(test_local_mlp_batch_norm_full_step
         tests/cuda/test_local_mlp_batch_norm_full_step.cu)
     target_link_libraries(test_local_mlp_batch_norm_full_step PRIVATE mgt_cuda)
@@ -185,6 +189,10 @@ if(MGT_ENABLE_CUDA)
     target_link_libraries(test_local_mlp_fp16_activation_tape PRIVATE mgt_cuda)
     add_test(NAME local_mlp_fp16_activation_tape
         COMMAND test_local_mlp_fp16_activation_tape)
+    add_executable(test_local_mlp_gradient_overwrite
+        tests/cuda/test_local_mlp_gradient_overwrite.cu)
+    target_link_libraries(test_local_mlp_gradient_overwrite PRIVATE mgt_cuda)
+    add_test(NAME local_mlp_gradient_overwrite COMMAND test_local_mlp_gradient_overwrite)
     add_executable(test_local_mlp_batch_norm_grouped_rows_full_step
         tests/cuda/test_local_mlp_batch_norm_full_step.cu)
     target_compile_definitions(test_local_mlp_batch_norm_grouped_rows_full_step PRIVATE
@@ -311,6 +319,11 @@ if(MGT_ENABLE_CUDA)
             target_include_directories(mgt_cuda PUBLIC ${NCCL_INCLUDE_DIR})
             target_link_libraries(mgt_cuda PUBLIC ${NCCL_LIB})
             target_compile_definitions(mgt_cuda PUBLIC MGT_HAS_NCCL=1)
+            add_executable(test_nccl_mlp_gradient_overwrite
+                tests/cuda/test_local_mlp_gradient_overwrite.cu)
+            target_compile_definitions(test_nccl_mlp_gradient_overwrite PRIVATE MGT_TEST_NCCL=1)
+            target_link_libraries(test_nccl_mlp_gradient_overwrite PRIVATE mgt_cuda)
+            add_test(NAME nccl_mlp_gradient_overwrite COMMAND test_nccl_mlp_gradient_overwrite)
             add_executable(test_bf16_residual_stack_8rank tests/cuda/test_bf16_residual_stack_8rank.cu)
             target_link_libraries(test_bf16_residual_stack_8rank PRIVATE mgt_cuda)
             add_executable(test_sync_batch_norm_tiled tests/cuda/test_sync_batch_norm_tiled.cu)
