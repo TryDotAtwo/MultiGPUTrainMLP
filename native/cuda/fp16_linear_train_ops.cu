@@ -1,4 +1,5 @@
 #include "mgt_cuda/fp16_linear_train_ops.cuh"
+#include "mgt_cuda/blas_stream.cuh"
 
 namespace mgt_cuda {
 namespace {
@@ -29,7 +30,7 @@ mgt::Status LaunchFp16LinearForward(
     float* output, std::uint32_t rows, std::uint32_t input_features,
     std::uint32_t output_features, cudaStream_t stream) {
     if (!Valid(blas, input, weight, output, rows, input_features, output_features) ||
-        cublasSetStream(blas, stream) != CUBLAS_STATUS_SUCCESS)
+        detail::BindBlasStream(blas, stream) != CUBLAS_STATUS_SUCCESS)
         return mgt::Status::kInvalidConfig;
     const float alpha = 1.0f, beta = 0.0f;
     const auto status = cublasGemmEx(
@@ -46,7 +47,7 @@ mgt::Status LaunchFp16LinearGradWeight(
     float* grad_weight, std::uint32_t rows, std::uint32_t input_features,
     std::uint32_t output_features, cudaStream_t stream) {
     if (!Valid(blas, input, grad_output, grad_weight, rows, input_features, output_features) ||
-        cublasSetStream(blas, stream) != CUBLAS_STATUS_SUCCESS)
+        detail::BindBlasStream(blas, stream) != CUBLAS_STATUS_SUCCESS)
         return mgt::Status::kInvalidConfig;
     const float alpha = 1.0f, beta = 0.0f;
     const auto status = cublasGemmEx(
@@ -63,7 +64,7 @@ mgt::Status LaunchFp16LinearGradInput(
     float* grad_input, std::uint32_t rows, std::uint32_t input_features,
     std::uint32_t output_features, float beta, cudaStream_t stream) {
     if (!Valid(blas, grad_output, weight, grad_input, rows, input_features, output_features) ||
-        cublasSetStream(blas, stream) != CUBLAS_STATUS_SUCCESS)
+        detail::BindBlasStream(blas, stream) != CUBLAS_STATUS_SUCCESS)
         return mgt::Status::kInvalidConfig;
     const float alpha = 1.0f;
     const auto status = cublasGemmEx(

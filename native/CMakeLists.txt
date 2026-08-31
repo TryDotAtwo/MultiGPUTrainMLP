@@ -165,6 +165,22 @@ if(MGT_ENABLE_CUDA)
     target_link_libraries(test_local_batch_norm PRIVATE mgt_cuda)
     add_test(NAME local_batch_norm COMMAND test_local_batch_norm)
 
+    # Diagnostic only: cudaGetFuncBySymbol is used to identify our captured
+    # kernels without querying cuBLAS nodes through the runtime API.
+    if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.8)
+        add_executable(test_single_gpu_graph_replay tests/cuda/test_single_gpu_graph_replay.cu)
+        add_executable(test_single_gpu_graph_capture tests/cuda/test_single_gpu_graph_capture.cu)
+        add_executable(mgt_single_gpu_graph_probe tools/mgt_single_gpu_graph_probe.cu)
+        foreach(graph_target IN ITEMS test_single_gpu_graph_replay test_single_gpu_graph_capture mgt_single_gpu_graph_probe)
+            target_link_libraries(${graph_target} PRIVATE mgt_cuda CUDA::cuda_driver)
+            target_compile_definitions(${graph_target} PRIVATE
+                MGT_GRAPH_GROUP_JSON="${CMAKE_SOURCE_DIR}/production_inputs/p888.json"
+                MGT_GRAPH_TARGET_BIN="${CMAKE_SOURCE_DIR}/tests/fixtures/p888-target.bin")
+        endforeach()
+        add_test(NAME single_gpu_graph_replay COMMAND test_single_gpu_graph_replay)
+        add_test(NAME single_gpu_graph_capture COMMAND test_single_gpu_graph_capture)
+    endif()
+
     add_executable(test_local_batch_norm_epilogue tests/cuda/test_local_batch_norm_epilogue.cu)
     target_link_libraries(test_local_batch_norm_epilogue PRIVATE mgt_cuda)
     add_test(NAME local_batch_norm_epilogue COMMAND test_local_batch_norm_epilogue)

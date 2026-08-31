@@ -38,11 +38,20 @@ locked and sparse samples do not prove a fully controlled timing window.
   kernels. Confirmation23.1719 ->22.4334ms (+3.29% throughput), all active
   samples780MHz. Fresh Nsight changed-family time falls by0.694ms; sparse
   remains3.683ms. Earlier baseline drift is not attributed to this patch.
+- [CUDA Graph feasibility](2026-08-31-single-gpu-graph-feasibility.md): same-stream
+  binding now preserves user cuBLAS workspace; default eager throughput is
+  unchanged. A test/tool-only fixed-shape replay updates RandomWalk and both
+  Adam nodes, not frozen data. Confirmation22.4366→21.4649ms(+4.53% throughput),
+  all active samples780MHz; Nsight verifies identical363kernels/memory events
+  and reduces uncovered time1.561→0.530ms. Public trainer/C ABI/Rust graph mode
+  and tail-batch lifecycle are **not integrated**; the default snapshot above
+  must not be replaced with this experimental timing.
 
 No new precision/model approximation. CUDA exact oracles, targeted full-step
 regressions, sanitizer checks and Rust FFI passed. Earlier checkpoints also had
-independent reviews; the input-bias checkpoint was completed without subagents. Neither
-convergence, complete single-GPU saturation, CUDA Graphs, a training-plugin
+independent reviews; the input-bias and graph-feasibility checkpoints were
+completed without subagents. Neither convergence, complete single-GPU saturation,
+production CUDA Graph integration, a training-plugin
 release nor T4/multi-GPU readiness follows from these local checkpoints.
 
 ## A0. Source provenance and contract
