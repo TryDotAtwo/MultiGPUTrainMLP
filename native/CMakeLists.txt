@@ -172,6 +172,10 @@ if(MGT_ENABLE_CUDA)
         tests/cuda/test_local_batch_norm_backward_epilogue.cu)
     target_link_libraries(test_local_batch_norm_backward_epilogue PRIVATE mgt_cuda)
     add_test(NAME local_batch_norm_backward_epilogue COMMAND test_local_batch_norm_backward_epilogue)
+    add_executable(test_local_batch_norm_backward_mask
+        tests/cuda/test_local_batch_norm_backward_mask.cu)
+    target_link_libraries(test_local_batch_norm_backward_mask PRIVATE mgt_cuda)
+    add_test(NAME local_batch_norm_backward_mask COMMAND test_local_batch_norm_backward_mask)
     add_executable(test_local_mlp_batch_norm_full_step
         tests/cuda/test_local_mlp_batch_norm_full_step.cu)
     target_link_libraries(test_local_mlp_batch_norm_full_step PRIVATE mgt_cuda)

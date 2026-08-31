@@ -178,9 +178,19 @@ __global__ void BackwardByFeature(
     }
 }
 
+template <bool Relu>
+__device__ __forceinline__ float BackwardGradient(
+    const float* dy, const float* activated, int index) {
+    // Preserve the old select, including NaN activations and signed zero.
+    // Multiplication by a boolean mask would not have the same semantics.
+    if constexpr (Relu) return activated[index] > 0.0f ? dy[index] : 0.0f;
+    return dy[index];
+}
+
+template <bool Relu>
 __global__ void BackwardPartialCoalesced(
     const float* dy, int rows, int cols, int stride, const float* normalized,
-    float* dgamma, float* dbeta) {
+    float* dgamma, float* dbeta, const float* activated) {
     const int col = blockIdx.x * kTileCols + threadIdx.x;
     const int row_lane = threadIdx.y;
     const int row_begin = blockIdx.y * kRowsPerBlock;
@@ -190,8 +200,9 @@ __global__ void BackwardPartialCoalesced(
     if (col < cols) {
         for (int row = row_begin + row_lane; row < row_end; row += kTileRows) {
             const int index = row * stride + col;
-            beta_sum += dy[index];
-            gamma_sum += dy[index] * normalized[index];
+            const float gradient = BackwardGradient<Relu>(dy, activated, index);
+            beta_sum += gradient;
+            gamma_sum += gradient * normalized[index];
         }
     }
     __shared__ float gamma_tile[kTileRows][kTileCols];
@@ -209,19 +220,26 @@ __global__ void BackwardPartialCoalesced(
     }
 }
 
-template <bool HalfMirror>
+template <bool Relu, bool Residual, bool HalfMirror>
 __global__ void BackwardApplyCoalesced(
     const float* dy, int rows, int cols, int stride, const float* gamma,
     const float* inv_std, const float* normalized, const float* dgamma,
-    const float* dbeta, float* dx, __half* half_output) {
+    const float* dbeta, float* dx, __half* half_output,
+    const float* activated, float* residual_grad) {
     const int index = blockIdx.x * blockDim.x + threadIdx.x;
     if (index >= rows * stride) return;
     const int col = index % stride;
+    float gradient = 0.0f;
+    if (col < cols || Residual)
+        gradient = BackwardGradient<Relu>(dy, activated, index);
+    // The residual branch needs incoming masked dY, before the BN derivative,
+    // on every physical lane. Capture it before an exact in-place dX store.
+    if constexpr (Residual) residual_grad[index] = gradient;
     float value = 0.0f;
     if (col < cols) {
         const float scale = gamma[col] * inv_std[col] / rows;
         value = scale *
-            (rows * dy[index] - dbeta[col] - normalized[index] * dgamma[col]);
+            (rows * gradient - dbeta[col] - normalized[index] * dgamma[col]);
     }
     // Both destinations consume the same FP32 result. Keep the original
     // derivative expression and contraction policy; do not accumulate in half.
@@ -282,18 +300,25 @@ bool ValidBackwardApply(
     const float* inv_std, const float* normalized, const float* dgamma,
     const float* dbeta, float* dx, LocalBatchNormBackwardEpilogue epilogue) {
     if (!ValidCommon(rows, cols, stride) || !dy || !gamma || !inv_std ||
-        !normalized || !dx || !dgamma || !dbeta) return false;
+        !normalized || !dx || !dgamma || !dbeta ||
+        (epilogue.residual_grad && !epilogue.activated)) return false;
     const auto bytes = static_cast<std::size_t>(rows) * stride * sizeof(float);
     const auto half_bytes = bytes / sizeof(float) * sizeof(__half);
     const auto feature_bytes = static_cast<std::size_t>(cols) * sizeof(float);
     if ((dy != dx && Overlap(dy, bytes, dx, bytes)) ||
-        Overlap(dx, bytes, normalized, bytes)) return false;
-    for (const float* tensor : {dy, static_cast<const float*>(dx), normalized}) {
-        if (Overlap(epilogue.half_output, half_bytes, tensor, bytes)) return false;
+        Overlap(dx, bytes, normalized, bytes) ||
+        Overlap(epilogue.activated, bytes, dx, bytes)) return false;
+    for (const float* tensor : {dy, static_cast<const float*>(dx), normalized,
+                               epilogue.activated}) {
+        if (Overlap(epilogue.half_output, half_bytes, tensor, bytes) ||
+            Overlap(epilogue.residual_grad, bytes, tensor, bytes)) return false;
     }
+    if (Overlap(epilogue.half_output, half_bytes, epilogue.residual_grad, bytes))
+        return false;
     for (const float* feature : {gamma, inv_std, dgamma, dbeta}) {
         if (Overlap(dx, bytes, feature, feature_bytes) ||
-            Overlap(epilogue.half_output, half_bytes, feature, feature_bytes)) return false;
+            Overlap(epilogue.half_output, half_bytes, feature, feature_bytes) ||
+            Overlap(epilogue.residual_grad, bytes, feature, feature_bytes)) return false;
     }
     return true;
 }
@@ -375,13 +400,30 @@ mgt::Status LaunchLocalStridedBatchNormBackwardApply(
                             normalized, dgamma, dbeta, dx, epilogue))
         return mgt::Status::kInvalidConfig;
     const int count = rows * row_stride;
-    if (epilogue.half_output) {
-        BackwardApplyCoalesced<true><<<1 + (count - 1) / kThreads, kThreads, 0, stream>>>(
+    if (epilogue.residual_grad && epilogue.half_output) {
+        BackwardApplyCoalesced<true, true, true><<<1 + (count - 1) / kThreads, kThreads, 0, stream>>>(
             dy, rows, cols, row_stride, gamma, inv_std, normalized, dgamma, dbeta,
-            dx, epilogue.half_output);
+            dx, epilogue.half_output, epilogue.activated, epilogue.residual_grad);
+    } else if (epilogue.residual_grad) {
+        BackwardApplyCoalesced<true, true, false><<<1 + (count - 1) / kThreads, kThreads, 0, stream>>>(
+            dy, rows, cols, row_stride, gamma, inv_std, normalized, dgamma, dbeta,
+            dx, nullptr, epilogue.activated, epilogue.residual_grad);
+    } else if (epilogue.activated && epilogue.half_output) {
+        BackwardApplyCoalesced<true, false, true><<<1 + (count - 1) / kThreads, kThreads, 0, stream>>>(
+            dy, rows, cols, row_stride, gamma, inv_std, normalized, dgamma, dbeta,
+            dx, epilogue.half_output, epilogue.activated, nullptr);
+    } else if (epilogue.activated) {
+        BackwardApplyCoalesced<true, false, false><<<1 + (count - 1) / kThreads, kThreads, 0, stream>>>(
+            dy, rows, cols, row_stride, gamma, inv_std, normalized, dgamma, dbeta,
+            dx, nullptr, epilogue.activated, nullptr);
+    } else if (epilogue.half_output) {
+        BackwardApplyCoalesced<false, false, true><<<1 + (count - 1) / kThreads, kThreads, 0, stream>>>(
+            dy, rows, cols, row_stride, gamma, inv_std, normalized, dgamma, dbeta,
+            dx, epilogue.half_output, nullptr, nullptr);
     } else {
-        BackwardApplyCoalesced<false><<<1 + (count - 1) / kThreads, kThreads, 0, stream>>>(
-            dy, rows, cols, row_stride, gamma, inv_std, normalized, dgamma, dbeta, dx, nullptr);
+        BackwardApplyCoalesced<false, false, false><<<1 + (count - 1) / kThreads, kThreads, 0, stream>>>(
+            dy, rows, cols, row_stride, gamma, inv_std, normalized, dgamma, dbeta,
+            dx, nullptr, nullptr, nullptr);
     }
     return cudaPeekAtLastError() == cudaSuccess
         ? mgt::Status::kOk : mgt::Status::kCudaFailure;
@@ -398,15 +440,26 @@ mgt::Status LaunchLocalStridedBatchNormBackward(
         return mgt::Status::kInvalidConfig;
     const auto stats_bytes = static_cast<std::size_t>(2) * cols * sizeof(float);
     const auto half_bytes = static_cast<std::size_t>(rows) * row_stride * sizeof(__half);
-    if (Overlap(epilogue.half_output, half_bytes, stats_workspace, stats_bytes))
+    const auto bytes = static_cast<std::size_t>(rows) * row_stride * sizeof(float);
+    if (Overlap(epilogue.half_output, half_bytes, stats_workspace, stats_bytes) ||
+        Overlap(epilogue.activated, bytes, stats_workspace, stats_bytes) ||
+        Overlap(epilogue.activated, bytes, dgamma, stats_bytes / 2) ||
+        Overlap(epilogue.activated, bytes, dbeta, stats_bytes / 2) ||
+        Overlap(epilogue.residual_grad, bytes, stats_workspace, stats_bytes))
         return mgt::Status::kInvalidConfig;
     if (cudaMemsetAsync(stats_workspace, 0, stats_bytes, stream) != cudaSuccess)
         return mgt::Status::kCudaFailure;
     const dim3 block(kTileCols, kTileRows);
     const dim3 grid(1 + (cols - 1) / kTileCols, 1 + (rows - 1) / kRowsPerBlock);
-    BackwardPartialCoalesced<<<grid, block, 0, stream>>>(
-        dy, rows, cols, row_stride, normalized, stats_workspace,
-        stats_workspace + cols);
+    if (epilogue.activated) {
+        BackwardPartialCoalesced<true><<<grid, block, 0, stream>>>(
+            dy, rows, cols, row_stride, normalized, stats_workspace,
+            stats_workspace + cols, epilogue.activated);
+    } else {
+        BackwardPartialCoalesced<false><<<grid, block, 0, stream>>>(
+            dy, rows, cols, row_stride, normalized, stats_workspace,
+            stats_workspace + cols, nullptr);
+    }
     const auto apply_status = LaunchLocalStridedBatchNormBackwardApply(
         dy, rows, cols, row_stride, gamma, inv_std, normalized,
         stats_workspace, stats_workspace + cols, dx, epilogue, stream);

@@ -7,8 +7,8 @@ semantic and numerical gates before it are green.
 
 The A0-A12 entries below retain earlier-stage measurements; their old full-step
 timings are not the current performance snapshot. The latest validated original
-p888/SM86 batch4096 path is **24.4922ms/step** (median of three100-step run means,
-140 warmup steps/run), approximately167.2k samples/s, arena739806720 bytes.
+p888/SM86 batch4096 path is **23.8682ms/step** (median of three100-step run means,
+140 warmup steps/run), approximately171.6k samples/s, arena739806720 bytes.
 All active telemetry samples in the latest A/B were780MHz; clocks were not
 locked and sparse samples do not prove a fully controlled timing window.
 
@@ -25,6 +25,14 @@ locked and sparse samples do not prove a fully controlled timing window.
   dense operands with FP32 BN dX;33 casts disappear,463 ->430 kernels. A/B
   25.0926 ->24.4922ms (+2.45% throughput), all sampled active clocks780MHz.
   Nsight apply+cast time2.283121 ->1.686333ms; reductions/copies remain unchanged.
+- [BN-backward mask fusion](2026-08-31-bn-backward-mask-fusion.md): original FP32
+  activation predicates move into BN partial/apply; residual output retains
+  incoming masked dY, not BN dX.18 ReLU and16 residual-mask launches disappear,
+  430 ->396 kernels. Separate A/B stages measured24.5378 ->24.1517ms (descriptive,
+  some warmup clock drift) and24.1523 ->23.8682ms (+1.19% throughput; all active
+  confirmation samples780MHz). The initial clock-drifty residual series is
+  retained but not used to claim its apparent19.7% gain. No new buffer or change
+  to BN reduction order, FP32 accumulation, or the nonlocal BN selector.
 
 No new precision/model approximation. CUDA exact oracles, targeted full-step
 regressions, sanitizer checks, Rust FFI and independent reviews passed. Neither
