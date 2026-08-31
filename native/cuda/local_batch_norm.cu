@@ -66,8 +66,10 @@ __global__ void ForwardByFeature(
     }
 }
 
+template <bool InputBias>
 __global__ void ForwardPartialCoalesced(
-    const float* x, int rows, int cols, int stride, float* sums, float* squares) {
+    const float* x, int rows, int cols, int stride, float* sums, float* squares,
+    const float* input_bias) {
     const int col = blockIdx.x * kTileCols + threadIdx.x;
     const int row_lane = threadIdx.y;
     const int row_begin = blockIdx.y * kRowsPerBlock;
@@ -76,7 +78,8 @@ __global__ void ForwardPartialCoalesced(
     float square = 0.0f;
     if (col < cols) {
         for (int row = row_begin + row_lane; row < row_end; row += kTileRows) {
-            const float value = x[row * stride + col];
+            float value = x[row * stride + col];
+            if constexpr (InputBias) value = __fadd_rn(value, input_bias[col]);
             sum += value;
             square += value * value;
         }
@@ -111,17 +114,21 @@ __global__ void ForwardFinalize(
     running_var[col] = (1.0f - momentum) * running_var[col] + momentum * unbiased;
 }
 
-template <bool Relu, bool Residual, bool HalfMirror>
+template <bool Relu, bool Residual, bool HalfMirror, bool InputBias>
 __global__ void ForwardApplyCoalesced(
     const float* x, int rows, int cols, int stride, const float* gamma,
     const float* beta, const float* mean, const float* inv_std,
-    float* y, float* normalized, const float* residual, __half* half_output) {
+    float* y, float* normalized, const float* residual, __half* half_output,
+    const float* input_bias) {
     const int index = blockIdx.x * blockDim.x + threadIdx.x;
     if (index >= rows * stride) return;
     const int col = index % stride;
     float affine = 0.0f;
     if (col < cols) {
-        const float value = (x[index] - mean[col]) * inv_std[col];
+        float input = x[index];
+        // Match the previous Bias kernel's FP32 global store before BN reads.
+        if constexpr (InputBias) input = __fadd_rn(input, input_bias[col]);
+        const float value = (input - mean[col]) * inv_std[col];
         normalized[index] = value;
         affine = value * gamma[col] + beta[col];
     } else {
@@ -287,7 +294,7 @@ bool ValidApply(
                                static_cast<const float*>(normalized), epilogue.residual}) {
         if (Overlap(epilogue.half_output, half_bytes, tensor, bytes)) return false;
     }
-    for (const float* feature : {gamma, beta, mean, inv_std}) {
+    for (const float* feature : {gamma, beta, mean, inv_std, epilogue.input_bias}) {
         if (Overlap(y, bytes, feature, feature_bytes) ||
             Overlap(normalized, bytes, feature, feature_bytes) ||
             Overlap(epilogue.half_output, half_bytes, feature, feature_bytes)) return false;
@@ -325,6 +332,39 @@ bool ValidBackwardApply(
 
 }  // namespace
 
+template <bool InputBias>
+static mgt::Status LaunchForwardApply(
+    const float* x, int rows, int cols, int row_stride,
+    const float* gamma, const float* beta, const float* mean, const float* inv_std,
+    float* y, float* normalized,
+    LocalBatchNormForwardEpilogue epilogue, cudaStream_t stream) {
+    const int count = rows * row_stride;
+    const int blocks = 1 + (count - 1) / kThreads;
+    if (!epilogue.relu) {
+        ForwardApplyCoalesced<false, false, false, InputBias><<<blocks, kThreads, 0, stream>>>(
+            x, rows, cols, row_stride, gamma, beta, mean, inv_std, y, normalized,
+            nullptr, nullptr, epilogue.input_bias);
+    } else if (epilogue.residual && epilogue.half_output) {
+        ForwardApplyCoalesced<true, true, true, InputBias><<<blocks, kThreads, 0, stream>>>(
+            x, rows, cols, row_stride, gamma, beta, mean, inv_std, y, normalized,
+            epilogue.residual, epilogue.half_output, epilogue.input_bias);
+    } else if (epilogue.residual) {
+        ForwardApplyCoalesced<true, true, false, InputBias><<<blocks, kThreads, 0, stream>>>(
+            x, rows, cols, row_stride, gamma, beta, mean, inv_std, y, normalized,
+            epilogue.residual, nullptr, epilogue.input_bias);
+    } else if (epilogue.half_output) {
+        ForwardApplyCoalesced<true, false, true, InputBias><<<blocks, kThreads, 0, stream>>>(
+            x, rows, cols, row_stride, gamma, beta, mean, inv_std, y, normalized,
+            nullptr, epilogue.half_output, epilogue.input_bias);
+    } else {
+        ForwardApplyCoalesced<true, false, false, InputBias><<<blocks, kThreads, 0, stream>>>(
+            x, rows, cols, row_stride, gamma, beta, mean, inv_std, y, normalized,
+            nullptr, nullptr, epilogue.input_bias);
+    }
+    return cudaPeekAtLastError() == cudaSuccess
+        ? mgt::Status::kOk : mgt::Status::kCudaFailure;
+}
+
 mgt::Status LaunchLocalStridedBatchNormApply(
     const float* x, int rows, int cols, int row_stride,
     const float* gamma, const float* beta, const float* mean, const float* inv_std,
@@ -332,31 +372,11 @@ mgt::Status LaunchLocalStridedBatchNormApply(
     LocalBatchNormForwardEpilogue epilogue, cudaStream_t stream) {
     if (!ValidApply(x, rows, cols, row_stride, gamma, beta, mean, inv_std,
                     y, normalized, epilogue)) return mgt::Status::kInvalidConfig;
-    const int count = rows * row_stride;
-    const int blocks = 1 + (count - 1) / kThreads;
-    if (!epilogue.relu) {
-        ForwardApplyCoalesced<false, false, false><<<blocks, kThreads, 0, stream>>>(
-            x, rows, cols, row_stride, gamma, beta, mean, inv_std, y, normalized,
-            nullptr, nullptr);
-    } else if (epilogue.residual && epilogue.half_output) {
-        ForwardApplyCoalesced<true, true, true><<<blocks, kThreads, 0, stream>>>(
-            x, rows, cols, row_stride, gamma, beta, mean, inv_std, y, normalized,
-            epilogue.residual, epilogue.half_output);
-    } else if (epilogue.residual) {
-        ForwardApplyCoalesced<true, true, false><<<blocks, kThreads, 0, stream>>>(
-            x, rows, cols, row_stride, gamma, beta, mean, inv_std, y, normalized,
-            epilogue.residual, nullptr);
-    } else if (epilogue.half_output) {
-        ForwardApplyCoalesced<true, false, true><<<blocks, kThreads, 0, stream>>>(
-            x, rows, cols, row_stride, gamma, beta, mean, inv_std, y, normalized,
-            nullptr, epilogue.half_output);
-    } else {
-        ForwardApplyCoalesced<true, false, false><<<blocks, kThreads, 0, stream>>>(
-            x, rows, cols, row_stride, gamma, beta, mean, inv_std, y, normalized,
-            nullptr, nullptr);
-    }
-    return cudaPeekAtLastError() == cudaSuccess
-        ? mgt::Status::kOk : mgt::Status::kCudaFailure;
+    if (epilogue.input_bias)
+        return LaunchForwardApply<true>(x, rows, cols, row_stride, gamma, beta,
+            mean, inv_std, y, normalized, epilogue, stream);
+    return LaunchForwardApply<false>(x, rows, cols, row_stride, gamma, beta,
+        mean, inv_std, y, normalized, epilogue, stream);
 }
 
 mgt::Status LaunchLocalStridedBatchNormForward(
@@ -378,12 +398,23 @@ mgt::Status LaunchLocalStridedBatchNormForward(
         Overlap(epilogue.half_output, half_bytes, running_var, stats_bytes / 2) ||
         Overlap(epilogue.half_output, half_bytes, stats_workspace, stats_bytes))
         return mgt::Status::kInvalidConfig;
+    for (const float* writable_feature : {running_mean, running_var, mean, inv_std}) {
+        if (Overlap(epilogue.input_bias, stats_bytes / 2, writable_feature, stats_bytes / 2))
+            return mgt::Status::kInvalidConfig;
+    }
+    if (Overlap(epilogue.input_bias, stats_bytes / 2, stats_workspace, stats_bytes))
+        return mgt::Status::kInvalidConfig;
     if (cudaMemsetAsync(stats_workspace, 0, stats_bytes, stream) != cudaSuccess)
         return mgt::Status::kCudaFailure;
     const dim3 block(kTileCols, kTileRows);
     const dim3 grid(1 + (cols - 1) / kTileCols, 1 + (rows - 1) / kRowsPerBlock);
-    ForwardPartialCoalesced<<<grid, block, 0, stream>>>(
-        x, rows, cols, row_stride, stats_workspace, stats_workspace + cols);
+    if (epilogue.input_bias) {
+        ForwardPartialCoalesced<true><<<grid, block, 0, stream>>>(
+            x, rows, cols, row_stride, stats_workspace, stats_workspace + cols, epilogue.input_bias);
+    } else {
+        ForwardPartialCoalesced<false><<<grid, block, 0, stream>>>(
+            x, rows, cols, row_stride, stats_workspace, stats_workspace + cols, nullptr);
+    }
     ForwardFinalize<<<1 + (cols - 1) / kThreads, kThreads, 0, stream>>>(
         rows, cols, gamma, beta, running_mean, running_var, momentum, epsilon,
         mean, inv_std, stats_workspace, stats_workspace + cols);

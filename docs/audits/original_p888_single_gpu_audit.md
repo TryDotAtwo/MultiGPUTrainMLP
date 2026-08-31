@@ -7,8 +7,8 @@ semantic and numerical gates before it are green.
 
 The A0-A12 entries below retain earlier-stage measurements; their old full-step
 timings are not the current performance snapshot. The latest validated original
-p888/SM86 batch4096 path is **23.8682ms/step** (median of three100-step run means,
-140 warmup steps/run), approximately171.6k samples/s, arena739806720 bytes.
+p888/SM86 batch4096 path is **22.4334ms/step** (median of three100-step run means,
+140 warmup steps/run), approximately182.6k samples/s, arena739806720 bytes.
 All active telemetry samples in the latest A/B were780MHz; clocks were not
 locked and sparse samples do not prove a fully controlled timing window.
 
@@ -33,9 +33,15 @@ locked and sparse samples do not prove a fully controlled timing window.
   confirmation samples780MHz). The initial clock-drifty residual series is
   retained but not used to claim its apparent19.7% gain. No new buffer or change
   to BN reduction order, FP32 accumulation, or the nonlocal BN selector.
+- [BN input-bias fusion](2026-08-31-bn-input-bias-fusion.md): preserve rounded
+  FP32 x+bias inside partial/apply, remove33 separate Bias passes;396 ->363
+  kernels. Confirmation23.1719 ->22.4334ms (+3.29% throughput), all active
+  samples780MHz. Fresh Nsight changed-family time falls by0.694ms; sparse
+  remains3.683ms. Earlier baseline drift is not attributed to this patch.
 
 No new precision/model approximation. CUDA exact oracles, targeted full-step
-regressions, sanitizer checks, Rust FFI and independent reviews passed. Neither
+regressions, sanitizer checks and Rust FFI passed. Earlier checkpoints also had
+independent reviews; the input-bias checkpoint was completed without subagents. Neither
 convergence, complete single-GPU saturation, CUDA Graphs, a training-plugin
 release nor T4/multi-GPU readiness follows from these local checkpoints.
 

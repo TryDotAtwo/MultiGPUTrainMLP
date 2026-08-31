@@ -13,6 +13,7 @@
 #include <vector>
 
 namespace {
+unsigned apply_cases = 0, full_cases = 0, bias_invalid_cases = 0;
 void Require(bool condition, const std::string& message) {
     if (!condition) throw std::runtime_error(message);
 }
@@ -23,15 +24,15 @@ void Cuda(cudaError_t status) {
 // Test-owned storage, including aligned leading/trailing canaries for every array.
 template <class T> class Device {
 public:
-    explicit Device(std::size_t count) : count_(count) {
-        Cuda(cudaMalloc(&allocation_, (count_ + 2 * kGuard) * sizeof(T)));
-        const auto status = cudaMemset(allocation_, 0xa5, (count_ + 2 * kGuard) * sizeof(T));
+    explicit Device(std::size_t count, bool tight = false) : count_(count), guard_(tight ? 0 : kGuard) {
+        Cuda(cudaMalloc(&allocation_, (count_ + 2 * guard_) * sizeof(T)));
+        const auto status = cudaMemset(allocation_, 0xa5, (count_ + 2 * guard_) * sizeof(T));
         if (status != cudaSuccess) { cudaFree(allocation_); Cuda(status); }
     }
     ~Device() { cudaFree(allocation_); }
     Device(const Device&) = delete;
     Device& operator=(const Device&) = delete;
-    T* get() const { return allocation_ + kGuard; }
+    T* get() const { return allocation_ + guard_; }
     void Put(const std::vector<T>& values) {
         Require(values.size() == count_, "upload size");
         Cuda(cudaMemcpy(get(), values.data(), count_ * sizeof(T), cudaMemcpyHostToDevice));
@@ -43,6 +44,7 @@ public:
         return result;
     }
     void CheckGuards() const {
+        if (!guard_) return; // memcheck sees the exact requested logical extent.
         unsigned char guards[2 * kGuard * sizeof(T)];
         Cuda(cudaMemcpy(guards, allocation_, kGuard * sizeof(T), cudaMemcpyDeviceToHost));
         Cuda(cudaMemcpy(guards + kGuard * sizeof(T), get() + count_,
@@ -52,6 +54,7 @@ public:
 private:
     static constexpr std::size_t kGuard = 8;
     std::size_t count_;
+    std::size_t guard_;
     T* allocation_ = nullptr;
 };
 
@@ -94,11 +97,18 @@ __global__ void OldActivation(float* values, const float* residual,
     if (half_output) half_output[i] = __float2half_rn(value);
 }
 
+// A separate global FP32 store is the reference rounding boundary for x+bias.
+__global__ void OldInputBias(const float* x, const float* bias, int count,
+                             int cols, int stride, float* biased) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < count) biased[i] = i % stride < cols ? x[i] + bias[i % stride] : 0.0f;
+}
+
 struct Fixture {
     int rows, cols, stride;
-    std::vector<float> x, residual, gamma, beta, mean, inv;
+    std::vector<float> x, residual, gamma, beta, mean, inv, input_bias;
     Fixture(int r, int c, int s) : rows(r), cols(c), stride(s), x(r * s),
-        residual(r * s), gamma(c), beta(c), mean(c), inv(c) {
+        residual(r * s), gamma(c), beta(c), mean(c), inv(c), input_bias(c) {
         for (int i = 0; i < r * s; ++i) {
             x[i] = i % s < c ? static_cast<float>((i * 17) % 33 - 16) / 16.0f : NAN;
             // Positive padding proves BN-pad-zero then residual/ReLU is preserved.
@@ -109,6 +119,7 @@ struct Fixture {
             beta[i] = static_cast<float>(i % 5 - 2) / 8.0f;
             mean[i] = static_cast<float>(i % 3 - 1) / 4.0f;
             inv[i] = static_cast<float>(i % 4 + 1) / 2.0f;
+            input_bias[i] = static_cast<float>(i % 9 - 4) / 8.0f;
         }
     }
 };
@@ -117,14 +128,18 @@ struct Fixture {
 // old store, dropped/incorrect padding, tail OOB, and destructive inplace reads.
 void ApplyCase(const Fixture& f, bool relu, bool residual, bool half, bool inplace,
                const std::vector<float>* literal_norm = nullptr,
-               const std::vector<float>* literal_output = nullptr) {
+               const std::vector<float>* literal_output = nullptr, bool use_bias = false) {
     const int count = f.rows * f.stride;
     Device<float> x(count), res(count), gamma(f.cols), beta(f.cols), mean(f.cols), inv(f.cols);
     Device<float> y(count), norm(count), old_y(count), old_norm(count);
     Device<__half> h(count), old_h(count);
+    Device<float> input_bias(f.cols, true), biased(count);
     x.Put(f.x); res.Put(f.residual); gamma.Put(f.gamma); beta.Put(f.beta);
     mean.Put(f.mean); inv.Put(f.inv);
-    OldAffine<<<(count + 255) / 256, 256>>>(x.get(), count, f.cols, f.stride,
+    input_bias.Put(f.input_bias);
+    if (use_bias) OldInputBias<<<(count + 255) / 256, 256>>>(x.get(), input_bias.get(),
+        count, f.cols, f.stride, biased.get());
+    OldAffine<<<(count + 255) / 256, 256>>>(use_bias ? biased.get() : x.get(), count, f.cols, f.stride,
         gamma.get(), beta.get(), mean.get(), inv.get(), old_y.get(), old_norm.get());
     if (relu) OldActivation<<<(count + 255) / 256, 256>>>(old_y.get(),
         residual ? res.get() : nullptr, half ? old_h.get() : nullptr, count);
@@ -133,6 +148,7 @@ void ApplyCase(const Fixture& f, bool relu, bool residual, bool half, bool inpla
     epilogue.relu = relu;
     epilogue.residual = residual ? res.get() : nullptr;
     epilogue.half_output = half ? h.get() : nullptr;
+    epilogue.input_bias = use_bias ? input_bias.get() : nullptr;
     Require(mgt_cuda::LaunchLocalStridedBatchNormApply(x.get(), f.rows, f.cols,
         f.stride, gamma.get(), beta.get(), mean.get(), inv.get(),
         inplace ? x.get() : y.get(), norm.get(), epilogue, nullptr) == mgt::Status::kOk,
@@ -161,7 +177,9 @@ void ApplyCase(const Fixture& f, bool relu, bool residual, bool half, bool inpla
     Equal(res.Read(), f.residual, "residual modified");
     Equal(gamma.Read(), f.gamma, "gamma modified"); Equal(beta.Read(), f.beta, "beta modified");
     Equal(mean.Read(), f.mean, "mean modified"); Equal(inv.Read(), f.inv, "inv_std modified");
+    Equal(input_bias.Read(), f.input_bias, "input bias modified");
     x.CheckGuards(); y.CheckGuards(); h.CheckGuards(); old_h.CheckGuards();
+    ++apply_cases;
 }
 
 void HandDerivedCases() {
@@ -195,17 +213,22 @@ void HandDerivedCases() {
 
 // Catches bypassing the fused consumer or changing statistics/running-state
 // updates. Dyadic inputs make both partial-sum orders exact across two row tiles.
-void FullForwardCase() {
-    Fixture f(257, 218, 224);
+void FullForwardCase(int rows = 257, int cols = 218, int stride = 224,
+                     bool use_bias = false, bool inplace = false) {
+    Fixture f(rows, cols, stride);
     const int count = f.rows * f.stride;
     Device<float> x(count), res(count), gamma(f.cols), beta(f.cols);
     Device<float> y(count), norm(count), mean(f.cols), inv(f.cols), rm(f.cols), rv(f.cols), ws(2 * f.cols);
     Device<float> old_y(count), old_norm(count), old_mean(f.cols), old_inv(f.cols);
     Device<float> old_rm(f.cols), old_rv(f.cols), old_ws(2 * f.cols);
     Device<__half> h(count), old_h(count);
+    Device<float> input_bias(f.cols, true), biased(count);
     x.Put(f.x); res.Put(f.residual); gamma.Put(f.gamma); beta.Put(f.beta);
     rm.Put(f.mean); old_rm.Put(f.mean); rv.Put(f.inv); old_rv.Put(f.inv);
-    Require(mgt_cuda::LaunchLocalStridedBatchNormForward(x.get(), f.rows, f.cols,
+    input_bias.Put(f.input_bias);
+    if (use_bias) OldInputBias<<<(count + 255) / 256, 256>>>(x.get(), input_bias.get(),
+        count, f.cols, f.stride, biased.get());
+    Require(mgt_cuda::LaunchLocalStridedBatchNormForward(use_bias ? biased.get() : x.get(), f.rows, f.cols,
         f.stride, gamma.get(), beta.get(), old_rm.get(), old_rv.get(), 0.125f, 1e-5f,
         old_y.get(), old_mean.get(), old_inv.get(), old_norm.get(), old_ws.get(),
         nullptr) == mgt::Status::kOk, "old full forward launch");
@@ -213,12 +236,13 @@ void FullForwardCase() {
     Cuda(cudaGetLastError());
     mgt_cuda::LocalBatchNormForwardEpilogue epilogue;
     epilogue.relu = true; epilogue.residual = res.get(); epilogue.half_output = h.get();
+    epilogue.input_bias = use_bias ? input_bias.get() : nullptr;
     Require(mgt_cuda::LaunchLocalStridedBatchNormForward(x.get(), f.rows, f.cols,
         f.stride, gamma.get(), beta.get(), rm.get(), rv.get(), 0.125f, 1e-5f,
-        y.get(), mean.get(), inv.get(), norm.get(), ws.get(), nullptr, epilogue)
+        inplace ? x.get() : y.get(), mean.get(), inv.get(), norm.get(), ws.get(), nullptr, epilogue)
         == mgt::Status::kOk, "fused full forward launch");
     Cuda(cudaDeviceSynchronize());
-    Equal(y.Read(), old_y.Read(), "full forward output");
+    Equal(inplace ? x.Read() : y.Read(), old_y.Read(), "full forward output");
     Equal(norm.Read(), old_norm.Read(), "full forward normalized");
     Equal(h.Read(), old_h.Read(), "full forward half");
     Equal(mean.Read(), old_mean.Read(), "full forward mean");
@@ -226,8 +250,70 @@ void FullForwardCase() {
     Equal(rm.Read(), old_rm.Read(), "running mean");
     Equal(rv.Read(), old_rv.Read(), "running variance");
     Equal(ws.Read(), old_ws.Read(), "partial statistics");
-    Equal(x.Read(), f.x, "full forward input"); Equal(res.Read(), f.residual, "full forward residual");
+    if (!inplace) Equal(x.Read(), f.x, "full forward input");
+    Equal(input_bias.Read(), f.input_bias, "full forward input bias");
+    Equal(res.Read(), f.residual, "full forward residual");
     Equal(gamma.Read(), f.gamma, "full forward gamma"); Equal(beta.Read(), f.beta, "full forward beta");
+    ++full_cases;
+}
+
+void BiasRoundingWitness() {
+    Fixture f(1, 4, 6);
+    const float tiny = std::ldexp(1.0f, -149);
+    f.x = {1, -1, tiny, 16777216.0f, NAN, NAN};
+    f.input_bias = {std::ldexp(1.0f, -24), -std::ldexp(1.0f, -24), tiny, 1};
+    f.mean = {1, -1, 0, 16777216.0f}; f.inv = {1, 1, 1, 1};
+    f.gamma = {1, 1, 1, 1}; f.beta = {0, 0, 0, 0};
+    const std::vector<float> literal = {0, 0, std::ldexp(1.0f, -148), 0, 0, 0};
+    for (bool inplace : {false, true})
+        ApplyCase(f, false, false, false, inplace, &literal, &literal, true);
+    f.x = {NAN, INFINITY, -INFINITY, -0.0f, NAN, NAN};
+    f.input_bias = {1, -INFINITY, INFINITY, -0.0f};
+    for (bool inplace : {false, true})
+        ApplyCase(f, true, true, true, inplace, nullptr, nullptr, true);
+}
+
+// New bias pointers are read-only. Reject every overlapping writable range
+// before zeroing statistics or updating running state, including partial aliases.
+void InvalidInputBiasAliases() {
+    Device<float> x(16), y(16), norm(16), res(16), gamma(4), beta(4), mean(4), inv(4);
+    Device<float> rm(4), rv(4), ws(8);
+    Device<__half> half(16);
+    Device<float>* arrays[] = {&x, &y, &norm, &res, &gamma, &beta, &mean, &inv, &rm, &rv, &ws};
+    std::vector<std::vector<float>> before;
+    for (auto* a : arrays) before.push_back(a->Read());
+    const auto half_before = half.Read();
+    auto check_unchanged = [&] {
+        Cuda(cudaDeviceSynchronize());
+        for (unsigned i = 0; i < before.size(); ++i)
+            Equal(arrays[i]->Read(), before[i], "invalid bias alias mutated tensor");
+        Equal(half.Read(), half_before, "invalid bias alias mutated half");
+        ++bias_invalid_cases;
+    };
+    mgt_cuda::LocalBatchNormForwardEpilogue e{true, res.get(), half.get()};
+    for (const float* alias : {y.get(), y.get() + 1, norm.get(), norm.get() + 1,
+                              reinterpret_cast<float*>(half.get())}) {
+        e.input_bias = alias;
+        Require(mgt_cuda::LaunchLocalStridedBatchNormApply(x.get(), 2, 3, 4,
+            gamma.get(), beta.get(), mean.get(), inv.get(), y.get(), norm.get(), e, nullptr)
+            == mgt::Status::kInvalidConfig, "apply accepted writable bias alias");
+        check_unchanged();
+    }
+    e.input_bias = x.get() + 1;
+    Require(mgt_cuda::LaunchLocalStridedBatchNormApply(x.get(), 2, 3, 4,
+        gamma.get(), beta.get(), mean.get(), inv.get(), x.get(), norm.get(), e, nullptr)
+        == mgt::Status::kInvalidConfig, "in-place apply accepted input bias alias");
+    check_unchanged();
+    for (const float* alias : {y.get(), norm.get(), mean.get(), mean.get() + 1,
+            inv.get(), inv.get() + 1, rm.get(), rm.get() + 1, rv.get(), rv.get() + 1,
+            ws.get(), ws.get() + 1, reinterpret_cast<float*>(half.get())}) {
+        e.input_bias = alias;
+        Require(mgt_cuda::LaunchLocalStridedBatchNormForward(x.get(), 2, 3, 4,
+            gamma.get(), beta.get(), rm.get(), rv.get(), .1f, 1e-5f, y.get(),
+            mean.get(), inv.get(), norm.get(), ws.get(), nullptr, e)
+            == mgt::Status::kInvalidConfig, "forward accepted writable bias alias");
+        check_unchanged();
+    }
 }
 
 // Catches half mirrors overwriting forward-only state that Apply does not see.
@@ -323,8 +409,18 @@ void InvalidCases() {
 }
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    const bool quick = argc == 2 && std::strcmp(argv[1], "--quick") == 0;
+    if (argc != 1 && !quick) return 2;
     try {
+        BiasRoundingWitness();
+        FullForwardCase(17, 3, 4, true, true);
+        InvalidInputBiasAliases();
+        if (quick) {
+            std::printf("local batch norm input-bias epilogue: PASS quick apply=%u full=%u bias_alias=%u\n",
+                apply_cases, full_cases, bias_invalid_cases);
+            return 0;
+        }
         HandDerivedCases();
         const int shapes[][3] = {{1, 255, 255}, {1, 256, 256}, {1, 257, 257},
             {257, 1, 1}, {3, 5, 7}, {17, 2556, 2560}, {4096, 218, 224}};
@@ -334,12 +430,20 @@ int main() {
                 ApplyCase(fixture, false, false, false, inplace);
                 for (bool residual : {false, true}) for (bool half : {false, true})
                     ApplyCase(fixture, true, residual, half, inplace);
+                ApplyCase(fixture, false, false, false, inplace, nullptr, nullptr, true);
+                for (bool residual : {false, true}) for (bool half : {false, true})
+                    ApplyCase(fixture, true, residual, half, inplace, nullptr, nullptr, true);
             }
         }
         FullForwardCase();
+        const int full_shapes[][3] = {{1, 3, 4}, {255, 31, 32}, {256, 32, 32},
+            {257, 33, 35}, {4095, 218, 224}, {4096, 218, 224}, {257, 2556, 2560}};
+        for (const auto& shape : full_shapes) for (bool inplace : {false, true})
+            FullForwardCase(shape[0], shape[1], shape[2], true, inplace);
         InvalidForwardHalfAliases();
         InvalidCases();
-        std::puts("local batch norm epilogue: PASS");
+        std::printf("local batch norm epilogue: PASS apply=%u full=%u bias_alias=%u\n",
+            apply_cases, full_cases, bias_invalid_cases);
         return 0;
     } catch (const std::exception& error) {
         std::fprintf(stderr, "local batch norm epilogue: %s\n", error.what());

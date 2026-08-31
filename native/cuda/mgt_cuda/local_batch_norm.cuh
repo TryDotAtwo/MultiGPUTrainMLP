@@ -13,12 +13,17 @@ struct LocalBatchNormForwardEpilogue {
     bool relu = false;
     const float* residual = nullptr;
     __half* half_output = nullptr;
+    // Optional logical-feature bias before BN. Both statistics and apply use
+    // the same rounded FP32 x+bias value; no materialized biased matrix.
+    const float* input_bias = nullptr;
 };
 
 // Apply supplied full-batch statistics without updating running state. x==y is
 // supported; partial x/y overlap is not. normalized and optional residual must
 // be separate from x/y and each other. half_output must not overlap float data.
 // Padding gets normalized=0 and affine=0, then the same residual/ReLU epilogue.
+// input_bias has cols elements and must not overlap writable outputs. It may
+// alias read-only inputs; it is not the post-normalization affine beta.
 mgt::Status LaunchLocalStridedBatchNormApply(
     const float* x, int rows, int cols, int row_stride,
     const float* gamma, const float* beta, const float* mean, const float* inv_std,
@@ -28,6 +33,7 @@ mgt::Status LaunchLocalStridedBatchNormApply(
 // Same epilogue contract as Apply; half_output must also be disjoint from
 // running_mean, running_var, and stats_workspace. Invalid epilogues are rejected
 // before statistics or running-state writes are enqueued.
+// input_bias must also be disjoint from running state, mean/inv_std and workspace.
 mgt::Status LaunchLocalStridedBatchNormForward(
     const float* x, int rows, int cols, int row_stride,
     const float* gamma, const float* beta,

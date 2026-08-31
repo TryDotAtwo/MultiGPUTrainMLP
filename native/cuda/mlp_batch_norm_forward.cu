@@ -486,12 +486,13 @@ mgt::Status LaunchMlpBatchNormForward(
 #ifdef MGT_LOCAL_MLP_IMPLEMENTATION
     auto*fp=LocalFp16(ctx);
 #endif
-    auto site=[&](unsigned i,float*x,const float*residual,bool emit_half){
+    auto site=[&](unsigned i,float*x,const float*residual,bool emit_half,
+                 const float*input_bias=nullptr){
         const auto&q=p.sites[i];
 #ifdef MGT_LOCAL_MLP_IMPLEMENTATION
         if(lr!=gr)return mgt::Status::kInvalidConfig;
         const LocalBatchNormForwardEpilogue epilogue{
-            true,residual,fp&&emit_half?ActivationTapeSlot(fp,i):nullptr};
+            true,residual,fp&&emit_half?ActivationTapeSlot(fp,i):nullptr,input_bias};
         return LaunchLocalStridedBatchNormForward(
             x,lr,q.logical_features,q.physical_stride,aff+q.affine_offset,
             aff+p.logical_feature_count+q.affine_offset,run+q.running_offset,
@@ -499,6 +500,12 @@ mgt::Status LaunchMlpBatchNormForward(
             bn+q.mean_offset,bn+q.inv_std_offset,bn+q.normalized_offset,
             scratch,st,epilogue);
 #else
+        // The synchronized/nonlocal path retains the original materialization.
+        if(input_bias){
+            const unsigned blocks=(lr*s.hd2+T-1)/T;
+            Bias<<<blocks,T,0,st>>>(x,input_bias,lr,s.hd2,lh2);
+            if(!launch())return mgt::Status::kCudaFailure;
+        }
         const auto status=LaunchSelectedStridedSyncBatchNormForward(
             x,lr,gr,q.logical_features,q.physical_stride,aff+q.affine_offset,
             aff+p.logical_feature_count+q.affine_offset,run+q.running_offset,
@@ -511,23 +518,19 @@ mgt::Status LaunchMlpBatchNormForward(
                        :LaunchBatchNormReluForward(x,n,st);
 #endif
     };
-    const unsigned blocks2=(lr*s.hd2+T-1)/T;
     if(LaunchInputBackend(s,lh1,w,states,lr,a1,ctx,st)!=mgt::Status::kOk)return mgt::Status::kCudaFailure;
     if(site(0,a1,nullptr,true)!=mgt::Status::kOk)return mgt::Status::kCudaFailure;
     if(Gemm(blas,a1,w+HW(s),cur,lr,s.hd2,s.hd1)!=mgt::Status::kOk)return mgt::Status::kCudaFailure;
-    Bias<<<blocks2,T,0,st>>>(cur,w+HB(s),lr,s.hd2,lh2);
     // With no residual blocks this is already the scalar head's FP32 input.
-    if(!launch()||site(1,cur,nullptr,s.residual_blocks||s.output_dim>1)!=mgt::Status::kOk)return mgt::Status::kCudaFailure;
+    if(!launch()||site(1,cur,nullptr,s.residual_blocks||s.output_dim>1,w+HB(s))!=mgt::Status::kOk)return mgt::Status::kCudaFailure;
     for(unsigned b=0;b<s.residual_blocks;b++){
         cur=block_inputs+static_cast<std::uint64_t>(b)*bh2;
         f1=fc1_activations+static_cast<std::uint64_t>(b)*bh2;
         f2=block_inputs+static_cast<std::uint64_t>(b+1U)*bh2;
         if(Gemm(blas,cur,w+F1W(s,b),f1,lr,s.hd2,s.hd2)!=mgt::Status::kOk)return mgt::Status::kCudaFailure;
-        Bias<<<blocks2,T,0,st>>>(f1,w+F1B(s,b),lr,s.hd2,lh2);
-        if(!launch()||site(2+2*b,f1,nullptr,true)!=mgt::Status::kOk)return mgt::Status::kCudaFailure;
+        if(!launch()||site(2+2*b,f1,nullptr,true,w+F1B(s,b))!=mgt::Status::kOk)return mgt::Status::kCudaFailure;
         if(Gemm(blas,f1,w+F2W(s,b),f2,lr,s.hd2,s.hd2)!=mgt::Status::kOk)return mgt::Status::kCudaFailure;
-        Bias<<<blocks2,T,0,st>>>(f2,w+F2B(s,b),lr,s.hd2,lh2);
-        if(!launch()||site(3+2*b,f2,cur,b+1U<s.residual_blocks||s.output_dim>1)!=mgt::Status::kOk)return mgt::Status::kCudaFailure;
+        if(!launch()||site(3+2*b,f2,cur,b+1U<s.residual_blocks||s.output_dim>1,w+F2B(s,b))!=mgt::Status::kOk)return mgt::Status::kCudaFailure;
     }
     cur=block_inputs+static_cast<std::uint64_t>(s.residual_blocks)*bh2;
     if(Gemm(blas,cur,w+OW(s),out,lr,s.output_dim,s.hd2)!=mgt::Status::kOk)return mgt::Status::kCudaFailure;
