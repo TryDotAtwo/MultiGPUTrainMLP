@@ -3,6 +3,27 @@
 Audit order is dataflow order. Performance promotion is forbidden until the
 semantic and numerical gates before it are green.
 
+## Latest accepted measurements (2026-08-31)
+
+The A0-A12 entries below retain earlier-stage measurements; their old full-step
+timings are not the current performance snapshot. The latest validated original
+p888/SM86 batch4096 path is **25.2253ms/step** (median of three100-step run means,
+140 warmup steps/run), approximately162.4k samples/s, arena739806720 bytes.
+All active telemetry samples in that confirmation were780MHz; clocks were not
+locked and sparse samples do not prove a fully controlled timing window.
+
+- [Column-sum tiling](2026-08-31-column-sum-tiling.md): same256-leaf FP32 tree,
+  adjacent-column loads;34 reductions total2.4193 ->0.9721ms. Full-step gain is
+  observational because all three A/B series include frequency drift.
+- [Input-gather feature tiling](2026-08-31-input-gather-feature-tiling.md): same
+  ordered half2-to-FP32 sums; NCU DRAM reads746.3 ->12.0MB. Matched-sampled-clock
+  full-step confirmation25.8899 ->25.2253ms (+2.63% throughput).
+
+No new precision/model approximation. CUDA exact oracles, targeted full-step
+regressions, sanitizer checks, Rust FFI and independent reviews passed. Neither
+convergence, complete single-GPU saturation, CUDA Graphs, a training-plugin
+release nor T4/multi-GPU readiness follows from these local checkpoints.
+
 ## A0. Source provenance and contract
 
 - Exact hashes for group JSON, target tensor/binary, original trainer source,
