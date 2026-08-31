@@ -76,7 +76,7 @@ assert_eq!((first.optimizer_step,tail.optimizer_step),(1,2));
 
 - [x] Add optional `eager|graph` benchmark argument while preserving the original5-argument invocation. Report mode and queried arena bytes; reject invalid mode and illegal epoch extent.
 - [x] Run the native graph benchmark under memcheck at4096, freeze binaries, then ABBAAB140warmup/100timed and node-level Nsight100warmup/4timed. Compare identical work and count captures/node updates.
-- [ ] Run all relevant native/C ABI/Rust regression gates on the final tree, document exact evidence and limits, check scoped diff/remote, commit/push and verify remote SHA.
+- [x] Run all relevant native/C ABI/Rust regression gates on the final tree, document exact evidence and limits, check scoped diff/remote, commit/push and verify remote SHA. Published as `c00e7edbdab8303c3cb9abf85822389d8b2417b8`; remote SHA matched.
 
 ## Self-review
 

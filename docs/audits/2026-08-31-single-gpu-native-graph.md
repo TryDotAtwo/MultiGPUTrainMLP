@@ -2,6 +2,8 @@
 
 Date: 2026-08-31. Original p888, RTX3070 Laptop/SM86, Docker queue only.
 Follows the [graph feasibility audit](2026-08-31-single-gpu-graph-feasibility.md).
+Published commit: `c00e7edbdab8303c3cb9abf85822389d8b2417b8`; the existing
+remote branch was queried after push and returned the same SHA.
 
 ## Accepted scope
 
