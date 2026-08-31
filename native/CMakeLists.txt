@@ -164,6 +164,10 @@ if(MGT_ENABLE_CUDA)
     add_executable(test_local_batch_norm tests/cuda/test_local_batch_norm.cu)
     target_link_libraries(test_local_batch_norm PRIVATE mgt_cuda)
     add_test(NAME local_batch_norm COMMAND test_local_batch_norm)
+
+    add_executable(test_local_batch_norm_epilogue tests/cuda/test_local_batch_norm_epilogue.cu)
+    target_link_libraries(test_local_batch_norm_epilogue PRIVATE mgt_cuda)
+    add_test(NAME local_batch_norm_epilogue COMMAND test_local_batch_norm_epilogue)
     add_executable(test_local_mlp_batch_norm_full_step
         tests/cuda/test_local_mlp_batch_norm_full_step.cu)
     target_link_libraries(test_local_mlp_batch_norm_full_step PRIVATE mgt_cuda)
@@ -176,6 +180,11 @@ if(MGT_ENABLE_CUDA)
     target_link_libraries(test_local_mlp_batch_norm_fp16_full_step PRIVATE mgt_cuda)
     add_test(NAME local_mlp_batch_norm_fp16_full_step
         COMMAND test_local_mlp_batch_norm_fp16_full_step)
+    add_executable(test_local_mlp_fp16_activation_tape
+        tests/cuda/test_local_mlp_fp16_activation_tape.cu)
+    target_link_libraries(test_local_mlp_fp16_activation_tape PRIVATE mgt_cuda)
+    add_test(NAME local_mlp_fp16_activation_tape
+        COMMAND test_local_mlp_fp16_activation_tape)
     add_executable(test_local_mlp_batch_norm_grouped_rows_full_step
         tests/cuda/test_local_mlp_batch_norm_full_step.cu)
     target_compile_definitions(test_local_mlp_batch_norm_grouped_rows_full_step PRIVATE
@@ -185,6 +194,11 @@ if(MGT_ENABLE_CUDA)
         COMMAND test_local_mlp_batch_norm_grouped_rows_full_step)
     set_tests_properties(local_mlp_batch_norm_grouped_rows_full_step PROPERTIES
         ENVIRONMENT "MGT_BN_INPUT_GRAD_KERNEL=grouped_rows")
+    add_executable(test_sparse_input_grad_grouped_rows
+        tests/cuda/test_sparse_input_grad_grouped_rows.cu)
+    target_link_libraries(test_sparse_input_grad_grouped_rows PRIVATE mgt_cuda)
+    add_test(NAME sparse_input_grad_grouped_rows
+        COMMAND test_sparse_input_grad_grouped_rows)
     add_executable(test_local_mlp_input_half
         tests/cuda/test_local_mlp_input_half.cu)
     target_link_libraries(test_local_mlp_input_half PRIVATE mgt_cuda)

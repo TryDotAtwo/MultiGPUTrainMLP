@@ -2,17 +2,40 @@
 
 #include "mgt/status.hpp"
 
+#include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
 namespace mgt_cuda {
 
+// Plain BN by default. Residual/half output require relu=true. The FP32
+// activation remains authoritative; half_output is only a GEMM operand mirror.
+struct LocalBatchNormForwardEpilogue {
+    bool relu = false;
+    const float* residual = nullptr;
+    __half* half_output = nullptr;
+};
+
+// Apply supplied full-batch statistics without updating running state. x==y is
+// supported; partial x/y overlap is not. normalized and optional residual must
+// be separate from x/y and each other. half_output must not overlap float data.
+// Padding gets normalized=0 and affine=0, then the same residual/ReLU epilogue.
+mgt::Status LaunchLocalStridedBatchNormApply(
+    const float* x, int rows, int cols, int row_stride,
+    const float* gamma, const float* beta, const float* mean, const float* inv_std,
+    float* y, float* normalized,
+    LocalBatchNormForwardEpilogue epilogue, cudaStream_t stream);
+
+// Same epilogue contract as Apply; half_output must also be disjoint from
+// running_mean, running_var, and stats_workspace. Invalid epilogues are rejected
+// before statistics or running-state writes are enqueued.
 mgt::Status LaunchLocalStridedBatchNormForward(
     const float* x, int rows, int cols, int row_stride,
     const float* gamma, const float* beta,
     float* running_mean, float* running_var,
     float momentum, float epsilon,
     float* y, float* mean, float* inv_std, float* normalized,
-    float* stats_workspace, cudaStream_t stream);
+    float* stats_workspace, cudaStream_t stream,
+    LocalBatchNormForwardEpilogue epilogue = {});
 
 mgt::Status LaunchLocalStridedBatchNormBackward(
     const float* dy, int rows, int cols, int row_stride,

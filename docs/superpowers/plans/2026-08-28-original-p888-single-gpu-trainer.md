@@ -330,7 +330,7 @@ Expected: FAIL because the module and native link configuration are absent.
 Run through the queue with the library directory exported:
 
 ```bash
-MGT_SINGLE_GPU_NATIVE_LIB_DIR=/tmp/mgt-single-sm86 cargo test -p trainer-cli --test single_gpu_ffi -- --nocapture
+LD_LIBRARY_PATH=/tmp/mgt-single-sm86${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH} MGT_SINGLE_GPU_NATIVE_LIB_DIR=/tmp/mgt-single-sm86 cargo test -p trainer-cli --test single_gpu_ffi -- --nocapture
 ```
 
 Expected: pass.

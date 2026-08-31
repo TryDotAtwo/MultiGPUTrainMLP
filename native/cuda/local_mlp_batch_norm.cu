@@ -55,6 +55,18 @@ mgt::Status LaunchLocalMlpBatchNormTrainStepFp16(
     cublasHandle_t blas, cudaStream_t stream) {
     if (!fp16 || fp16->master_weights != buffers.weights || !fp16->weight_mirror)
         return mgt::Status::kInvalidConfig;
+    const std::uint64_t activation_tape_halfs =
+        static_cast<std::uint64_t>(rows) * shape.hd1 +
+        (2ULL * shape.residual_blocks + (shape.output_dim > 1 ? 1ULL : 0ULL)) *
+            rows * shape.hd2;
+    if (!fp16->operand_a || fp16->operand_a_capacity < activation_tape_halfs)
+        return mgt::Status::kCapacityExceeded;
+    fp16->activation_workspace = buffers.forward_workspace;
+    fp16->activation_rows = rows;
+    fp16->activation_hd1 = shape.hd1;
+    fp16->activation_hd2 = shape.hd2;
+    fp16->activation_residual_blocks = shape.residual_blocks;
+    fp16->activation_has_final = shape.output_dim > 1;
     auto* local_backend = LocalBackendContext(fp16);
     return LaunchLocalMlpBatchNormTrainStepImpl(
         shape, logical_hd1, logical_hd2, states, labels, rows, rows, plan,

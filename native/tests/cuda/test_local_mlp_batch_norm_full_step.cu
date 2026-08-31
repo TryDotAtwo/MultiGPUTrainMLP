@@ -61,7 +61,9 @@ int main() {
     auto* d_labels = Device<float>(4);
 #ifdef MGT_TEST_LOCAL_FP16
     auto* d_weight_half = Device<__half>(parameter_count);
-    auto* d_operand_a = Device<__half>(12);
+    const std::uint64_t activation_tape_count =
+        4 * shape.hd1 + 2ULL * shape.residual_blocks * 4 * shape.hd2;
+    auto* d_operand_a = Device<__half>(activation_tape_count);
     auto* d_operand_b = Device<__half>(8);
 #endif
     if (!d_weights || !d_weight_grad || !d_weight_m || !d_weight_v || !d_affine ||
@@ -87,6 +89,7 @@ int main() {
     if (mgt_cuda::LaunchFloatToHalf(
             d_weights, d_weight_half, parameter_count, nullptr) != mgt::Status::kOk)
         return 1;
+    cudaMemset(d_operand_a, 0xff, activation_tape_count * sizeof(__half));
 #endif
     cublasHandle_t blas = nullptr;
     if (cublasCreate(&blas) != CUBLAS_STATUS_SUCCESS) return 1;
@@ -98,7 +101,7 @@ int main() {
         d_residual_grad, d_input_grad};
 #ifdef MGT_TEST_LOCAL_FP16
     mgt_cuda::LocalMlpFp16Context fp16{
-        d_weights, d_weight_half, d_operand_a, d_operand_b, 12, 8};
+        d_weights, d_weight_half, d_operand_a, d_operand_b, activation_tape_count, 8};
     const auto launch_status = mgt_cuda::LaunchLocalMlpBatchNormTrainStepFp16(
             shape, 3, 2, d_states, d_labels, 4, plan, workspace_count,
             adam, buffers, &fp16, blas, nullptr);
@@ -108,6 +111,32 @@ int main() {
             adam, buffers, blas, nullptr);
 #endif
     if (launch_status != mgt::Status::kOk || cudaDeviceSynchronize() != cudaSuccess) return 1;
+#ifdef MGT_TEST_LOCAL_FP16
+    std::vector<float> saved(workspace_count);
+    std::vector<__half> activation_tape(activation_tape_count);
+    cudaMemcpy(saved.data(), d_workspace, saved.size() * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(activation_tape.data(), d_operand_a,
+               activation_tape.size() * sizeof(__half), cudaMemcpyDeviceToHost);
+    const std::uint64_t batch_hd1 = 4 * shape.hd1;
+    const std::uint64_t batch_hd2 = 4 * shape.hd2;
+    const std::uint64_t block_inputs = batch_hd1;
+    const std::uint64_t fc1_activations =
+        block_inputs + (shape.residual_blocks + 1ULL) * batch_hd2;
+    for (std::uint64_t i = 0; i < batch_hd1; ++i) {
+        if (__half2float(activation_tape[i]) != __half2float(__float2half_rn(saved[i])))
+            return 1;
+    }
+    for (std::uint64_t block = 0; block < shape.residual_blocks; ++block) {
+        const std::uint64_t tape_block = batch_hd1 + 2 * block * batch_hd2;
+        for (std::uint64_t i = 0; i < batch_hd2; ++i) {
+            if (__half2float(activation_tape[tape_block + i]) !=
+                    __half2float(__float2half_rn(saved[block_inputs + block * batch_hd2 + i])) ||
+                __half2float(activation_tape[tape_block + batch_hd2 + i]) !=
+                    __half2float(__float2half_rn(saved[fc1_activations + block * batch_hd2 + i])))
+                return 1;
+        }
+    }
+#endif
     float gradient[27]{}, affine_gradient[6]{};
     float loss = 0.0f;
     cudaMemcpy(&loss, d_loss, sizeof(loss), cudaMemcpyDeviceToHost);

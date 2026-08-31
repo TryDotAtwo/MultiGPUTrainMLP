@@ -135,6 +135,10 @@ semantic and numerical gates before it are green.
   A3. Auto selection is intentionally limited to SM86; T4/A100 require their
   own measurements.
 
+Latest A8 follow-up: the [SM86 tile-major traversal audit](2026-08-31-sparse-gradient-tile-major.md)
+preserves exact sparse-gradient accumulation, lowers measured DRAM reads from
+2.97GB to0.60GB and reduces full-step latency34.2866 ->28.9943ms.
+
 ## A9. Optimizer and mirrors
 
 - Adam semantics, bias correction, step numbering, FP32 master/m/v, FP16 mirror,

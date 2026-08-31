@@ -13,12 +13,24 @@ namespace mgt_cuda {
 struct LocalMlpFp16Context {
     float* master_weights = nullptr;
     __half* weight_mirror = nullptr;
+    // Training tape capacity, in half elements, for the maximum active rows:
+    // rows * (hd1 + 2*residual_blocks*hd2 + (output_dim > 1 ? hd2 : 0)).
+    // Retain device storage through backward; sequential reuse requires the
+    // same stream or an explicit completion dependency.
     __half* operand_a = nullptr;
     __half* operand_b = nullptr;
     std::uint64_t operand_a_capacity = 0;
     std::uint64_t operand_b_capacity = 0;
     const float* cached_operand_b_source = nullptr;
     std::uint64_t cached_operand_b_count = 0;
+    float* activation_workspace = nullptr;
+    std::uint32_t activation_rows = 0;
+    std::uint32_t activation_hd1 = 0;
+    std::uint32_t activation_hd2 = 0;
+    std::uint32_t activation_residual_blocks = 0;
+    // Tape: input activation, then each block input/fc1 activation pair.
+    // Vector heads also need the final activation for forward and output dW.
+    bool activation_has_final = false;
 };
 
 mgt::Status LaunchFloatToHalf(

@@ -60,6 +60,9 @@ mgt::Status BuildLayout(const SingleGpuTrainerCreateInfo& info,
         return mgt::Status::kInvalidConfig;
     const auto workspace = LocalMlpBatchNormForwardWorkspaceFloats(
         shape, *plan, info.capacity_rows);
+    const std::uint64_t activation_tape_halfs =
+        static_cast<std::uint64_t>(info.capacity_rows) * shape.hd1 +
+        2ULL * shape.residual_blocks * info.capacity_rows * shape.hd2;
     if (!workspace) return mgt::Status::kCapacityExceeded;
     ArenaLayout out{};
     out.parameter_count = parameter_count;
@@ -90,7 +93,7 @@ mgt::Status BuildLayout(const SingleGpuTrainerCreateInfo& info,
         !floats(static_cast<std::uint64_t>(info.capacity_rows) * shape.hd2, &out.fc1_grad) ||
         !floats(static_cast<std::uint64_t>(info.capacity_rows) * shape.hd2, &out.residual_grad) ||
         !floats(static_cast<std::uint64_t>(info.capacity_rows) * shape.hd1, &out.input_grad) ||
-        !AddSlice(static_cast<std::uint64_t>(info.capacity_rows) * shape.hd1,
+        !AddSlice(activation_tape_halfs,
                   sizeof(__half), &cursor, &out.fp16_operand_a) ||
         !AddSlice(static_cast<std::uint64_t>(info.capacity_rows) * shape.hd2,
                   sizeof(__half), &cursor, &out.fp16_operand_b))
@@ -260,7 +263,9 @@ mgt::Status LaunchSingleGpuTrainStep(
         buffers.weights, At<__half>(arena, trainer->layout.weight_half),
         At<__half>(arena, trainer->layout.fp16_operand_a),
         At<__half>(arena, trainer->layout.fp16_operand_b),
-        static_cast<std::uint64_t>(trainer->info.capacity_rows) * trainer->shape.hd1,
+        static_cast<std::uint64_t>(trainer->info.capacity_rows) * trainer->shape.hd1 +
+            2ULL * trainer->shape.residual_blocks * trainer->info.capacity_rows *
+                trainer->shape.hd2,
         static_cast<std::uint64_t>(trainer->info.capacity_rows) * trainer->shape.hd2};
     status = LaunchLocalMlpBatchNormTrainStepFp16(
         trainer->shape, trainer->info.contract.logical_hd1,
