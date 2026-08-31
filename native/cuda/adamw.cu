@@ -46,6 +46,15 @@ __global__ void AdamWWithHalfMirrorKernel(AdamWKernelConfig config,
 
 }  // namespace
 
+namespace detail {
+const void* WeightAdamTrainingKernel() {
+    return reinterpret_cast<const void*>(AdamWWithHalfMirrorKernel);
+}
+const void* AffineAdamTrainingKernel() {
+    return reinterpret_cast<const void*>(AdamWKernel);
+}
+}  // namespace detail
+
 __host__ mgt::Status ValidateAdamWKernelConfig(const AdamWKernelConfig& config) {
     if (config.param_count == 0 || config.step == 0 || config.learning_rate <= 0.0f ||
         config.beta1 < 0.0f || config.beta1 >= 1.0f ||

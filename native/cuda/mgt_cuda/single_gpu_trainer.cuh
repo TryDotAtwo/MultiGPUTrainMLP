@@ -13,6 +13,13 @@ namespace mgt_cuda {
 
 struct SingleGpuTrainer;
 
+enum class SingleGpuExecutionMode : std::uint32_t {
+    kEager = 0,
+    // Explicit opt-in: capture capacity_rows at prepare; smaller batches use
+    // eager on the same stream. Requires a CUDA >=12.8 native build.
+    kFixedBatchGraph = 1,
+};
+
 struct SingleGpuTrainerCreateInfo {
     mgt::SingleGpuModelContract contract{};
     std::uint32_t device_id = 0;
@@ -23,6 +30,7 @@ struct SingleGpuTrainerCreateInfo {
     std::uint32_t k_min = 1;
     std::uint32_t k_max = 29;
     std::uint32_t global_rank = 0;
+    SingleGpuExecutionMode execution_mode = SingleGpuExecutionMode::kEager;
 };
 
 struct SingleGpuTrainStepRequest {

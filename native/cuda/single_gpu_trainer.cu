@@ -3,6 +3,7 @@
 #include "mgt/batch_norm_training.hpp"
 #include "mgt_cuda/local_mlp_batch_norm.cuh"
 #include "mgt_cuda/random_walk_kernel.cuh"
+#include "mgt_cuda/single_gpu_train_graph.cuh"
 
 #include <atomic>
 #include <limits>
@@ -20,6 +21,7 @@ struct ArenaLayout {
     std::uint64_t moves, target, states, labels, walk_meta, outputs, forward_workspace, loss;
     std::uint64_t output_dy, block_grad, fc1_grad, residual_grad, input_grad;
     std::uint64_t fp16_operand_a, fp16_operand_b;
+    std::uint64_t blas_workspace;
     std::uint64_t bytes, parameter_count, forward_workspace_floats;
 };
 
@@ -43,6 +45,11 @@ CudaMlpShape Shape(const mgt::SingleGpuModelContract& c) {
 
 mgt::Status BuildLayout(const SingleGpuTrainerCreateInfo& info,
                         mgt::BatchNormTrainingPlan* plan, ArenaLayout* layout) {
+    const bool graph_mode = info.execution_mode == SingleGpuExecutionMode::kFixedBatchGraph;
+    if ((info.execution_mode != SingleGpuExecutionMode::kEager && !graph_mode) ||
+        (graph_mode && (!detail::kSingleGpuTrainGraphSupported ||
+                       info.capacity_rows > mgt::P888TrainingContract::kSamplesPerEpoch)))
+        return mgt::Status::kInvalidConfig;
     auto adam = info.adam;
     adam.param_count = 1;
     adam.step = 1;
@@ -98,6 +105,9 @@ mgt::Status BuildLayout(const SingleGpuTrainerCreateInfo& info,
         !AddSlice(static_cast<std::uint64_t>(info.capacity_rows) * shape.hd2,
                   sizeof(__half), &cursor, &out.fp16_operand_b))
         return mgt::Status::kCapacityExceeded;
+    if (graph_mode && !AddSlice(detail::kSingleGpuBlasWorkspaceBytes, 1,
+                               &cursor, &out.blas_workspace))
+        return mgt::Status::kCapacityExceeded;
     out.bytes = (cursor + kAlignment - 1) & ~(kAlignment - 1);
     *layout = out;
     return mgt::Status::kOk;
@@ -136,12 +146,25 @@ struct SingleGpuTrainer {
     cudaStream_t stream = nullptr;
     cudaEvent_t completion = nullptr;
     cublasHandle_t blas = nullptr;
+    detail::SingleGpuTrainGraph graph{};
     bool prepared = false;
+    bool failed = false;
     bool in_flight = false;
     std::uint64_t sequence = 0;
     std::uint64_t completed = 0;
     float last_loss = 0.0f;
 };
+
+namespace {
+mgt::Status EnqueueSingleGpuTrainStep(
+    SingleGpuTrainer* trainer, const SingleGpuTrainStepRequest& request);
+
+mgt::Status FailTrainer(SingleGpuTrainer* trainer,
+                        mgt::Status status = mgt::Status::kCudaFailure) {
+    trainer->failed = true;
+    return status;
+}
+}  // namespace
 
 mgt::Status QuerySingleGpuTrainerBytes(
     const SingleGpuTrainerCreateInfo& info, std::uint64_t* bytes) {
@@ -160,7 +183,10 @@ mgt::Status CreateSingleGpuTrainer(
     *out = nullptr;
     auto* trainer = new (std::nothrow) SingleGpuTrainer;
     if (!trainer) return mgt::Status::kCapacityExceeded;
-    auto status = BuildLayout(info, &trainer->plan, &trainer->layout);
+    mgt::Status status;
+    try { status = BuildLayout(info, &trainer->plan, &trainer->layout); }
+    catch (const std::bad_alloc&) { delete trainer; return mgt::Status::kCapacityExceeded; }
+    catch (...) { delete trainer; return mgt::Status::kInvalidConfig; }
     if (status != mgt::Status::kOk) { delete trainer; return status; }
     trainer->info = info;
     trainer->puzzle = *info.puzzle;
@@ -191,16 +217,18 @@ mgt::Status CreateSingleGpuTrainer(
 }
 
 mgt::Status PrepareSingleGpuTrainer(SingleGpuTrainer* trainer) {
-    if (!trainer || trainer->prepared || !trainer->arena) return mgt::Status::kInvalidConfig;
+    if (!trainer || !trainer->arena) return mgt::Status::kInvalidConfig;
+    if (trainer->failed) return mgt::Status::kCudaFailure;
+    if (trainer->prepared) return mgt::Status::kInvalidConfig;
     if (cudaMemsetAsync(trainer->arena, 0, trainer->layout.bytes, trainer->stream) != cudaSuccess)
-        return mgt::Status::kCudaFailure;
+        return FailTrainer(trainer);
     if (cudaMemcpyAsync(At<mgt::TrainStateStorage>(trainer->arena, trainer->layout.moves),
                         trainer->puzzle.moves.data(), sizeof(trainer->puzzle.moves),
                         cudaMemcpyHostToDevice, trainer->stream) != cudaSuccess ||
         cudaMemcpyAsync(At<mgt::TrainStateStorage>(trainer->arena, trainer->layout.target),
                         &trainer->puzzle.target, sizeof(trainer->puzzle.target),
                         cudaMemcpyHostToDevice, trainer->stream) != cudaSuccess)
-        return mgt::Status::kCudaFailure;
+        return FailTrainer(trainer);
     auto* affine = At<float>(trainer->arena, trainer->layout.affine);
     auto* running = At<float>(trainer->arena, trainer->layout.running);
     const auto logical = trainer->plan.logical_feature_count;
@@ -218,20 +246,33 @@ mgt::Status PrepareSingleGpuTrainer(SingleGpuTrainer* trainer) {
             At<__half>(trainer->arena, trainer->layout.weight_half),
             trainer->layout.parameter_count, trainer->stream) != mgt::Status::kOk ||
         cudaPeekAtLastError() != cudaSuccess ||
-        cudaStreamSynchronize(trainer->stream) != cudaSuccess) return mgt::Status::kCudaFailure;
+        cudaStreamSynchronize(trainer->stream) != cudaSuccess) return FailTrainer(trainer);
+    if (trainer->info.execution_mode == SingleGpuExecutionMode::kFixedBatchGraph) {
+        if (cublasSetWorkspace(trainer->blas,
+                At<unsigned char>(trainer->arena, trainer->layout.blas_workspace),
+                detail::kSingleGpuBlasWorkspaceBytes) != CUBLAS_STATUS_SUCCESS ||
+            cudaStreamBeginCapture(trainer->stream, cudaStreamCaptureModeGlobal) != cudaSuccess)
+            return FailTrainer(trainer);
+        cudaGraph_t captured = nullptr;
+        const auto body = EnqueueSingleGpuTrainStep(
+            trainer, {trainer->info.capacity_rows, 1, 0, 0});
+        const auto ended = cudaStreamEndCapture(trainer->stream, &captured);
+        if (body != mgt::Status::kOk || ended != cudaSuccess) {
+            trainer->graph.source = captured;
+            return FailTrainer(trainer, body == mgt::Status::kOk ? mgt::Status::kCudaFailure : body);
+        }
+        const auto status = detail::InstantiateSingleGpuTrainGraph(
+            captured, trainer->info.capacity_rows, trainer->layout.parameter_count,
+            trainer->plan.trainable_count, &trainer->graph);
+        if (status != mgt::Status::kOk) return FailTrainer(trainer, status);
+    }
     trainer->prepared = true;
     return mgt::Status::kOk;
 }
 
-mgt::Status LaunchSingleGpuTrainStep(
-    SingleGpuTrainer* trainer, const SingleGpuTrainStepRequest& request,
-    SingleGpuTrainStepTicket* ticket) {
-    if (!trainer || !ticket || !trainer->prepared || !request.active_rows ||
-        request.optimizer_step != trainer->sequence + 1) return mgt::Status::kInvalidConfig;
-    if (request.active_rows > trainer->info.capacity_rows) return mgt::Status::kCapacityExceeded;
-    if (request.epoch_sample_offset > mgt::P888TrainingContract::kSamplesPerEpoch ||
-        request.active_rows > mgt::P888TrainingContract::kSamplesPerEpoch -
-            request.epoch_sample_offset) return mgt::Status::kInvalidConfig;
+namespace {
+mgt::Status EnqueueSingleGpuTrainStep(
+    SingleGpuTrainer* trainer, const SingleGpuTrainStepRequest& request) try {
     auto* arena = trainer->arena;
     MlpBatchNormStepBuffers buffers{
         At<float>(arena, trainer->layout.weights), At<float>(arena, trainer->layout.weight_grad),
@@ -274,9 +315,34 @@ mgt::Status LaunchSingleGpuTrainStep(
         At<float>(arena, trainer->layout.labels), request.active_rows, trainer->plan,
         trainer->layout.forward_workspace_floats, adam, buffers,
         &fp16, trainer->blas, trainer->stream);
-    if (status != mgt::Status::kOk ||
-        cudaEventRecord(trainer->completion, trainer->stream) != cudaSuccess)
-        return status == mgt::Status::kOk ? mgt::Status::kCudaFailure : status;
+    return status;
+} catch (const std::bad_alloc&) {
+    return mgt::Status::kCapacityExceeded;
+} catch (...) {
+    return mgt::Status::kCudaFailure;
+}
+}  // namespace
+
+mgt::Status LaunchSingleGpuTrainStep(
+    SingleGpuTrainer* trainer, const SingleGpuTrainStepRequest& request,
+    SingleGpuTrainStepTicket* ticket) {
+    if (!trainer || !ticket) return mgt::Status::kInvalidConfig;
+    if (trainer->failed) return mgt::Status::kCudaFailure;
+    if (!trainer->prepared || !request.active_rows || !request.optimizer_step ||
+        trainer->sequence == std::numeric_limits<std::uint64_t>::max() ||
+        request.optimizer_step != trainer->sequence + 1) return mgt::Status::kInvalidConfig;
+    if (request.active_rows > trainer->info.capacity_rows) return mgt::Status::kCapacityExceeded;
+    if (request.epoch_sample_offset > mgt::P888TrainingContract::kSamplesPerEpoch ||
+        request.active_rows > mgt::P888TrainingContract::kSamplesPerEpoch -
+            request.epoch_sample_offset) return mgt::Status::kInvalidConfig;
+    const bool replay = trainer->info.execution_mode == SingleGpuExecutionMode::kFixedBatchGraph &&
+                        request.active_rows == trainer->info.capacity_rows;
+    const auto status = replay
+        ? detail::LaunchSingleGpuTrainGraph(&trainer->graph, request, trainer->stream)
+        : EnqueueSingleGpuTrainStep(trainer, request);
+    if (status != mgt::Status::kOk) return FailTrainer(trainer, status);
+    if (cudaEventRecord(trainer->completion, trainer->stream) != cudaSuccess)
+        return FailTrainer(trainer);
     trainer->sequence = request.optimizer_step;
     trainer->in_flight = true;
     ticket->completion_event = trainer->completion;
@@ -286,18 +352,20 @@ mgt::Status LaunchSingleGpuTrainStep(
 
 mgt::Status ReadSingleGpuMetrics(
     SingleGpuTrainer* trainer, SingleGpuTrainerMetrics* metrics) {
-    if (!trainer || !metrics || !trainer->prepared) return mgt::Status::kInvalidConfig;
+    if (!trainer || !metrics) return mgt::Status::kInvalidConfig;
+    if (trainer->failed) return mgt::Status::kCudaFailure;
+    if (!trainer->prepared) return mgt::Status::kInvalidConfig;
     if (trainer->in_flight) {
-        if (cudaEventSynchronize(trainer->completion) != cudaSuccess) return mgt::Status::kCudaFailure;
+        if (cudaEventSynchronize(trainer->completion) != cudaSuccess) return FailTrainer(trainer);
         trainer->completed = trainer->sequence;
         trainer->in_flight = false;
     }
     if (trainer->completed && cudaMemcpyAsync(
             &trainer->last_loss, At<float>(trainer->arena, trainer->layout.loss),
             sizeof(float), cudaMemcpyDeviceToHost, trainer->stream) != cudaSuccess)
-        return mgt::Status::kCudaFailure;
+        return FailTrainer(trainer);
     if (trainer->completed && cudaStreamSynchronize(trainer->stream) != cudaSuccess)
-        return mgt::Status::kCudaFailure;
+        return FailTrainer(trainer);
     *metrics = {trainer->completed, trainer->completed, trainer->last_loss};
     return mgt::Status::kOk;
 }
@@ -308,9 +376,11 @@ mgt::Status DestroySingleGpuTrainer(SingleGpuTrainer** pointer) {
     mgt::Status result = mgt::Status::kOk;
     if (trainer->stream && cudaStreamSynchronize(trainer->stream) != cudaSuccess)
         result = mgt::Status::kCudaFailure;
-    if (trainer->arena && cudaFree(trainer->arena) != cudaSuccess) result = mgt::Status::kCudaFailure;
+    if (detail::DestroySingleGpuTrainGraph(&trainer->graph) != mgt::Status::kOk)
+        result = mgt::Status::kCudaFailure;
     if (trainer->blas && cublasDestroy(trainer->blas) != CUBLAS_STATUS_SUCCESS)
         result = mgt::Status::kCudaFailure;
+    if (trainer->arena && cudaFree(trainer->arena) != cudaSuccess) result = mgt::Status::kCudaFailure;
     if (trainer->completion && cudaEventDestroy(trainer->completion) != cudaSuccess)
         result = mgt::Status::kCudaFailure;
     if (trainer->stream && cudaStreamDestroy(trainer->stream) != cudaSuccess)

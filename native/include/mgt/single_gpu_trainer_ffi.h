@@ -40,6 +40,18 @@ typedef struct MgtSingleGpuConfigV1 {
     uint32_t k_max;
 } MgtSingleGpuConfigV1;
 
+typedef enum MgtSingleGpuExecutionMode {
+    MGT_SINGLE_GPU_EAGER = 0,
+    MGT_SINGLE_GPU_FIXED_BATCH_GRAPH = 1
+} MgtSingleGpuExecutionMode;
+
+typedef struct MgtSingleGpuExecutionOptionsV1 {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    uint32_t execution_mode;
+    uint32_t reserved_u32;
+} MgtSingleGpuExecutionOptionsV1;
+
 typedef struct MgtSingleGpuStepV1 {
     uint32_t struct_size;
     uint32_t active_rows;
@@ -60,12 +72,23 @@ typedef struct MgtSingleGpuMetricsV1 {
 uint32_t mgt_single_gpu_v1_abi_version(void);
 MgtStatus mgt_single_gpu_v1_create(
     const MgtSingleGpuConfigV1* config, MgtSingleGpuHandle** out);
+/* Additive opt-in; legacy create remains eager. Options require exact size,
+   ABI version 1 and reserved_u32 == 0. Calls on one handle must be serialized. */
+MgtStatus mgt_single_gpu_v1_create_with_options(
+    const MgtSingleGpuConfigV1* config,
+    const MgtSingleGpuExecutionOptionsV1* options, MgtSingleGpuHandle** out);
 MgtStatus mgt_single_gpu_v1_prepare(MgtSingleGpuHandle* handle);
+/* metrics == NULL enqueues only. Non-NULL metrics waits for completion. */
 MgtStatus mgt_single_gpu_v1_train_step(
     MgtSingleGpuHandle* handle, const MgtSingleGpuStepV1* step,
     MgtSingleGpuMetricsV1* metrics);
+/* Wait for the latest submitted step and read its metrics without another step. */
+MgtStatus mgt_single_gpu_v1_read_metrics(
+    MgtSingleGpuHandle* handle, MgtSingleGpuMetricsV1* metrics);
 MgtStatus mgt_single_gpu_v1_checkpoint(
     MgtSingleGpuHandle* handle, const char* directory_utf8);
+/* Consumes a valid handle and sets it to NULL even on a CUDA cleanup failure.
+   Retrieve a destroy error with last_error(NULL, ...); do not retry the handle. */
 MgtStatus mgt_single_gpu_v1_destroy(MgtSingleGpuHandle** handle);
 size_t mgt_single_gpu_v1_last_error(
     MgtSingleGpuHandle* handle, char* destination, size_t capacity);

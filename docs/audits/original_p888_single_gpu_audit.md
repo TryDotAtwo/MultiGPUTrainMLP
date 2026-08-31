@@ -6,11 +6,12 @@ semantic and numerical gates before it are green.
 ## Latest accepted measurements (2026-08-31)
 
 The A0-A12 entries below retain earlier-stage measurements; their old full-step
-timings are not the current performance snapshot. The latest validated original
-p888/SM86 batch4096 path is **22.4334ms/step** (median of three100-step run means,
-140 warmup steps/run), approximately182.6k samples/s, arena739806720 bytes.
-All active telemetry samples in the latest A/B were780MHz; clocks were not
-locked and sparse samples do not prove a fully controlled timing window.
+timings are not the current performance snapshot. The final integrated original
+p888/SM86 batch4096 graph path is **21.4622ms/step** (median of three100-step run
+means,140 warmup steps/run), approximately190.8k samples/s, arena744001024 bytes.
+Matched eager is22.5628ms/step and739806720 bytes: graph adds one4MiB cuBLAS
+workspace and gives+5.1281% throughput. Graph active telemetry is780MHz; eager
+includes780/810MHz, clocks are not locked, so this remains observational.
 
 - [Column-sum tiling](2026-08-31-column-sum-tiling.md): same256-leaf FP32 tree,
   adjacent-column loads;34 reductions total2.4193 ->0.9721ms. Full-step gain is
@@ -43,15 +44,16 @@ locked and sparse samples do not prove a fully controlled timing window.
   unchanged. A test/tool-only fixed-shape replay updates RandomWalk and both
   Adam nodes, not frozen data. Confirmation22.4366→21.4649ms(+4.53% throughput),
   all active samples780MHz; Nsight verifies identical363kernels/memory events
-  and reduces uncovered time1.561→0.530ms. Public trainer/C ABI/Rust graph mode
-  and tail-batch lifecycle are **not integrated**; the default snapshot above
-  must not be replaced with this experimental timing.
+  and reduces uncovered time1.561→0.530ms. The follow-up
+  [native graph lifecycle](2026-08-31-single-gpu-native-graph.md) integrates
+  explicit native/C ABI/Rust graph mode, eager tails, asynchronous metrics,
+  failure ownership and final performance/trace gates. Legacy create stays eager.
 
 No new precision/model approximation. CUDA exact oracles, targeted full-step
 regressions, sanitizer checks and Rust FFI passed. Earlier checkpoints also had
 independent reviews; the input-bias and graph-feasibility checkpoints were
 completed without subagents. Neither convergence, complete single-GPU saturation,
-production CUDA Graph integration, a training-plugin
+a training-plugin
 release nor T4/multi-GPU readiness follows from these local checkpoints.
 
 ## A0. Source provenance and contract
@@ -217,13 +219,12 @@ byte-identical to the accepted BN-mask baseline; the candidates are test-only.
 - No steady-state allocation or host readback; explicit stream/event ownership.
 - NVTX ranges per stage, CUDA Graph opportunity, CPU launch gaps, overlap, and
   stable clocks/power during measurements.
-- Current status: **first unresolved performance gate**. The prepared lifecycle
-  performs allocation before timed steps and the fresh timeline has no semantic
-  failure, but the step still issues hundreds of conversion/BN kernels and has
-  no accepted CUDA Graph or stage-overlap policy. During a 100-step run the
-  laptop GPU held 96--99% utilization at only 780 MHz and 80--81 C, producing
-  37.1181 ms/step versus the shorter-run 35.7755 ms median. Scheduling and the
-  thermal/power envelope must be frozen before attributing smaller deltas.
+- Current status: **green for explicit fixed-batch CUDA Graph scheduling**.
+  Legacy eager remains default; graph capture is opt-in and uses the same device
+  work. Native/Rust traces verify one capture and three typed node updates per
+  full replay, while a554-row epoch tail stays eager. At batch4096, graph cuts
+  measured uncovered span1.5731→0.5311ms and paired latency22.5628→21.4622ms.
+  The step still has363 kernels; sparse dW at3.734ms is the next performance gate.
 
 ## A11. Training behavior
 
@@ -238,9 +239,9 @@ byte-identical to the accepted BN-mask baseline; the candidates are test-only.
 - Freeze hardware, power/clocks, binary hash, inputs, batch/tail shape, warmup,
   measurement window, Nsight report, and NCU counters.
 - Current SM86 snapshot: 53.558 GFLOP of physically issued dense work and
-  51.074 GFLOP of logical/useful dense work per train step. At 35.7755 ms this
-  is 1.497 issued and 1.428 useful end-to-end TFLOP/s, plus non-dense work not
-  represented by those FLOP counts. GEMM-only throughput is about 9.12 TFLOP/s.
+  51.074 GFLOP of logical/useful dense work per train step. At21.4622ms this is
+  2.495 issued and2.380 useful end-to-end TFLOP/s, plus non-dense work not
+  represented by those FLOP counts. GEMM-only throughput remains about9.12TFLOP/s.
   At the observed 780 MHz, the 40-SM FP16 Tensor Core envelope is about 15.97
-  TFLOP/s: GEMMs reach roughly 57%, while the full step reaches roughly 9.4%
-  because sparse gather, BN, conversions, and optimizer are not dense GEMMs.
+  TFLOP/s: GEMMs reach roughly57%, while the graph full step reaches roughly15.6%
+  because sparse gather, BN, conversions, optimizer and scheduling are not GEMMs.

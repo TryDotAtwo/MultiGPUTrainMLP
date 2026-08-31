@@ -143,6 +143,7 @@ if(MGT_ENABLE_CUDA)
         cuda/local_batch_norm.cu
         cuda/local_mlp_batch_norm.cu
         cuda/single_gpu_trainer.cu
+        cuda/single_gpu_train_graph.cu
         cuda/fp16_linear_train_ops.cu
         cuda/batch_norm_activation.cu
         cuda/bf16_activation.cu
@@ -168,10 +169,12 @@ if(MGT_ENABLE_CUDA)
     # Diagnostic only: cudaGetFuncBySymbol is used to identify our captured
     # kernels without querying cuBLAS nodes through the runtime API.
     if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.8)
+        target_link_libraries(mgt_cuda PUBLIC CUDA::cuda_driver)
         add_executable(test_single_gpu_graph_replay tests/cuda/test_single_gpu_graph_replay.cu)
         add_executable(test_single_gpu_graph_capture tests/cuda/test_single_gpu_graph_capture.cu)
+        add_executable(test_single_gpu_native_graph tests/cuda/test_single_gpu_native_graph.cu)
         add_executable(mgt_single_gpu_graph_probe tools/mgt_single_gpu_graph_probe.cu)
-        foreach(graph_target IN ITEMS test_single_gpu_graph_replay test_single_gpu_graph_capture mgt_single_gpu_graph_probe)
+        foreach(graph_target IN ITEMS test_single_gpu_graph_replay test_single_gpu_graph_capture test_single_gpu_native_graph mgt_single_gpu_graph_probe)
             target_link_libraries(${graph_target} PRIVATE mgt_cuda CUDA::cuda_driver)
             target_compile_definitions(${graph_target} PRIVATE
                 MGT_GRAPH_GROUP_JSON="${CMAKE_SOURCE_DIR}/production_inputs/p888.json"
@@ -179,6 +182,7 @@ if(MGT_ENABLE_CUDA)
         endforeach()
         add_test(NAME single_gpu_graph_replay COMMAND test_single_gpu_graph_replay)
         add_test(NAME single_gpu_graph_capture COMMAND test_single_gpu_graph_capture)
+        add_test(NAME single_gpu_native_graph COMMAND test_single_gpu_native_graph)
     endif()
 
     add_executable(test_local_batch_norm_epilogue tests/cuda/test_local_batch_norm_epilogue.cu)
@@ -516,4 +520,14 @@ if(MGT_ENABLE_CUDA)
     target_compile_definitions(test_single_gpu_trainer_ffi PRIVATE
         MGT_TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
     add_test(NAME single_gpu_trainer_ffi COMMAND test_single_gpu_trainer_ffi)
+    add_executable(test_single_gpu_ffi_destroy_failure tests/test_single_gpu_ffi_destroy_failure.cpp)
+    target_include_directories(test_single_gpu_ffi_destroy_failure PRIVATE cuda)
+    target_link_libraries(test_single_gpu_ffi_destroy_failure PRIVATE mgt_core CUDA::cudart)
+    add_test(NAME single_gpu_ffi_destroy_failure COMMAND test_single_gpu_ffi_destroy_failure)
+    if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.8)
+        add_executable(test_single_gpu_graph_ffi tests/test_single_gpu_graph_ffi.cpp)
+        target_link_libraries(test_single_gpu_graph_ffi PRIVATE mgt_single_gpu_trainer)
+        target_compile_definitions(test_single_gpu_graph_ffi PRIVATE MGT_TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+        add_test(NAME single_gpu_graph_ffi COMMAND test_single_gpu_graph_ffi)
+    endif()
 endif()

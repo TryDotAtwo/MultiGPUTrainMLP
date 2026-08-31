@@ -5,8 +5,12 @@
 
 #include <algorithm>
 #include <cstring>
+#include <memory>
 #include <new>
 #include <string>
+
+static_assert(static_cast<uint32_t>(mgt_cuda::SingleGpuExecutionMode::kEager) == MGT_SINGLE_GPU_EAGER);
+static_assert(static_cast<uint32_t>(mgt_cuda::SingleGpuExecutionMode::kFixedBatchGraph) == MGT_SINGLE_GPU_FIXED_BATCH_GRAPH);
 
 struct MgtSingleGpuHandle {
     mgt_cuda::SingleGpuTrainer* trainer = nullptr;
@@ -32,8 +36,9 @@ template <class F> MgtStatus Guard(MgtSingleGpuHandle* h, F&& function) noexcept
 
 extern "C" uint32_t mgt_single_gpu_v1_abi_version(void) { return MGT_SINGLE_GPU_ABI_V1; }
 
-extern "C" MgtStatus mgt_single_gpu_v1_create(
-    const MgtSingleGpuConfigV1* c, MgtSingleGpuHandle** out) {
+static MgtStatus CreateWithMode(
+    const MgtSingleGpuConfigV1* c, mgt_cuda::SingleGpuExecutionMode mode,
+    MgtSingleGpuHandle** out) {
     if (!out) return Fail(nullptr, MGT_STATUS_INVALID_CONFIG, "out handle is null");
     *out = nullptr;
     if (!c || c->struct_size != sizeof(*c) || c->abi_version != MGT_SINGLE_GPU_ABI_V1 ||
@@ -42,12 +47,11 @@ extern "C" MgtStatus mgt_single_gpu_v1_create(
         c->k_min > c->k_max)
         return Fail(nullptr, MGT_STATUS_INVALID_CONFIG, "invalid ABI config layout");
     return Guard(nullptr, [&] {
-        auto* h = new MgtSingleGpuHandle;
+        auto h = std::make_unique<MgtSingleGpuHandle>();
         mgt::PuzzleDefinition puzzle{};
         const auto load = mgt::LoadPuzzleDefinition(
             c->group_json_utf8, c->target_bin_utf8, &puzzle);
         if (load != mgt::Status::kOk) {
-            delete h;
             return Fail(nullptr, Convert(load), "puzzle load failed");
         }
         mgt_cuda::SingleGpuTrainerCreateInfo info{};
@@ -59,11 +63,49 @@ extern "C" MgtStatus mgt_single_gpu_v1_create(
         info.base_seed = c->base_seed;
         info.k_min = c->k_min;
         info.k_max = c->k_max;
+        info.execution_mode = mode;
         const auto status = mgt_cuda::CreateSingleGpuTrainer(info, &h->trainer);
-        if (status != mgt::Status::kOk) { delete h; return Fail(nullptr, Convert(status), "native trainer creation failed"); }
-        *out = h;
+        if (status != mgt::Status::kOk) return Fail(nullptr, Convert(status), "native trainer creation failed");
+        *out = h.release();
         return MGT_STATUS_OK;
     });
+}
+
+extern "C" MgtStatus mgt_single_gpu_v1_create(
+    const MgtSingleGpuConfigV1* config, MgtSingleGpuHandle** out) {
+    return CreateWithMode(config, mgt_cuda::SingleGpuExecutionMode::kEager, out);
+}
+
+extern "C" MgtStatus mgt_single_gpu_v1_create_with_options(
+    const MgtSingleGpuConfigV1* config, const MgtSingleGpuExecutionOptionsV1* options,
+    MgtSingleGpuHandle** out) {
+    if (!out) return Fail(nullptr, MGT_STATUS_INVALID_CONFIG, "out handle is null");
+    *out = nullptr;
+    if (!options || options->struct_size != sizeof(*options) ||
+        options->abi_version != MGT_SINGLE_GPU_ABI_V1 || options->reserved_u32 ||
+        options->execution_mode > MGT_SINGLE_GPU_FIXED_BATCH_GRAPH)
+        return Fail(nullptr, MGT_STATUS_INVALID_CONFIG, "invalid execution options layout");
+    return CreateWithMode(config,
+        static_cast<mgt_cuda::SingleGpuExecutionMode>(options->execution_mode), out);
+}
+
+static MgtStatus ReadMetrics(MgtSingleGpuHandle* h, MgtSingleGpuMetricsV1* metrics) {
+    mgt_cuda::SingleGpuTrainerMetrics native{};
+    const auto status = mgt_cuda::ReadSingleGpuMetrics(h->trainer, &native);
+    if (status != mgt::Status::kOk) return Fail(h, Convert(status), "metrics read failed");
+    metrics->reserved_u32 = 0;
+    metrics->completed_sequence = native.completed_sequence;
+    metrics->optimizer_step = native.optimizer_step;
+    metrics->loss = native.loss;
+    metrics->reserved_f32 = 0;
+    return MGT_STATUS_OK;
+}
+
+extern "C" MgtStatus mgt_single_gpu_v1_read_metrics(
+    MgtSingleGpuHandle* h, MgtSingleGpuMetricsV1* metrics) {
+    if (!h || !h->trainer || !metrics || metrics->struct_size != sizeof(*metrics))
+        return Fail(h, MGT_STATUS_INVALID_CONFIG, "invalid metrics layout");
+    return Guard(h, [&] { return ReadMetrics(h, metrics); });
 }
 
 extern "C" MgtStatus mgt_single_gpu_v1_prepare(MgtSingleGpuHandle* h) {
@@ -87,17 +129,7 @@ extern "C" MgtStatus mgt_single_gpu_v1_train_step(
              step->epoch_sample_offset},
             &ticket);
         if (status != mgt::Status::kOk) return Fail(h, Convert(status), "train-step enqueue failed");
-        if (metrics) {
-            mgt_cuda::SingleGpuTrainerMetrics native{};
-            status = mgt_cuda::ReadSingleGpuMetrics(h->trainer, &native);
-            if (status != mgt::Status::kOk) return Fail(h, Convert(status), "metrics read failed");
-            metrics->reserved_u32 = 0;
-            metrics->completed_sequence = native.completed_sequence;
-            metrics->optimizer_step = native.optimizer_step;
-            metrics->loss = native.loss;
-            metrics->reserved_f32 = 0;
-        }
-        return MGT_STATUS_OK;
+        return metrics ? ReadMetrics(h, metrics) : MGT_STATUS_OK;
     });
 }
 
@@ -109,12 +141,13 @@ extern "C" MgtStatus mgt_single_gpu_v1_checkpoint(MgtSingleGpuHandle* h, const c
 
 extern "C" MgtStatus mgt_single_gpu_v1_destroy(MgtSingleGpuHandle** pointer) {
     if (!pointer || !*pointer) return Fail(nullptr, MGT_STATUS_INVALID_CONFIG, "invalid destroy handle");
-    auto* h = *pointer;
-    return Guard(h, [&] {
+    std::unique_ptr<MgtSingleGpuHandle> h(*pointer);
+    *pointer = nullptr;
+    // Native teardown consumes its owner even if a CUDA cleanup call fails.
+    // Report through thread-local storage because the C ABI handle is consumed too.
+    return Guard(nullptr, [&] {
         const auto status = mgt_cuda::DestroySingleGpuTrainer(&h->trainer);
-        if (status != mgt::Status::kOk) return Fail(h, Convert(status), "native trainer destroy failed");
-        delete h;
-        *pointer = nullptr;
+        if (status != mgt::Status::kOk) return Fail(nullptr, Convert(status), "native trainer destroy failed");
         return MGT_STATUS_OK;
     });
 }

@@ -63,7 +63,7 @@ adam.step = request.optimizer_step;
 - [x] Freeze binaries with SHA256; run ABBAAB at batch4096, warmup140, timed100. Compare eager-default against eager-workspace, then eager-workspace against graph. Retain every run and telemetry.
 - [x] Capture fresh Nsight traces only after correctness and unprofiled gates. Verify graph kernel/memcpy/memset counts and dynamic input/Adam kernels, not merely graph launch count.
 - [x] Record timings, workspace bytes, setup cost, failure attempts, sources, and explicit limits in the audit. Promote only measured, validated changes.
-- [ ] Run final tests, `git diff --check`, check branch/remote and protected backup metadata, commit exact scoped files, push the existing branch, verify remote SHA.
+- [x] Run final tests, `git diff --check`, check branch/remote and protected backup metadata, commit exact scoped files, push the existing branch, verify remote SHA. Published `58fbd8e5c31b6e1d36ff8374ee3e6cd138d1154a`; remote verified on2026-08-31.
 
 ## Self-review
 

@@ -81,6 +81,12 @@ __global__ void RandomWalkKernel(RandomWalkKernelConfig config,
 
 }  // namespace
 
+namespace detail {
+const void* RandomWalkTrainingKernel() {
+    return reinterpret_cast<const void*>(RandomWalkKernel);
+}
+}  // namespace detail
+
 __host__ mgt::Status ValidateRandomWalkKernelConfig(const RandomWalkKernelConfig& config) {
     if (config.sample_count == 0 || config.k_min == 0 || config.k_min > config.k_max ||
         config.move_count == 0 || config.move_count > mgt::kMoveCount ||

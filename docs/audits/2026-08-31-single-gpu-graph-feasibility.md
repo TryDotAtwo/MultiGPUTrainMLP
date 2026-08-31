@@ -1,5 +1,8 @@
 # Fixed-shape CUDA Graph feasibility
 
+Historical prototype phase. Production integration and final validation are in
+the [native graph lifecycle audit](2026-08-31-single-gpu-native-graph.md).
+
 Date: 2026-08-31. Original p888, RTX3070 Laptop / SM86, CUDA12.8.93,
 driver572.70, Docker `mgt-gpu-queue`. No subagents used.
 
