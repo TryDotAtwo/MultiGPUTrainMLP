@@ -7,11 +7,13 @@ semantic and numerical gates before it are green.
 
 The A0-A12 entries below retain earlier-stage measurements; their old full-step
 timings are not the current performance snapshot. The newest original p888/SM86
-batch4096 graph candidate has two retained medians of21.1512 and21.2549ms/step,
-arena744001024 bytes. Its matched prior-graph medians are21.2558 and21.2599ms:
-the measured gains are+0.4945% and+0.0235%, below process-level noise. Pooling all
-six run means only descriptively gives21.2023ms, about193.2k samples/s and
-+0.2620% throughput. All sampled active clocks are780MHz but were not locked.
+batch4096 graph candidate has three retained ABBAAB medians of21.1069,21.2108
+and21.1052ms/step, arena744001024 bytes. Its matched prior-candidate medians are
+21.1604,21.1551 and21.1550ms: two series are positive; the negative series
+includes a retained73.6364ms latency outlier. The effect remains below process-level
+noise. The descriptive median of all nine run means is21.1069ms, about194.1k
+samples/s and+0.2369% throughput versus the prior candidate. All sampled active
+clocks are780MHz but were not locked.
 
 - [Column-sum tiling](2026-08-31-column-sum-tiling.md): same256-leaf FP32 tree,
   adjacent-column loads;34 reductions total2.4193 ->0.9721ms. Full-step gain is
@@ -54,6 +56,11 @@ six run means only descriptively gives21.2023ms, about193.2k samples/s and
   Full graph nodes502 ->434 by removing68 D2D copies/78,000 bytes. Fresh Nsight
   sees a0.1435ms shorter span with identical kernels, geometry, resources and
   memsets; two unprofiled confirmations are nonnegative but sub-noise.
+- [BN residual-gradient publication](2026-09-01-bn-residual-gradient-publication.md):
+  full residual partials publish their already-computed exact masked dY, and
+  apply consumes it instead of rereading dy plus activation. Graph topology is
+  unchanged. Nsight partial+apply falls3.6763 ->3.6431ms; two of three ABBAAB
+  series are positive, while one retained noisy series reverses sign.
 
 No new precision/model approximation. CUDA exact oracles, targeted full-step
 regressions, sanitizer checks and Rust FFI passed. Earlier checkpoints also had
@@ -233,6 +240,9 @@ byte-identical to the accepted BN-mask baseline; the candidates are test-only.
   The follow-up BN-gradient publication removes68 D2D graph nodes without adding
   kernels: the full graph now has363 kernels +71 memsets and no copies. Its
   full-step gain is below run variance; the trace span falls0.1435ms.
+  Residual-gradient publication keeps that topology and cuts the isolated BN
+  backward partial+apply sum by0.0332ms; its full-step effect also remains below
+  run variance.
 
 ## A11. Training behavior
 
@@ -248,7 +258,7 @@ byte-identical to the accepted BN-mask baseline; the candidates are test-only.
   measurement window, Nsight report, and NCU counters.
 - Current SM86 snapshot: 53.558 GFLOP of physically issued dense work and
   51.074 GFLOP of logical/useful dense work per train step. At the descriptive
-  pooled candidate median21.2023ms this is2.526 issued and2.409 useful end-to-end
+  pooled candidate median21.1069ms this is2.537 issued and2.420 useful end-to-end
   TFLOP/s, plus non-dense work not
   represented by those FLOP counts. GEMM-only throughput remains about9.12TFLOP/s.
   At the observed 780 MHz, the 40-SM FP16 Tensor Core envelope is about 15.97

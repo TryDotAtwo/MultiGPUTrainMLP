@@ -392,6 +392,11 @@ void QuickCases() {
         h.Run(Fixture(17, 17, 3, 5), false, true, false, false, "unmasked-half-parity", Mask::None);
     }
     {
+        Harness h(3, 1, 65);
+        h.Run(Fixture(3, 3, 1, 65), true, true, false, true,
+              "residual-padding-multiple-tiles");
+    }
+    {
         Harness h(17, 218, 224);
         h.Run(Fixture(17, 17, 218, 224), false, true, false, true, "narrow-small");
     }

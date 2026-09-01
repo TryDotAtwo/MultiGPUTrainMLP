@@ -194,22 +194,25 @@ __device__ __forceinline__ float BackwardGradient(
     return dy[index];
 }
 
-template <bool Relu>
+template <bool Relu, bool Residual>
 __global__ void BackwardPartialCoalesced(
     const float* dy, int rows, int cols, int stride, const float* normalized,
-    float* dgamma, float* dbeta, const float* activated) {
+    float* dgamma, float* dbeta, const float* activated, float* residual_grad) {
     const int col = blockIdx.x * kTileCols + threadIdx.x;
     const int row_lane = threadIdx.y;
     const int row_begin = blockIdx.y * kRowsPerBlock;
     const int row_end = row_begin + min(kRowsPerBlock, rows - row_begin);
     float gamma_sum = 0.0f;
     float beta_sum = 0.0f;
-    if (col < cols) {
+    if (col < (Residual ? stride : cols)) {
         for (int row = row_begin + row_lane; row < row_end; row += kTileRows) {
             const int index = row * stride + col;
             const float gradient = BackwardGradient<Relu>(dy, activated, index);
-            beta_sum += gradient;
-            gamma_sum += gradient * normalized[index];
+            if constexpr (Residual) residual_grad[index] = gradient;
+            if (col < cols) {
+                beta_sum += gradient;
+                gamma_sum += gradient * normalized[index];
+            }
         }
     }
     __shared__ float gamma_tile[kTileRows][kTileCols];
@@ -227,7 +230,7 @@ __global__ void BackwardPartialCoalesced(
     }
 }
 
-template <bool Relu, bool Residual, bool HalfMirror>
+template <bool Relu, bool Residual, bool HalfMirror, bool PrecomputedResidual>
 __global__ void BackwardApplyCoalesced(
     const float* dy, int rows, int cols, int stride, const float* gamma,
     const float* inv_std, const float* normalized, const float* dgamma,
@@ -244,12 +247,15 @@ __global__ void BackwardApplyCoalesced(
         dbeta_output[index] = dbeta[index];
     }
     const int col = index % stride;
+    static_assert(!PrecomputedResidual || Residual);
     float gradient = 0.0f;
-    if (col < cols || Residual)
+    if constexpr (PrecomputedResidual)
+        gradient = residual_grad[index];
+    else if (col < cols || Residual)
         gradient = BackwardGradient<Relu>(dy, activated, index);
-    // The residual branch needs incoming masked dY, before the BN derivative,
-    // on every physical lane. Capture it before an exact in-place dX store.
-    if constexpr (Residual) residual_grad[index] = gradient;
+    // Apply-only captures incoming masked dY before a possible in-place dX
+    // store. Full backward reuses the exact value published by partial.
+    if constexpr (Residual && !PrecomputedResidual) residual_grad[index] = gradient;
     float value = 0.0f;
     if (col < cols) {
         const float scale = gamma[col] * inv_std[col] / rows;
@@ -435,36 +441,51 @@ static mgt::Status LaunchBackwardApply(
     const float* gamma, const float* inv_std, const float* normalized,
     const float* dgamma, const float* dbeta, float* dx,
     float* dgamma_output, float* dbeta_output,
+    bool residual_precomputed,
     LocalBatchNormBackwardEpilogue epilogue, cudaStream_t stream) {
     if (!ValidBackwardApply(dy, rows, cols, row_stride, gamma, inv_std,
                             normalized, dgamma, dbeta, dx, epilogue))
         return mgt::Status::kInvalidConfig;
+    if (residual_precomputed && !epilogue.residual_grad)
+        return mgt::Status::kInvalidConfig;
     const int count = rows * row_stride;
     if (epilogue.residual_grad && epilogue.half_output) {
-        BackwardApplyCoalesced<true, true, true><<<1 + (count - 1) / kThreads, kThreads, 0, stream>>>(
-            dy, rows, cols, row_stride, gamma, inv_std, normalized, dgamma, dbeta,
-            dx, epilogue.half_output, epilogue.activated, epilogue.residual_grad,
-            dgamma_output, dbeta_output);
+        if (residual_precomputed)
+            BackwardApplyCoalesced<true, true, true, true><<<1 + (count - 1) / kThreads, kThreads, 0, stream>>>(
+                dy, rows, cols, row_stride, gamma, inv_std, normalized, dgamma, dbeta,
+                dx, epilogue.half_output, epilogue.activated, epilogue.residual_grad,
+                dgamma_output, dbeta_output);
+        else
+            BackwardApplyCoalesced<true, true, true, false><<<1 + (count - 1) / kThreads, kThreads, 0, stream>>>(
+                dy, rows, cols, row_stride, gamma, inv_std, normalized, dgamma, dbeta,
+                dx, epilogue.half_output, epilogue.activated, epilogue.residual_grad,
+                dgamma_output, dbeta_output);
     } else if (epilogue.residual_grad) {
-        BackwardApplyCoalesced<true, true, false><<<1 + (count - 1) / kThreads, kThreads, 0, stream>>>(
-            dy, rows, cols, row_stride, gamma, inv_std, normalized, dgamma, dbeta,
-            dx, nullptr, epilogue.activated, epilogue.residual_grad,
-            dgamma_output, dbeta_output);
+        if (residual_precomputed)
+            BackwardApplyCoalesced<true, true, false, true><<<1 + (count - 1) / kThreads, kThreads, 0, stream>>>(
+                dy, rows, cols, row_stride, gamma, inv_std, normalized, dgamma, dbeta,
+                dx, nullptr, epilogue.activated, epilogue.residual_grad,
+                dgamma_output, dbeta_output);
+        else
+            BackwardApplyCoalesced<true, true, false, false><<<1 + (count - 1) / kThreads, kThreads, 0, stream>>>(
+                dy, rows, cols, row_stride, gamma, inv_std, normalized, dgamma, dbeta,
+                dx, nullptr, epilogue.activated, epilogue.residual_grad,
+                dgamma_output, dbeta_output);
     } else if (epilogue.activated && epilogue.half_output) {
-        BackwardApplyCoalesced<true, false, true><<<1 + (count - 1) / kThreads, kThreads, 0, stream>>>(
+        BackwardApplyCoalesced<true, false, true, false><<<1 + (count - 1) / kThreads, kThreads, 0, stream>>>(
             dy, rows, cols, row_stride, gamma, inv_std, normalized, dgamma, dbeta,
             dx, epilogue.half_output, epilogue.activated, nullptr,
             dgamma_output, dbeta_output);
     } else if (epilogue.activated) {
-        BackwardApplyCoalesced<true, false, false><<<1 + (count - 1) / kThreads, kThreads, 0, stream>>>(
+        BackwardApplyCoalesced<true, false, false, false><<<1 + (count - 1) / kThreads, kThreads, 0, stream>>>(
             dy, rows, cols, row_stride, gamma, inv_std, normalized, dgamma, dbeta,
             dx, nullptr, epilogue.activated, nullptr, dgamma_output, dbeta_output);
     } else if (epilogue.half_output) {
-        BackwardApplyCoalesced<false, false, true><<<1 + (count - 1) / kThreads, kThreads, 0, stream>>>(
+        BackwardApplyCoalesced<false, false, true, false><<<1 + (count - 1) / kThreads, kThreads, 0, stream>>>(
             dy, rows, cols, row_stride, gamma, inv_std, normalized, dgamma, dbeta,
             dx, epilogue.half_output, nullptr, nullptr, dgamma_output, dbeta_output);
     } else {
-        BackwardApplyCoalesced<false, false, false><<<1 + (count - 1) / kThreads, kThreads, 0, stream>>>(
+        BackwardApplyCoalesced<false, false, false, false><<<1 + (count - 1) / kThreads, kThreads, 0, stream>>>(
             dy, rows, cols, row_stride, gamma, inv_std, normalized, dgamma, dbeta,
             dx, nullptr, nullptr, nullptr, dgamma_output, dbeta_output);
     }
@@ -478,7 +499,7 @@ mgt::Status LaunchLocalStridedBatchNormBackwardApply(
     const float* dgamma, const float* dbeta, float* dx,
     LocalBatchNormBackwardEpilogue epilogue, cudaStream_t stream) {
     return LaunchBackwardApply(dy, rows, cols, row_stride, gamma, inv_std,
-        normalized, dgamma, dbeta, dx, nullptr, nullptr, epilogue, stream);
+        normalized, dgamma, dbeta, dx, nullptr, nullptr, false, epilogue, stream);
 }
 
 mgt::Status LaunchLocalStridedBatchNormBackward(
@@ -515,20 +536,27 @@ mgt::Status LaunchLocalStridedBatchNormBackward(
     if (cudaMemsetAsync(stats_workspace, 0, stats_bytes, stream) != cudaSuccess)
         return mgt::Status::kCudaFailure;
     const dim3 block(kTileCols, kTileRows);
-    const dim3 grid(1 + (cols - 1) / kTileCols, 1 + (rows - 1) / kRowsPerBlock);
-    if (epilogue.activated) {
-        BackwardPartialCoalesced<true><<<grid, block, 0, stream>>>(
+    const int partial_cols = epilogue.residual_grad ? row_stride : cols;
+    const dim3 grid(1 + (partial_cols - 1) / kTileCols,
+                    1 + (rows - 1) / kRowsPerBlock);
+    if (epilogue.residual_grad) {
+        BackwardPartialCoalesced<true, true><<<grid, block, 0, stream>>>(
             dy, rows, cols, row_stride, normalized, stats_workspace,
-            stats_workspace + cols, epilogue.activated);
+            stats_workspace + cols, epilogue.activated, epilogue.residual_grad);
+    } else if (epilogue.activated) {
+        BackwardPartialCoalesced<true, false><<<grid, block, 0, stream>>>(
+            dy, rows, cols, row_stride, normalized, stats_workspace,
+            stats_workspace + cols, epilogue.activated, nullptr);
     } else {
-        BackwardPartialCoalesced<false><<<grid, block, 0, stream>>>(
+        BackwardPartialCoalesced<false, false><<<grid, block, 0, stream>>>(
             dy, rows, cols, row_stride, normalized, stats_workspace,
-            stats_workspace + cols, nullptr);
+            stats_workspace + cols, nullptr, nullptr);
     }
     const auto apply_status = LaunchBackwardApply(
         dy, rows, cols, row_stride, gamma, inv_std, normalized,
         stats_workspace, stats_workspace + cols, dx,
-        publish ? dgamma : nullptr, publish ? dbeta : nullptr, epilogue, stream);
+        publish ? dgamma : nullptr, publish ? dbeta : nullptr,
+        epilogue.residual_grad != nullptr, epilogue, stream);
     if (apply_status != mgt::Status::kOk) return apply_status;
     if (!publish && (cudaMemcpyAsync(dgamma, stats_workspace, feature_bytes,
                                      cudaMemcpyDeviceToDevice, stream) != cudaSuccess ||
