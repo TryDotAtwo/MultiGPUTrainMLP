@@ -156,6 +156,7 @@ __global__ void InputHalf(CudaMlpShape s,unsigned logical,const __half*w,const m
 
 using detail::InputHalf2Row;
 using detail::InputHalf2Row32;
+using detail::InputHalf2Row32Rows;
 
 struct InputHalfIndexPolicy {
     mgt::Status status;
@@ -196,12 +197,25 @@ mgt::Status LaunchInputHalfInternal(CudaMlpShape s,unsigned logical,const __half
         const InputHalfIndexPolicy index_policy = ResolveInputHalfIndexPolicy();
         if (index_policy.status != mgt::Status::kOk) return index_policy.status;
         constexpr unsigned gather_threads=128;
-        const dim3 grid(rows,(static_cast<std::uint64_t>(s.hd1)+2U*gather_threads-1)/(2U*gather_threads));
+        const unsigned feature_tiles = static_cast<unsigned>(
+            (static_cast<std::uint64_t>(s.hd1) + 2U * gather_threads - 1U) /
+            (2U * gather_threads));
         if (index_policy.use_u32 && InputHalfU32ExtentsFit(s, logical, rows)) {
-            InputHalf2Row32<gather_threads><<<grid,gather_threads,0,st>>>(
-                s,logical,w,states,rows,out);
+            constexpr unsigned rows_per_block = 8;
+            if (rows >= rows_per_block) {
+                const dim3 grid(
+                    (rows + rows_per_block - 1U) / rows_per_block,
+                    feature_tiles);
+                InputHalf2Row32Rows<gather_threads, rows_per_block>
+                    <<<grid,gather_threads,0,st>>>(
+                        s,logical,w,states,rows,out);
+            } else {
+                InputHalf2Row32<gather_threads>
+                    <<<dim3(rows, feature_tiles),gather_threads,0,st>>>(
+                        s,logical,w,states,rows,out);
+            }
         } else {
-            InputHalf2Row<gather_threads><<<grid,gather_threads,0,st>>>(
+            InputHalf2Row<gather_threads><<<dim3(rows, feature_tiles),gather_threads,0,st>>>(
                 s,logical,w,states,rows,out);
         }
     }

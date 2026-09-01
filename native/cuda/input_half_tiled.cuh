@@ -76,5 +76,66 @@ __global__ void InputHalf2Row32(
     *reinterpret_cast<float2*>(out + row * s.hd1 + h) = value;
 }
 
+// Several independent rows per CTA expose more load/add ILP while retaining
+// the exact bias-first, position-major FP32 accumulation order of each row.
+// Feature lanes remain contiguous, so every half2 weight access stays coalesced.
+template <unsigned Threads, unsigned RowsPerBlock>
+__global__ void InputHalf2Row32Rows(
+    CudaMlpShape s, unsigned logical, const __half* w,
+    const mgt::TrainStateStorage* states, unsigned rows, float* out) {
+    static_assert(Threads == 128, "supported multi-row gather block size");
+    static_assert(RowsPerBlock == 2 || RowsPerBlock == 4 || RowsPerBlock == 8,
+                  "supported rows per gather block");
+    __shared__ unsigned offsets[RowsPerBlock][mgt::kStateStorageLen];
+    const unsigned first_row = blockIdx.x * RowsPerBlock;
+    const unsigned offset_count = RowsPerBlock * s.state_len;
+    for (unsigned index = threadIdx.x; index < offset_count; index += Threads) {
+        const unsigned row_in_block = index / s.state_len;
+        const unsigned position = index - row_in_block * s.state_len;
+        const unsigned row = first_row + row_in_block;
+        if (row < rows) {
+            offsets[row_in_block][position] =
+                (position * s.state_value_pad + states[row].v[position]) * s.hd1;
+        }
+    }
+    __syncthreads();
+    const unsigned h = 2U * (blockIdx.y * Threads + threadIdx.x);
+    if (h >= s.hd1) return;
+    float2 values[RowsPerBlock]{};
+    if (h < logical) {
+        const unsigned bias = s.state_len * s.state_value_pad * s.hd1;
+        const float2 bias_value =
+            __half22float2(*reinterpret_cast<const __half2*>(w + bias + h));
+#pragma unroll
+        for (unsigned row_in_block = 0; row_in_block < RowsPerBlock;
+             ++row_in_block) {
+            values[row_in_block] = bias_value;
+        }
+        for (unsigned position = 0; position < s.state_len; ++position) {
+#pragma unroll
+            for (unsigned row_in_block = 0; row_in_block < RowsPerBlock;
+                 ++row_in_block) {
+                if (first_row + row_in_block < rows) {
+                    const float2 add = __half22float2(*reinterpret_cast<const __half2*>(
+                        w + offsets[row_in_block][position] + h));
+                    values[row_in_block].x =
+                        __fadd_rn(values[row_in_block].x, add.x);
+                    values[row_in_block].y =
+                        __fadd_rn(values[row_in_block].y, add.y);
+                }
+            }
+        }
+    }
+#pragma unroll
+    for (unsigned row_in_block = 0; row_in_block < RowsPerBlock;
+         ++row_in_block) {
+        const unsigned row = first_row + row_in_block;
+        if (row < rows) {
+            *reinterpret_cast<float2*>(out + row * s.hd1 + h) =
+                values[row_in_block];
+        }
+    }
+}
+
 }  // namespace
 }  // namespace mgt_cuda::detail
