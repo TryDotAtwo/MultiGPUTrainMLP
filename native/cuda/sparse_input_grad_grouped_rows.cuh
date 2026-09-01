@@ -22,5 +22,42 @@ __global__ void SparseInputGradGroupedRows(
     grad[bin * s.hd1 + h] = sum;
 }
 
+// Two adjacent features keep independent serial FP32 sums while sharing the
+// row-ID lookup and address arithmetic. The even-width path uses aligned
+// float2 transactions; the odd-width path is a complete, tail-safe fallback
+// for the isolated exact regression.
+__global__ void SparseInputGradGroupedRowsAdjacent2(
+    CudaMlpShape s, const float* dz, unsigned rows, const unsigned* counts,
+    const unsigned* row_ids, float* grad) {
+    const unsigned h0 = 2U * (blockIdx.y * blockDim.x + threadIdx.x);
+    const std::uint64_t bin = blockIdx.x;
+    if (h0 >= s.hd1) return;
+    const std::uint64_t list_base = bin * rows;
+    const std::uint64_t output_base = bin * s.hd1;
+    const unsigned count = counts[bin];
+    float sum0 = 0.0f;
+    float sum1 = 0.0f;
+    if ((s.hd1 & 1U) == 0) {
+        for (unsigned i = 0; i < count; ++i) {
+            const std::uint64_t row_base =
+                static_cast<std::uint64_t>(row_ids[list_base + i]) * s.hd1;
+            const float2 value = *reinterpret_cast<const float2*>(dz + row_base + h0);
+            sum0 += value.x;
+            sum1 += value.y;
+        }
+        *reinterpret_cast<float2*>(grad + output_base + h0) = make_float2(sum0, sum1);
+    } else {
+        const bool has_h1 = h0 + 1U < s.hd1;
+        for (unsigned i = 0; i < count; ++i) {
+            const std::uint64_t row_base =
+                static_cast<std::uint64_t>(row_ids[list_base + i]) * s.hd1;
+            sum0 += dz[row_base + h0];
+            if (has_h1) sum1 += dz[row_base + h0 + 1U];
+        }
+        grad[output_base + h0] = sum0;
+        if (has_h1) grad[output_base + h0 + 1U] = sum1;
+    }
+}
+
 }  // namespace
 }  // namespace mgt_cuda::detail

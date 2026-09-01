@@ -238,6 +238,13 @@ if(MGT_ENABLE_CUDA)
     target_link_libraries(test_sparse_input_grad_grouped_rows_cols2 PRIVATE mgt_cuda)
     add_test(NAME sparse_input_grad_grouped_rows_cols2
         COMMAND test_sparse_input_grad_grouped_rows_cols2)
+    add_executable(test_sparse_input_grad_grouped_rows_adjacent2
+        tests/cuda/test_sparse_input_grad_grouped_rows.cu)
+    target_compile_definitions(test_sparse_input_grad_grouped_rows_adjacent2
+        PRIVATE MGT_TEST_SPARSE_ADJACENT2=1)
+    target_link_libraries(test_sparse_input_grad_grouped_rows_adjacent2 PRIVATE mgt_cuda)
+    add_test(NAME sparse_input_grad_grouped_rows_adjacent2
+        COMMAND test_sparse_input_grad_grouped_rows_adjacent2)
     foreach(feature_tile IN ITEMS 32 64)
         add_executable(test_sparse_input_grad_grouped_rows_warp${feature_tile}
             tests/cuda/test_sparse_input_grad_grouped_rows.cu)

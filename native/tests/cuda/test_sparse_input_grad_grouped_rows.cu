@@ -24,6 +24,10 @@ static_assert(kFeatureTile == 32 || kFeatureTile == 64);
 constexpr unsigned kBinsPerBlock = 256 / kFeatureTile;
 constexpr unsigned kCandidateThreads = 256;
 constexpr const char* kCandidateName = "warp-bins";
+#elif defined(MGT_TEST_SPARSE_ADJACENT2)
+constexpr unsigned kFeatureTile = 128;
+constexpr unsigned kCandidateThreads = 64;
+constexpr const char* kCandidateName = "adjacent2";
 #elif defined(MGT_TEST_SPARSE_COLS2)
 constexpr unsigned kFeatureTile = 256;
 constexpr unsigned kBinsPerBlock = 1;
@@ -309,6 +313,9 @@ public:
         // against the independently fixed old-grid oracle, including bin tails.
         mgt_cuda::detail::SparseInputGradGroupedRowsWarpBins<kFeatureTile>
             <<<dim3((bins_ + kBinsPerBlock - 1) / kBinsPerBlock, h_tiles), kCandidateThreads>>>(
+#elif defined(MGT_TEST_SPARSE_ADJACENT2)
+        mgt_cuda::detail::SparseInputGradGroupedRowsAdjacent2
+            <<<dim3(bins_, h_tiles), kCandidateThreads>>>(
 #elif defined(MGT_TEST_SPARSE_COLS2)
         // The declaration intentionally exists only in the future candidate
         // build. The existing target does not require the X2 kernel to exist.

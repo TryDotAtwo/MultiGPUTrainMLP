@@ -206,6 +206,7 @@ __global__ void SparseInputGradCoalesced96(
 
 using detail::BuildGroupedInputRows;
 using detail::SparseInputGradGroupedRows;
+using detail::SparseInputGradGroupedRowsAdjacent2;
 
 constexpr unsigned GROUPED_INPUT_MAX_POSITIONS = 4;
 
@@ -266,6 +267,7 @@ struct InputGradLaunchConfig {
     unsigned positions;
     std::size_t shared;
     bool grouped_rows;
+    unsigned grouped_features_per_thread = 1;
 };
 
 InputGradLaunchConfig ResolveInputGradLaunch(CudaMlpShape shape) {
@@ -317,7 +319,7 @@ InputGradLaunchConfig ResolveInputGradLaunch(CudaMlpShape shape) {
             if (cudaGetDeviceProperties(&properties, device) != cudaSuccess) {
                 cached.status = mgt::Status::kCudaFailure;
             } else if (properties.major == 8 && properties.minor == 6) {
-                cached = {mgt::Status::kOk, false, 0, 0, true};
+                cached = {mgt::Status::kOk, false, 0, 0, true, 2};
             } else {
                 cached = {mgt::Status::kOk, false, 1, 0, false};
             }
@@ -367,12 +369,13 @@ InputGradLaunchConfig ResolveInputGradLaunch(CudaMlpShape shape) {
     cached_hd1 = shape.hd1;
     std::fprintf(
         stderr,
-        "mgt input_grad kernel=%s positions=%u shared=%zu status=%u\n",
+        "mgt input_grad kernel=%s positions=%u features=%u shared=%zu status=%u\n",
         cached.status == mgt::Status::kOk
             ? (cached.grouped_rows ? "grouped_rows" :
                (cached.exact ? (cached.positions == 0 ? "coalesced" : "exact") : "strict"))
             : "invalid",
         cached.positions,
+        cached.grouped_features_per_thread,
         cached.shared,
         static_cast<unsigned>(cached.status));
     return cached;
@@ -608,8 +611,21 @@ mgt::Status LaunchMlpBatchNormInputBackward(
                 (bins+detail::kGroupedInputRowsWarps-1U)/detail::kGroupedInputRowsWarps);
             BuildGroupedInputRows<<<builder_blocks,detail::kGroupedInputRowsThreads,0,st>>>(
                 s,states,lr,counts,row_ids);
-            const dim3 grid(static_cast<unsigned>(bins),(s.hd1+T-1U)/T);
-            SparseInputGradGroupedRows<<<grid,T,0,st>>>(s,input_grad,lr,counts,row_ids,weight_grad);
+            const bool adjacent2 = input_launch.grouped_features_per_thread == 2U &&
+                (s.hd1 & 1U) == 0 &&
+                (reinterpret_cast<std::uintptr_t>(input_grad) & (alignof(float2) - 1U)) == 0 &&
+                (reinterpret_cast<std::uintptr_t>(weight_grad) & (alignof(float2) - 1U)) == 0;
+            if (adjacent2) {
+                constexpr unsigned threads = 64;
+                const dim3 grid(static_cast<unsigned>(bins),
+                    (s.hd1 / 2U + threads - 1U) / threads);
+                SparseInputGradGroupedRowsAdjacent2<<<grid,threads,0,st>>>(
+                    s,input_grad,lr,counts,row_ids,weight_grad);
+            } else {
+                const dim3 grid(static_cast<unsigned>(bins),(s.hd1+T-1U)/T);
+                SparseInputGradGroupedRows<<<grid,T,0,st>>>(
+                    s,input_grad,lr,counts,row_ids,weight_grad);
+            }
         }
     } else if (cudaMemsetAsync(weight_grad, 0, parameter_count * sizeof(float), st) != cudaSuccess) {
         return mgt::Status::kCudaFailure;

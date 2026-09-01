@@ -7,13 +7,11 @@ semantic and numerical gates before it are green.
 
 The A0-A12 entries below retain earlier-stage measurements; their old full-step
 timings are not the current performance snapshot. The newest original p888/SM86
-batch4096 graph candidate has three retained ABBAAB medians of21.1069,21.2108
-and21.1052ms/step, arena744001024 bytes. Its matched prior-candidate medians are
-21.1604,21.1551 and21.1550ms: two series are positive; the negative series
-includes a retained73.6364ms latency outlier. The effect remains below process-level
-noise. The descriptive median of all nine run means is21.1069ms, about194.1k
-samples/s and+0.2369% throughput versus the prior candidate. All sampled active
-clocks are780MHz but were not locked.
+batch4096 graph candidate has two retained ABBAAB medians of21.0515 and
+21.0526ms/step, arena744001024 bytes. Its matched prior-candidate medians are
+21.1081 and21.1062ms; both series are positive. The descriptive median of all
+six candidate run means is21.05205ms, about194.6k samples/s and+0.2617%
+throughput versus the prior candidate. Active clocks were observed, not locked.
 
 - [Column-sum tiling](2026-08-31-column-sum-tiling.md): same256-leaf FP32 tree,
   adjacent-column loads;34 reductions total2.4193 ->0.9721ms. Full-step gain is
@@ -61,6 +59,11 @@ clocks are780MHz but were not locked.
   apply consumes it instead of rereading dy plus activation. Graph topology is
   unchanged. Nsight partial+apply falls3.6763 ->3.6431ms; two of three ABBAAB
   series are positive, while one retained noisy series reverses sign.
+- [Sparse adjacent-feature ownership](2026-09-01-sparse-gradient-adjacent2.md):
+  each SM86 sparse-gradient thread owns two adjacent features, sharing row-ID
+  work while preserving two independent serial FP32 sums. Fresh Nsight measures
+  the sparse consumer3.7392 ->3.6627ms; two ABBAAB series measure+0.269% and
+  +0.255% throughput. T4/A100 policy is unchanged.
 
 No new precision/model approximation. CUDA exact oracles, targeted full-step
 regressions, sanitizer checks and Rust FFI passed. Earlier checkpoints also had
@@ -216,6 +219,14 @@ rejects WarpBins32/64 after exact correctness gates but +1.005%/+0.238% paired
 step latency. X2's +0.11% throughput is not promoted either. Production remains
 byte-identical to the accepted BN-mask baseline; the candidates are test-only.
 
+The [adjacent-feature ownership follow-up](2026-09-01-sparse-gradient-adjacent2.md)
+promotes a different X2 mapping on SM86 after steady microbenchmarks, 37 exact
+GPU-oracle cases, all four Compute Sanitizer tools, two positive ABBAAB series,
+and a strict Nsight trace. It reduces row-ID/address instructions while keeping
+each feature's FP32 accumulation order. The production sparse consumer measures
+3.7392 ->3.6627ms; the graph remains363 kernels +71 memsets. T4/A100 automatic
+selection remains unchanged.
+
 ## A9. Optimizer and mirrors
 
 - Adam semantics, bias correction, step numbering, FP32 master/m/v, FP16 mirror,
@@ -242,7 +253,9 @@ byte-identical to the accepted BN-mask baseline; the candidates are test-only.
   full-step gain is below run variance; the trace span falls0.1435ms.
   Residual-gradient publication keeps that topology and cuts the isolated BN
   backward partial+apply sum by0.0332ms; its full-step effect also remains below
-  run variance.
+  run variance. Adjacent-feature sparse-gradient ownership keeps the same
+  topology; two independent ABBAAB series reduce the full step by0.0566 and
+  0.0536ms, while fresh Nsight reduces the sparse family by0.0765ms.
 
 ## A11. Training behavior
 
@@ -258,9 +271,9 @@ byte-identical to the accepted BN-mask baseline; the candidates are test-only.
   measurement window, Nsight report, and NCU counters.
 - Current SM86 snapshot: 53.558 GFLOP of physically issued dense work and
   51.074 GFLOP of logical/useful dense work per train step. At the descriptive
-  pooled candidate median21.1069ms this is2.537 issued and2.420 useful end-to-end
+  pooled candidate median21.05205ms this is2.544 issued and2.426 useful end-to-end
   TFLOP/s, plus non-dense work not
   represented by those FLOP counts. GEMM-only throughput remains about9.12TFLOP/s.
   At the observed 780 MHz, the 40-SM FP16 Tensor Core envelope is about 15.97
-  TFLOP/s: GEMMs reach roughly57%, while the graph full step reaches roughly15.8%
+  TFLOP/s: GEMMs reach roughly57%, while the graph full step reaches roughly15.9%
   because sparse gather, BN, conversions, optimizer and scheduling are not GEMMs.
