@@ -113,6 +113,10 @@ constexpr unsigned kSparseCompactActiveThreadsPerBin = 32;
 constexpr unsigned kSparseCompactActiveBinsPerBlock = 2;
 constexpr unsigned kSparseCompactActiveThreads =
     kSparseCompactActiveThreadsPerBin * kSparseCompactActiveBinsPerBlock;
+constexpr unsigned kSparseCompactActiveHalfU32BinsPerBlock = 4;
+constexpr unsigned kSparseCompactActiveHalfU32Threads =
+    kSparseCompactActiveThreadsPerBin *
+    kSparseCompactActiveHalfU32BinsPerBlock;
 
 // Compact trainer path: row lists are dense in active_index while output is
 // owner-written at the corresponding full-table bin. Impossible bins are not
@@ -206,6 +210,38 @@ __global__ void SparseInputGradCompactActiveAdjacent2PackedHalfU16(
         grad[output_base + h0] = sum0;
         if (has_h1) grad[output_base + h0 + 1U] = sum1;
     }
+}
+
+// SM86 compact half path. The dispatcher proves all element extents fit in
+// uint32_t before launch. Indexing the source and destination as half2/float2
+// removes repeated 64-bit element arithmetic; four independent bin warps per
+// CTA amortize block scheduling without changing any bin's ascending row sum.
+__global__ void SparseInputGradCompactActiveAdjacent2PackedHalfU16U32(
+    CudaMlpShape s, const __half* __restrict__ dz, unsigned rows,
+    const std::uint16_t* __restrict__ active_bins, unsigned active_count,
+    const unsigned* __restrict__ counts,
+    const std::uint16_t* __restrict__ row_ids, float* __restrict__ grad) {
+    const unsigned bin_in_block = threadIdx.x >> 5;
+    const unsigned lane = threadIdx.x & 31U;
+    const unsigned active_index =
+        blockIdx.x * kSparseCompactActiveHalfU32BinsPerBlock + bin_in_block;
+    const unsigned h2 = blockIdx.y * kSparseCompactActiveThreadsPerBin + lane;
+    const unsigned hd1_half2 = s.hd1 >> 1;
+    if (active_index >= active_count || h2 >= hd1_half2) return;
+    const unsigned bin = active_bins[active_index];
+    const unsigned list_base = active_index * rows;
+    const unsigned count = counts[active_index];
+    const auto* dz2 = reinterpret_cast<const __half2*>(dz);
+    auto* grad2 = reinterpret_cast<float2*>(grad);
+    float sum0 = 0.0f;
+    float sum1 = 0.0f;
+    for (unsigned i = 0; i < count; ++i) {
+        const unsigned row = row_ids[list_base + i];
+        const float2 value = __half22float2(dz2[row * hd1_half2 + h2]);
+        sum0 = __fadd_rn(sum0, value.x);
+        sum1 = __fadd_rn(sum1, value.y);
+    }
+    grad2[bin * hd1_half2 + h2] = make_float2(sum0, sum1);
 }
 
 }  // namespace

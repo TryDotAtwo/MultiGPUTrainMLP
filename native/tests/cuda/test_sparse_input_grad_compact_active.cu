@@ -174,6 +174,11 @@ public:
         Cuda(cudaDeviceSynchronize(), "half mirror witness synchronize");
         EqualOutputs(baseline_.Read(), candidate_.Read(),
                      "RN-half serial sparse result");
+        candidate_.Fill(kPoison);
+        LaunchCompactHalfU32(rows);
+        Cuda(cudaDeviceSynchronize(), "half u32 witness synchronize");
+        EqualOutputs(baseline_.Read(), candidate_.Read(),
+                     "RN-half u32 serial sparse result");
         const auto actual_half = dz_half_.Read();
         Require(std::memcmp(expected_half.data(), actual_half.data(),
                             expected_half.size() * sizeof(__half)) == 0,
@@ -193,6 +198,20 @@ public:
         EqualOutputs(baseline_.Read(), candidate_.Read(),
                      "persistent-zero changed-row reuse");
         CheckRows(states, rows);
+    }
+
+    void RunHalfU32Reuse(unsigned rows, unsigned salt) {
+        const auto states = MakeStates(salt);
+        PutInputs(states, MakeDz(salt));
+        baseline_.Fill(kPoison);
+        candidate_.Fill(kPoison);
+        LaunchHalfOracle(rows);
+        LaunchCompactHalfU32(rows);
+        Cuda(cudaDeviceSynchronize(), "half u32 reuse synchronize");
+        EqualOutputs(baseline_.Read(), candidate_.Read(),
+                     "half u32 changed-row reuse");
+        CheckRows(states, rows);
+        candidate_.Fill(0);
     }
 
     void Finish() {
@@ -318,6 +337,23 @@ private:
         Cuda(cudaGetLastError(), "compact half launch");
     }
 
+    void LaunchCompactHalfU32(unsigned rows) {
+        const unsigned active_count = static_cast<unsigned>(active_bins_.size());
+        BuildCompact(rows);
+        const dim3 grid(
+            (active_count +
+             mgt_cuda::detail::kSparseCompactActiveHalfU32BinsPerBlock - 1U) /
+                mgt_cuda::detail::kSparseCompactActiveHalfU32BinsPerBlock,
+            (shape_.hd1 / 2U +
+             mgt_cuda::detail::kSparseCompactActiveThreadsPerBin - 1U) /
+                mgt_cuda::detail::kSparseCompactActiveThreadsPerBin);
+        mgt_cuda::detail::SparseInputGradCompactActiveAdjacent2PackedHalfU16U32
+            <<<grid, mgt_cuda::detail::kSparseCompactActiveHalfU32Threads>>>(
+                shape_, dz_half_.get(), rows, active_.get(), active_count,
+                compact_counts_.get(), compact_rows_.get(), candidate_.get());
+        Cuda(cudaGetLastError(), "compact half u32 launch");
+    }
+
     void LaunchHalfOracle(unsigned rows) {
         const unsigned active_count = static_cast<unsigned>(active_bins_.size());
         const std::uint64_t count =
@@ -390,6 +426,7 @@ int main() {
              {std::pair{1U, 11U}, std::pair{31U, 13U}, std::pair{32U, 17U},
               std::pair{33U, 19U}, std::pair{257U, 23U}}) {
             harness.RunReuse(rows, salt);
+            harness.RunHalfU32Reuse(rows, salt + 37U);
         }
         harness.Finish();
         Require(!cleanup_failed, "CUDA cleanup failed");

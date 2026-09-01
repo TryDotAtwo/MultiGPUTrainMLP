@@ -197,6 +197,19 @@ bool InputHalfU32ExtentsFit(CudaMlpShape s, unsigned logical, unsigned rows) {
            output_elements <= std::numeric_limits<unsigned>::max();
 }
 
+bool SparseInputGradHalfU32ExtentsFit(
+    CudaMlpShape s, unsigned rows, unsigned active_count) {
+    if ((s.hd1 & 1U) != 0) return false;
+    const std::uint64_t hd1_half2 = s.hd1 / 2U;
+    const std::uint64_t bins =
+        static_cast<std::uint64_t>(s.state_len) * s.state_value_pad;
+    return static_cast<std::uint64_t>(active_count) * rows <=
+               std::numeric_limits<unsigned>::max() &&
+           static_cast<std::uint64_t>(rows) * hd1_half2 <=
+               std::numeric_limits<unsigned>::max() &&
+           bins * hd1_half2 <= std::numeric_limits<unsigned>::max();
+}
+
 mgt::Status LaunchInputHalfInternal(CudaMlpShape s,unsigned logical,const __half*w,const mgt::TrainStateStorage*states,unsigned rows,float*out,cudaStream_t st){
     if(!w||!states||!out||rows==0||logical>s.hd1)return mgt::Status::kInvalidConfig;
     if((s.hd1&1U)==0&&(logical&1U)==0){
@@ -282,6 +295,7 @@ using detail::SparseInputGradGroupedRowsAdjacent2;
 using detail::SparseInputGradGroupedRowsAdjacent2PackedU16;
 using detail::SparseInputGradCompactActiveAdjacent2PackedU16;
 using detail::SparseInputGradCompactActiveAdjacent2PackedHalfU16;
+using detail::SparseInputGradCompactActiveAdjacent2PackedHalfU16U32;
 
 constexpr unsigned GROUPED_INPUT_MAX_POSITIONS = 4;
 
@@ -732,6 +746,7 @@ mgt::Status LaunchMlpBatchNormInputBackward(
     const float* activated_mask = a1;
     const float* recompute_beta = nullptr;
     __half* sparse_input_grad_half = nullptr;
+    bool sparse_input_grad_half_u32 = false;
 #ifdef MGT_LOCAL_MLP_IMPLEMENTATION
     if (auto* local_fp16 = LocalFp16(ctx)) {
         const InputHalfIndexPolicy index_policy = ResolveInputHalfIndexPolicy();
@@ -773,12 +788,14 @@ mgt::Status LaunchMlpBatchNormInputBackward(
              (alignof(__half2) - 1U)) == 0) {
             ClearGradientHalfCache(local_fp16);
             sparse_input_grad_half = local_fp16->input_gradient_half;
+            sparse_input_grad_half_u32 = index_policy.use_u32 &&
+                SparseInputGradHalfU32ExtentsFit(s, lr, active_count);
         }
         static thread_local const LocalMlpFp16Context* reported_context = nullptr;
         if (reported_context != local_fp16) {
             std::fprintf(stderr,
                 "mgt sparse_input_grad source=%s compact=%u active=%u scratch_fit=%u "
-                "capacity_fit=%u alignment_fit=%u\n",
+                "capacity_fit=%u alignment_fit=%u u32=%u\n",
                 sparse_input_grad_half ? "half" : "float",
                 static_cast<unsigned>(compact_active), active_count,
                 static_cast<unsigned>(
@@ -788,7 +805,8 @@ mgt::Status LaunchMlpBatchNormInputBackward(
                 static_cast<unsigned>(local_fp16->input_gradient_half &&
                     (reinterpret_cast<std::uintptr_t>(
                          local_fp16->input_gradient_half) &
-                     (alignof(__half2) - 1U)) == 0));
+                     (alignof(__half2) - 1U)) == 0),
+                static_cast<unsigned>(sparse_input_grad_half_u32));
             reported_context = local_fp16;
         }
     }
@@ -857,10 +875,25 @@ mgt::Status LaunchMlpBatchNormInputBackward(
                     (s.hd1 / 2U + detail::kSparseCompactActiveThreadsPerBin - 1U) /
                         detail::kSparseCompactActiveThreadsPerBin);
                 if (sparse_input_grad_half) {
-                    SparseInputGradCompactActiveAdjacent2PackedHalfU16
-                        <<<grid,detail::kSparseCompactActiveThreads,0,st>>>(
-                            s,sparse_input_grad_half,lr,input_active_bins,
-                            active_count,counts,row_ids,weight_grad);
+                    if (sparse_input_grad_half_u32) {
+                        const dim3 half_u32_grid(
+                            (active_count +
+                             detail::kSparseCompactActiveHalfU32BinsPerBlock - 1U) /
+                                detail::kSparseCompactActiveHalfU32BinsPerBlock,
+                            (s.hd1 / 2U +
+                             detail::kSparseCompactActiveThreadsPerBin - 1U) /
+                                detail::kSparseCompactActiveThreadsPerBin);
+                        SparseInputGradCompactActiveAdjacent2PackedHalfU16U32
+                            <<<half_u32_grid,
+                               detail::kSparseCompactActiveHalfU32Threads,0,st>>>(
+                                s,sparse_input_grad_half,lr,input_active_bins,
+                                active_count,counts,row_ids,weight_grad);
+                    } else {
+                        SparseInputGradCompactActiveAdjacent2PackedHalfU16
+                            <<<grid,detail::kSparseCompactActiveThreads,0,st>>>(
+                                s,sparse_input_grad_half,lr,input_active_bins,
+                                active_count,counts,row_ids,weight_grad);
+                    }
                 } else {
                     SparseInputGradCompactActiveAdjacent2PackedU16
                         <<<grid,detail::kSparseCompactActiveThreads,0,st>>>(
