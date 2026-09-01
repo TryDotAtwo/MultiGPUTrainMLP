@@ -8,7 +8,8 @@
 namespace mgt_cuda {
 
 // Plain BN by default. Residual/half output require relu=true. The FP32
-// activation remains authoritative; half_output is only a GEMM operand mirror.
+// activation remains authoritative unless preserve_input is explicitly used;
+// half_output is the GEMM operand mirror.
 struct LocalBatchNormForwardEpilogue {
     bool relu = false;
     const float* residual = nullptr;
@@ -16,10 +17,16 @@ struct LocalBatchNormForwardEpilogue {
     // Optional logical-feature bias before BN. Both statistics and apply use
     // the same rounded FP32 x+bias value; no materialized biased matrix.
     const float* input_bias = nullptr;
+    // In-place only: retain x instead of publishing the FP32 ReLU result.
+    // normalized and half_output remain authoritative outputs. This requires
+    // relu=true, residual=null, half_output!=null, and x==y.
+    bool preserve_input = false;
 };
 
 // Apply supplied full-batch statistics without updating running state. x==y is
-// supported; partial x/y overlap is not. normalized and optional residual must
+// supported; partial x/y overlap is not. preserve_input keeps an in-place x
+// untouched while normalized/half_output receive the BN result. normalized
+// and optional residual must
 // be separate from x/y and each other. half_output must not overlap float data.
 // Padding gets normalized=0 and affine=0, then the same residual/ReLU epilogue.
 // input_bias has cols elements and must not overlap writable outputs. It may
@@ -53,13 +60,18 @@ struct LocalBatchNormBackwardEpilogue {
     __half* half_output = nullptr;
     const float* activated = nullptr;
     float* residual_grad = nullptr;
+    // Alternative exact ReLU predicate for a preserved forward input:
+    // normalized*gamma+relu_beta > 0. Mutually exclusive with activated and
+    // residual_grad; relu_beta has cols elements.
+    const float* relu_beta = nullptr;
 };
 
 // Apply supplied full-batch dgamma/dbeta without updating them. Exact dy==dx
 // is supported; partial overlap is rejected. dx must not overlap normalized
 // or feature inputs. half_output must be disjoint from all float tensors.
-// activated may alias read-only dy/normalized, but not dx. residual_grad must
-// be disjoint from all inputs/outputs, including the optional half mirror.
+// activated may alias read-only dy/normalized, but not dx. relu_beta may alias
+// read-only inputs but not writable feature outputs. residual_grad must be
+// disjoint from all inputs/outputs, including the optional half mirror.
 mgt::Status LaunchLocalStridedBatchNormBackwardApply(
     const float* dy, int rows, int cols, int row_stride,
     const float* gamma, const float* inv_std, const float* normalized,

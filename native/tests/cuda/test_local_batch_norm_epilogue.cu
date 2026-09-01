@@ -128,7 +128,8 @@ struct Fixture {
 // old store, dropped/incorrect padding, tail OOB, and destructive inplace reads.
 void ApplyCase(const Fixture& f, bool relu, bool residual, bool half, bool inplace,
                const std::vector<float>* literal_norm = nullptr,
-               const std::vector<float>* literal_output = nullptr, bool use_bias = false) {
+               const std::vector<float>* literal_output = nullptr, bool use_bias = false,
+               bool preserve_input = false) {
     const int count = f.rows * f.stride;
     Device<float> x(count), res(count), gamma(f.cols), beta(f.cols), mean(f.cols), inv(f.cols);
     Device<float> y(count), norm(count), old_y(count), old_norm(count);
@@ -149,6 +150,7 @@ void ApplyCase(const Fixture& f, bool relu, bool residual, bool half, bool inpla
     epilogue.residual = residual ? res.get() : nullptr;
     epilogue.half_output = half ? h.get() : nullptr;
     epilogue.input_bias = use_bias ? input_bias.get() : nullptr;
+    epilogue.preserve_input = preserve_input;
     Require(mgt_cuda::LaunchLocalStridedBatchNormApply(x.get(), f.rows, f.cols,
         f.stride, gamma.get(), beta.get(), mean.get(), inv.get(),
         inplace ? x.get() : y.get(), norm.get(), epilogue, nullptr) == mgt::Status::kOk,
@@ -156,11 +158,12 @@ void ApplyCase(const Fixture& f, bool relu, bool residual, bool half, bool inpla
     Cuda(cudaDeviceSynchronize());
     const auto actual = inplace ? x.Read() : y.Read();
     const auto normalized = norm.Read();
-    Equal(actual, old_y.Read(), "FP32 output");
+    if (preserve_input) Equal(x.Read(), f.x, "preserved FP32 input");
+    else Equal(actual, old_y.Read(), "FP32 output");
     Equal(normalized, old_norm.Read(), "FP32 normalized");
     if (half) Equal(h.Read(), old_h.Read(), "FP16 output");
     if (literal_norm) Equal(normalized, *literal_norm, "hand-derived normalized");
-    if (literal_output) {
+    if (literal_output && !preserve_input) {
         Equal(actual, *literal_output, "hand-derived output");
         if (half) {
             const auto actual_half = h.Read();
@@ -209,6 +212,9 @@ void HandDerivedCases() {
     ApplyCase(dyadic, false, false, false, true, &normalized, &output);
     // Without residual, both NaN and -0 must map to the old comparison-policy +0.
     ApplyCase(f, true, false, false, false);
+    // The activation tape and normalized values remain authoritative while the
+    // in-place FP32 input stays byte-identical for recomputed backward masking.
+    ApplyCase(f, true, false, true, true, nullptr, nullptr, false, true);
 }
 
 // Catches bypassing the fused consumer or changing statistics/running-state
@@ -388,6 +394,19 @@ void InvalidCases() {
     }
     auto half_alias = e; half_alias.half_output = reinterpret_cast<__half*>(y.get());
     reject(2, 3, 4, x.get(), y.get(), norm.get(), half_alias);
+    auto preserve = e;
+    preserve.residual = nullptr;
+    preserve.preserve_input = true;
+    reject(2, 3, 4, x.get(), y.get(), norm.get(), preserve);
+    auto preserve_without_half = preserve;
+    preserve_without_half.half_output = nullptr;
+    reject(2, 3, 4, x.get(), x.get(), norm.get(), preserve_without_half);
+    auto preserve_without_relu = preserve;
+    preserve_without_relu.relu = false;
+    reject(2, 3, 4, x.get(), x.get(), norm.get(), preserve_without_relu);
+    auto preserve_with_residual = preserve;
+    preserve_with_residual.residual = res.get();
+    reject(2, 3, 4, x.get(), x.get(), norm.get(), preserve_with_residual);
     Device<float> rm(4), rv(4), ws(8);
     const auto before_rm = rm.Read(), before_rv = rv.Read(), before_ws = ws.Read();
     auto bad = e; bad.relu = false;

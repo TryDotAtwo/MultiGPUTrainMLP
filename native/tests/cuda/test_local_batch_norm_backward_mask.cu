@@ -173,13 +173,15 @@ __global__ void OldPartial(const float* masked, int rows, int cols, int stride,
 struct Fixture {
     int rows, cols, stride;
     bool dyadic;
-    Values dy, activated, normalized, gamma, inv, dg, db;
+    Values dy, activated, normalized, gamma, beta, inv, dg, db;
     Fixture(int capacity, int live_rows, int logical, int physical, bool exact_sums = true)
         : rows(live_rows), cols(logical), stride(physical), dyadic(exact_sums),
           dy(static_cast<std::size_t>(capacity) * physical, std::numeric_limits<float>::quiet_NaN()),
-          activated(dy), normalized(dy), gamma(logical), inv(logical), dg(logical), db(logical) {
+          activated(dy), normalized(dy), gamma(logical), beta(logical), inv(logical),
+          dg(logical), db(logical) {
         for (int c = 0; c < cols; ++c) {
             gamma[c] = static_cast<float>(c % 7 - 3) / 4.0f;
+            beta[c] = static_cast<float>(c % 5 - 2) / 8.0f;
             inv[c] = static_cast<float>(c % 5 + 1) / 8.0f;
             dg[c] = static_cast<float>(c % 9 - 4) / 16.0f;
             db[c] = static_cast<float>(c % 11 - 5) / 8.0f;
@@ -210,14 +212,16 @@ public:
           activated_(dy_.size(), "activated"), normalized_(dy_.size(), "normalized"),
           dx_(dy_.size(), "dx"), masked_(dy_.size(), "old masked"),
           oracle_(dy_.size(), "old dx"), residual_(dy_.size(), "residual"), half_(dy_.size(), "half"),
-          gamma_(cols, "gamma"), inv_(cols, "inv"), dg_(cols, "dgamma"), db_(cols, "dbeta"),
+          gamma_(cols, "gamma"), beta_(cols, "beta"), inv_(cols, "inv"),
+          dg_(cols, "dgamma"), db_(cols, "dbeta"),
           stats_(2 * cols, "stats"), old_stats_(2 * cols, "old stats") {}
 
     // Missing mask in either partial/apply, masking dx after BN, zeroing the
     // residual padding, reading updated inplace dy, or mirroring residual
     // instead of dx each breaks an independent observable result below.
     void Run(Fixture f, bool full, bool mirror, bool inplace, bool residual,
-             const std::string& name, Mask mask = Mask::Separate, bool literal = false) {
+             const std::string& name, Mask mask = Mask::Separate, bool literal = false,
+             bool recompute_mask = false) {
         Require(f.rows > 0 && f.rows <= capacity_ && f.cols == cols_ && f.stride == stride_ &&
                 f.dy.size() == dy_.size(), name + " fixture extent");
         Require(!residual || mask != Mask::None, name + " residual requires mask");
@@ -225,7 +229,7 @@ public:
         if (mask == Mask::DyAlias) f.activated = f.dy;
         if (mask == Mask::NormalizedAlias) f.activated = f.normalized;
         dy_.Put(f.dy); activated_.Put(f.activated); normalized_.Put(f.normalized);
-        gamma_.Put(f.gamma); inv_.Put(f.inv); dg_.Put(f.dg); db_.Put(f.db);
+        gamma_.Put(f.gamma); beta_.Put(f.beta); inv_.Put(f.inv); dg_.Put(f.dg); db_.Put(f.db);
         dx_.Poison(); masked_.Poison(); oracle_.Poison(); residual_.Poison(); half_.Poison();
         stats_.Poison(); old_stats_.Poison();
         Cuda(cudaStreamSynchronize(nullptr), "finish fixture uploads");
@@ -250,7 +254,8 @@ public:
         Cuda(cudaGetLastError(), "old apply launch");
         mgt_cuda::LocalBatchNormBackwardEpilogue ep;
         ep.half_output = mirror ? half_.get() : nullptr;
-        ep.activated = a;
+        ep.activated = recompute_mask ? nullptr : a;
+        ep.relu_beta = recompute_mask ? beta_.get() : nullptr;
         ep.residual_grad = residual ? residual_.get() : nullptr;
         float* destination = inplace ? dy_.get() : dx_.get();
         const auto status = full ? mgt_cuda::LaunchLocalStridedBatchNormBackward(dy_.get(),
@@ -329,6 +334,7 @@ public:
         SameBytes(activated_.Read(), f.activated, name + " activation immutable");
         SameBytes(normalized_.Read(), f.normalized, name + " normalized immutable");
         SameBytes(gamma_.Read(), f.gamma, name + " gamma immutable");
+        SameBytes(beta_.Read(), f.beta, name + " beta immutable");
         SameBytes(inv_.Read(), f.inv, name + " inverse immutable");
         if (literal) {
             const std::uint16_t half_bits[]{0x0000, 0x8000, 0x3c00, 0x3c02, 0x0000, 0x8000,
@@ -349,8 +355,20 @@ private:
     Stream stream_;
     Device<float> dy_, activated_, normalized_, dx_, masked_, oracle_, residual_;
     Device<__half> half_;
-    Device<float> gamma_, inv_, dg_, db_, stats_, old_stats_;
+    Device<float> gamma_, beta_, inv_, dg_, db_, stats_, old_stats_;
 };
+
+void RecomputedMaskCase() {
+    Fixture f(257, 257, 5, 7);
+    for (int row = 0; row < f.rows; ++row) for (int col = 0; col < f.stride; ++col) {
+        const std::size_t index = static_cast<std::size_t>(row) * f.stride + col;
+        f.activated[index] = col < f.cols
+            ? std::fma(f.normalized[index], f.gamma[col], f.beta[col]) : 0.0f;
+    }
+    Harness h(257, 5, 7);
+    h.Run(f, true, true, false, false, "recomputed-affine-mask",
+          Mask::Separate, false, true);
+}
 
 void LiteralCases() {
     Fixture f(1, 1, 14, 17);
@@ -372,6 +390,7 @@ void LiteralCases() {
 
 void QuickCases() {
     LiteralCases();
+    RecomputedMaskCase();
     {
         Harness h(257, 5, 7);
         const int rows[]{17, 1, 255, 256, 257, 3};
@@ -480,12 +499,16 @@ void InvalidCases() {
     std::vector<Values> before;
     for (auto* array : arrays) before.push_back(array->Read());
     const auto before_half = half.Read();
-    struct Args { float *dy, *a, *n, *gamma, *inv, *dg, *db, *dx, *residual, *stats; __half* half; };
-    const Args good{dy.get(), a.get(), n.get(), gamma.get(), inv.get(), dg.get(), db.get(),
+    struct Args {
+        float *dy, *a, *beta, *n, *gamma, *inv, *dg, *db, *dx, *residual, *stats;
+        __half* half;
+    };
+    const Args good{dy.get(), a.get(), nullptr, n.get(), gamma.get(), inv.get(), dg.get(), db.get(),
                     dx.get(), residual.get(), stats.get(), half.get()};
     auto reject = [&](const Args& args, const std::string& name, bool full) {
         mgt_cuda::LocalBatchNormBackwardEpilogue ep;
         ep.half_output = args.half; ep.activated = args.a; ep.residual_grad = args.residual;
+        ep.relu_beta = args.beta;
         const auto status = full ? mgt_cuda::LaunchLocalStridedBatchNormBackward(args.dy,
             2, 3, 5, args.gamma, args.inv, args.n, args.dx, args.dg, args.db, args.stats, stream.get(), ep) :
             mgt_cuda::LaunchLocalStridedBatchNormBackwardApply(args.dy, 2, 3, 5, args.gamma,
@@ -501,6 +524,16 @@ void InvalidCases() {
         reject(args, name + " apply", false); reject(args, name + " full", true);
     };
     { auto x = good; x.a = nullptr; both(x, "residual without activated"); }
+    { auto x = good; x.residual = nullptr; x.beta = gamma.get();
+      both(x, "activated and recomputed masks both selected"); }
+    { auto x = good; x.a = nullptr; x.residual = nullptr; x.beta = dx.get();
+      both(x, "recomputed beta overlaps writable dx"); }
+    for (auto* target : {&dg, &db}) {
+        auto x = good; x.a = nullptr; x.residual = nullptr; x.beta = target->get();
+        reject(x, "full recomputed beta overlaps writable feature output", true);
+    }
+    { auto x = good; x.a = nullptr; x.residual = nullptr; x.beta = stats.get();
+      reject(x, "full recomputed beta overlaps statistics", true); }
     for (int offset : {0, 9}) {
         auto x = good; x.a = dx.get() + offset; both(x, "activated overlaps dx");
     }

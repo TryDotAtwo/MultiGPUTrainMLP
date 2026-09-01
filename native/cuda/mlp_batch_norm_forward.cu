@@ -62,11 +62,15 @@ mgt::Status LocalBnBackward(
     const float* gamma, const float* inv_std, const float* normalized,
     float* dx, float* dgamma, float* dbeta, float* scratch,
     NcclRankContext*, cudaStream_t stream, const float* activated = nullptr,
-    float* residual_grad = nullptr) {
+    float* residual_grad = nullptr, const float* relu_beta = nullptr) {
     if (rows != global_rows) return mgt::Status::kInvalidConfig;
+    LocalBatchNormBackwardEpilogue epilogue;
+    epilogue.activated = activated;
+    epilogue.residual_grad = residual_grad;
+    epilogue.relu_beta = relu_beta;
     return LaunchLocalStridedBatchNormBackward(
         dy, rows, cols, stride, gamma, inv_std, normalized, dx, dgamma,
-        dbeta, scratch, stream, {nullptr, activated, residual_grad});
+        dbeta, scratch, stream, epilogue);
 }
 // Explicitly selected only at dense hidden/residual sites. The input BN feeds
 // FP32 sparse gradients and must not emit a mirror, even when hd1 == hd2.
@@ -107,14 +111,17 @@ mgt::Status ReluBnBackward(
     const float* activated, float* dy, int rows, int global_rows, int cols, int stride,
     const float* gamma, const float* inv_std, const float* normalized,
     float* dx, float* dgamma, float* dbeta, float* scratch,
-    NcclRankContext* context, cudaStream_t stream) {
+    NcclRankContext* context, cudaStream_t stream,
+    const float* relu_beta = nullptr) {
     if (rows <= 0 || stride <= 0) return mgt::Status::kInvalidConfig;
 #ifdef MGT_LOCAL_MLP_IMPLEMENTATION
     if constexpr (Dense) return DenseBnBackward(dy, rows, global_rows, cols, stride,
         gamma, inv_std, normalized, dx, dgamma, dbeta, scratch, context, stream, activated);
     return LocalBnBackward(dy, rows, global_rows, cols, stride,
-        gamma, inv_std, normalized, dx, dgamma, dbeta, scratch, context, stream, activated);
+        gamma, inv_std, normalized, dx, dgamma, dbeta, scratch, context, stream,
+        activated, nullptr, relu_beta);
 #else
+    if (relu_beta) return mgt::Status::kInvalidConfig;
     if (LaunchBatchNormReluBackward(activated, dy, dy,
             static_cast<std::uint64_t>(rows) * stride, stream) != mgt::Status::kOk)
         return mgt::Status::kCudaFailure;
@@ -174,6 +181,15 @@ InputHalfIndexPolicy ResolveInputHalfIndexPolicy() {
     return {mgt::Status::kOk, cached_use_u32};
 }
 
+bool InputHalfU32ExtentsFit(CudaMlpShape s, unsigned logical, unsigned rows) {
+    if ((s.hd1 & 1U) != 0 || (logical & 1U) != 0) return false;
+    const std::uint64_t weight_elements =
+        (static_cast<std::uint64_t>(s.state_len) * s.state_value_pad + 1U) * s.hd1;
+    const std::uint64_t output_elements = static_cast<std::uint64_t>(rows) * s.hd1;
+    return weight_elements <= std::numeric_limits<unsigned>::max() &&
+           output_elements <= std::numeric_limits<unsigned>::max();
+}
+
 mgt::Status LaunchInputHalfInternal(CudaMlpShape s,unsigned logical,const __half*w,const mgt::TrainStateStorage*states,unsigned rows,float*out,cudaStream_t st){
     if(!w||!states||!out||rows==0||logical>s.hd1)return mgt::Status::kInvalidConfig;
     if((s.hd1&1U)==0&&(logical&1U)==0){
@@ -181,12 +197,7 @@ mgt::Status LaunchInputHalfInternal(CudaMlpShape s,unsigned logical,const __half
         if (index_policy.status != mgt::Status::kOk) return index_policy.status;
         constexpr unsigned gather_threads=128;
         const dim3 grid(rows,(static_cast<std::uint64_t>(s.hd1)+2U*gather_threads-1)/(2U*gather_threads));
-        const std::uint64_t weight_elements =
-            (static_cast<std::uint64_t>(s.state_len) * s.state_value_pad + 1U) * s.hd1;
-        const std::uint64_t output_elements = static_cast<std::uint64_t>(rows) * s.hd1;
-        if (index_policy.use_u32 &&
-            weight_elements <= std::numeric_limits<unsigned>::max() &&
-            output_elements <= std::numeric_limits<unsigned>::max()) {
+        if (index_policy.use_u32 && InputHalfU32ExtentsFit(s, logical, rows)) {
             InputHalf2Row32<gather_threads><<<grid,gather_threads,0,st>>>(
                 s,logical,w,states,rows,out);
         } else {
@@ -539,14 +550,25 @@ mgt::Status LaunchMlpBatchNormForward(
     float*scratch=bn+p.reduction_offset;
 #ifdef MGT_LOCAL_MLP_IMPLEMENTATION
     auto*fp=LocalFp16(ctx);
+    bool preserve_input_activation = false;
+    if (fp) {
+        const InputHalfIndexPolicy index_policy = ResolveInputHalfIndexPolicy();
+        if (index_policy.status != mgt::Status::kOk) return index_policy.status;
+        preserve_input_activation = index_policy.use_u32 &&
+            InputHalfU32ExtentsFit(s, lh1, lr);
+    }
 #endif
     auto site=[&](unsigned i,float*x,const float*residual,bool emit_half,
                  const float*input_bias=nullptr){
         const auto&q=p.sites[i];
 #ifdef MGT_LOCAL_MLP_IMPLEMENTATION
         if(lr!=gr)return mgt::Status::kInvalidConfig;
-        const LocalBatchNormForwardEpilogue epilogue{
-            true,residual,fp&&emit_half?ActivationTapeSlot(fp,i):nullptr,input_bias};
+        LocalBatchNormForwardEpilogue epilogue;
+        epilogue.relu = true;
+        epilogue.residual = residual;
+        epilogue.half_output = fp && emit_half ? ActivationTapeSlot(fp, i) : nullptr;
+        epilogue.input_bias = input_bias;
+        epilogue.preserve_input = i == 0 && preserve_input_activation;
         return LaunchLocalStridedBatchNormForward(
             x,lr,q.logical_features,q.physical_stride,aff+q.affine_offset,
             aff+p.logical_feature_count+q.affine_offset,run+q.running_offset,
@@ -629,12 +651,26 @@ mgt::Status LaunchMlpBatchNormInputBackward(
                  static_cast<std::uint64_t>(s.residual_blocks + 1U) * lr * s.hd2;
     float* bn = fc1 + static_cast<std::uint64_t>(s.residual_blocks) * lr * s.hd2;
     const auto& q = p.sites[0];
+    const float* activated_mask = a1;
+    const float* recompute_beta = nullptr;
+#ifdef MGT_LOCAL_MLP_IMPLEMENTATION
+    if (LocalFp16(ctx)) {
+        const InputHalfIndexPolicy index_policy = ResolveInputHalfIndexPolicy();
+        if (index_policy.status != mgt::Status::kOk) return index_policy.status;
+        if (index_policy.use_u32 &&
+            InputHalfU32ExtentsFit(s, q.logical_features, lr)) {
+            activated_mask = nullptr;
+            recompute_beta =
+                aff + p.logical_feature_count + q.affine_offset;
+        }
+    }
+#endif
     if (ReluBnBackward<false>(
-            a1, input_grad, lr, gr, q.logical_features, q.physical_stride,
+            activated_mask, input_grad, lr, gr, q.logical_features, q.physical_stride,
             aff + q.affine_offset, bn + q.inv_std_offset, bn + q.normalized_offset,
             input_grad, affine_grad + q.affine_offset,
             affine_grad + p.logical_feature_count + q.affine_offset,
-            bn + p.reduction_offset, ctx, st) != mgt::Status::kOk) {
+            bn + p.reduction_offset, ctx, st, recompute_beta) != mgt::Status::kOk) {
         return mgt::Status::kCudaFailure;
     }
     const std::uint64_t parameter_count = HW(s);

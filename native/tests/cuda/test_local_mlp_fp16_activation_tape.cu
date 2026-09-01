@@ -364,31 +364,35 @@ std::uint64_t TapeCount(const mgt_cuda::CudaMlpShape& s, std::uint32_t rows) {
 }
 
 bool CheckTape(const mgt_cuda::CudaMlpShape& s, unsigned rows, const Values& saved,
+               const Values& input_activation,
                const std::vector<std::uint16_t>& tape) {
     const std::size_t bh1 = rows * s.hd1, bh2 = rows * s.hd2;
     const std::size_t fc1 = bh1 + (s.residual_blocks + 1) * bh2;
-    auto mirror = [&](const char* site, unsigned block, std::size_t source,
+    auto mirror = [&](const char* site, unsigned block, const Values& values,
+                      std::size_t source,
                       std::size_t target, std::size_t count) {
         for (std::size_t i = 0; i < count; ++i) {
-            const auto expected = HalfBits(saved[source + i]);
+            const auto expected = HalfBits(values[source + i]);
             if (tape[target + i] != expected) {
                 std::fprintf(stderr, "tape site=%s block=%u slot_offset=%zu element=%zu bits=0x%04x "
                              "expected=0x%04x source=%.9g\n", site, block, target, i,
                              static_cast<unsigned>(tape[target + i]), static_cast<unsigned>(expected),
-                             saved[source + i]);
+                             values[source + i]);
                 return false;
             }
         }
         return true;
     };
-    bool ok = mirror("input", 0, 0, 0, bh1);
+    bool ok = mirror("input", 0, input_activation, 0, 0, bh1);
     for (unsigned b = 0; b < s.residual_blocks; ++b) {
-        ok = mirror(b == 0 ? "hidden" : "intermediate_residual", b,
+        ok = mirror(b == 0 ? "hidden" : "intermediate_residual", b, saved,
                     bh1 + b * bh2, bh1 + 2 * b * bh2, bh2) && ok;
-        ok = mirror("fc1", b, fc1 + b * bh2, bh1 + (2 * b + 1) * bh2, bh2) && ok;
+        ok = mirror("fc1", b, saved, fc1 + b * bh2,
+                    bh1 + (2 * b + 1) * bh2, bh2) && ok;
     }
     if (s.output_dim > 1)
-        ok = mirror("final_vector_head", s.residual_blocks, bh1 + s.residual_blocks * bh2,
+        ok = mirror("final_vector_head", s.residual_blocks, saved,
+                    bh1 + s.residual_blocks * bh2,
                     bh1 + 2 * s.residual_blocks * bh2, bh2) && ok;
     for (std::size_t i = TapeCount(s, rows); i < tape.size(); ++i) {
         if (tape[i] != kPoison) {
@@ -697,7 +701,8 @@ bool RunCase(unsigned blocks, unsigned output_dim, unsigned hd1 = 3, unsigned hd
                 throw std::runtime_error("training launch failed");
             }
             RequireEmptyGradientCache(fp16, "successful full step");
-            bool ok = CheckTape(shape, active_rows, workspace.Read(), tape_bits);
+            bool ok = CheckTape(shape, active_rows, workspace.Read(),
+                                mixed.input_activation, tape_bits);
             const auto final_block_gradient = block_grad.Read();
             ok = CheckLastDenseGradientMirror(final_block_gradient, operand_b.Read(),
                 static_cast<std::size_t>(active_rows) * hd2, active_gradient_capacity) && ok;
@@ -796,6 +801,9 @@ int main() {
     bool ok = true;
     ok = RunCase(0, 1) && ok;
     ok = RunCase(0, 2) && ok;
+    // Even input width selects the SM86 preserved-input/recomputed-mask path;
+    // the independent rounded CPU oracle covers its full forward/backward step.
+    ok = RunCase(0, 1, 4, 2) && ok;
     ok = RunCase(2, 1) && ok;
     ok = RunCase(2, 2) && ok;
     // The one-feature hidden path uses FP32 forward but still needs half dW operands.
