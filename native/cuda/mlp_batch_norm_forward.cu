@@ -31,6 +31,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 namespace mgt_cuda { namespace {
 cublasStatus_t BindMlpBlasStream(cublasHandle_t blas, cudaStream_t stream) {
 #ifdef MGT_LOCAL_MLP_IMPLEMENTATION
@@ -147,13 +148,51 @@ __global__ void Input(CudaMlpShape s,unsigned logical,const float*w,const mgt::T
 __global__ void InputHalf(CudaMlpShape s,unsigned logical,const __half*w,const mgt::TrainStateStorage*states,unsigned rows,float*out){unsigned q=blockIdx.x*blockDim.x+threadIdx.x;if(q>=rows*s.hd1)return;unsigned r=q/s.hd1,h=q-r*s.hd1;if(h>=logical){out[q]=0;return;}float v=__half2float(w[IB(s)+h]);for(unsigned p=0;p<s.state_len;p++)v+=__half2float(w[(static_cast<std::uint64_t>(p)*s.state_value_pad+states[r].v[p])*s.hd1+h]);out[q]=v;}
 
 using detail::InputHalf2Row;
+using detail::InputHalf2Row32;
+
+struct InputHalfIndexPolicy {
+    mgt::Status status;
+    bool use_u32;
+};
+
+InputHalfIndexPolicy ResolveInputHalfIndexPolicy() {
+    static thread_local bool initialized = false;
+    static thread_local int cached_device = -1;
+    static thread_local bool cached_use_u32 = false;
+    int device = 0;
+    if (cudaGetDevice(&device) != cudaSuccess)
+        return {mgt::Status::kCudaFailure, false};
+    if (!initialized || device != cached_device) {
+        cudaDeviceProp properties{};
+        if (cudaGetDeviceProperties(&properties, device) != cudaSuccess)
+            return {mgt::Status::kCudaFailure, false};
+        cached_device = device;
+        cached_use_u32 = detail::UseInputHalfU32Indexing(
+            properties.major, properties.minor);
+        initialized = true;
+    }
+    return {mgt::Status::kOk, cached_use_u32};
+}
 
 mgt::Status LaunchInputHalfInternal(CudaMlpShape s,unsigned logical,const __half*w,const mgt::TrainStateStorage*states,unsigned rows,float*out,cudaStream_t st){
     if(!w||!states||!out||rows==0||logical>s.hd1)return mgt::Status::kInvalidConfig;
     if((s.hd1&1U)==0&&(logical&1U)==0){
+        const InputHalfIndexPolicy index_policy = ResolveInputHalfIndexPolicy();
+        if (index_policy.status != mgt::Status::kOk) return index_policy.status;
         constexpr unsigned gather_threads=128;
         const dim3 grid(rows,(static_cast<std::uint64_t>(s.hd1)+2U*gather_threads-1)/(2U*gather_threads));
-        InputHalf2Row<gather_threads><<<grid,gather_threads,0,st>>>(s,logical,w,states,rows,out);
+        const std::uint64_t weight_elements =
+            (static_cast<std::uint64_t>(s.state_len) * s.state_value_pad + 1U) * s.hd1;
+        const std::uint64_t output_elements = static_cast<std::uint64_t>(rows) * s.hd1;
+        if (index_policy.use_u32 &&
+            weight_elements <= std::numeric_limits<unsigned>::max() &&
+            output_elements <= std::numeric_limits<unsigned>::max()) {
+            InputHalf2Row32<gather_threads><<<grid,gather_threads,0,st>>>(
+                s,logical,w,states,rows,out);
+        } else {
+            InputHalf2Row<gather_threads><<<grid,gather_threads,0,st>>>(
+                s,logical,w,states,rows,out);
+        }
     }
     else { const unsigned blocks=(rows*s.hd1+T-1)/T; InputHalf<<<blocks,T,0,st>>>(s,logical,w,states,rows,out); }
     return cudaPeekAtLastError()==cudaSuccess?mgt::Status::kOk:mgt::Status::kCudaFailure;

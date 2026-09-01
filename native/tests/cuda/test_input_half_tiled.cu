@@ -23,6 +23,12 @@ bool cleanup_failed = false;
 unsigned passed_cases = 0;
 unsigned passed_variants = 0;
 
+static_assert(!mgt_cuda::detail::UseInputHalfU32Indexing(7, 5));
+static_assert(!mgt_cuda::detail::UseInputHalfU32Indexing(8, 0));
+static_assert(mgt_cuda::detail::UseInputHalfU32Indexing(8, 6));
+static_assert(!mgt_cuda::detail::UseInputHalfU32Indexing(8, 9));
+static_assert(!mgt_cuda::detail::UseInputHalfU32Indexing(9, 0));
+
 void Require(bool condition, const std::string& message) {
     if (!condition) throw std::runtime_error(message);
 }
@@ -287,6 +293,7 @@ public:
         // deliberately launch only tile y=0 and require later tiles untouched.
         RunVariant<128>(fixture, expected, true);
         RunVariant<256>(fixture, expected, true);
+        RunVariant<128, true>(fixture, expected, true);
         CheckInputs(fixture);
         Finish(fixture, "single-tile ownership");
     }
@@ -304,6 +311,7 @@ public:
         }
         RunVariant<128>(fixture, expected, false);
         RunVariant<256>(fixture, expected, false);
+        RunVariant<128, true>(fixture, expected, false);
         CheckInputs(fixture);
         Finish(fixture, "complete tiled grid");
     }
@@ -313,6 +321,7 @@ public:
         const auto expected = Reference(fixture);
         Event begin;
         Event end;
+        BenchmarkVariant<128, true>(fixture, expected, begin.get(), end.get());
         BenchmarkVariant<0>(fixture, expected, begin.get(), end.get());
         BenchmarkVariant<128>(fixture, expected, begin.get(), end.get());
         BenchmarkVariant<256>(fixture, expected, begin.get(), end.get());
@@ -353,10 +362,15 @@ private:
                 fixture.name + " input states, inactive rows or state padding mutated");
     }
 
-    template <unsigned Threads> void Launch(const Fixture& fixture, bool partial = false) {
+    template <unsigned Threads, bool Index32 = false>
+    void Launch(const Fixture& fixture, bool partial = false) {
         if constexpr (Threads == 0) {
             OldRowOracle<<<fixture.rows, 256>>>(shape_, fixture.logical, weights_.get(), states_.get(),
                                               fixture.rows, actual_.get());
+        } else if constexpr (Index32) {
+            const unsigned tiles = partial ? 1 : (shape_.hd1 + 2 * Threads - 1) / (2 * Threads);
+            mgt_cuda::detail::InputHalf2Row32<Threads><<<dim3(fixture.rows, tiles), Threads>>>(
+                shape_, fixture.logical, weights_.get(), states_.get(), fixture.rows, actual_.get());
         } else {
             const unsigned tiles = partial ? 1 : (shape_.hd1 + 2 * Threads - 1) / (2 * Threads);
             mgt_cuda::detail::InputHalf2Row<Threads><<<dim3(fixture.rows, tiles), Threads>>>(
@@ -364,16 +378,17 @@ private:
         }
     }
 
-    template <unsigned Threads>
+    template <unsigned Threads, bool Index32 = false>
     void RunVariant(const Fixture& fixture, const std::vector<float>& full_expected, bool partial) {
-        const std::string context = fixture.name + " Threads=" + std::to_string(Threads);
+        const std::string context = fixture.name + " Threads=" + std::to_string(Threads) +
+            (Index32 ? " Index32" : " Index64");
         auto expected = full_expected;
         if (partial)
             for (unsigned row = 0; row < fixture.rows; ++row)
                 for (unsigned h = 2 * Threads; h < shape_.hd1; ++h)
                     expected[static_cast<std::size_t>(row) * shape_.hd1 + h] = FromBits(0xcdcdcdcdU);
         actual_.FillBytes(kOutputByte);
-        Launch<Threads>(fixture, partial);
+        Launch<Threads, Index32>(fixture, partial);
         Cuda(cudaGetLastError(), context + " production launch");
         Cuda(cudaDeviceSynchronize(), context + " synchronize");
         const auto actual = actual_.Read();
@@ -388,17 +403,17 @@ private:
         ++passed_variants;
     }
 
-    template <unsigned Threads>
+    template <unsigned Threads, bool Index32 = false>
     void BenchmarkVariant(const Fixture& fixture, const std::vector<float>& expected,
                           cudaEvent_t begin, cudaEvent_t end) {
         constexpr unsigned warmup = 100;
         constexpr unsigned iterations = 300;
         actual_.FillBytes(kOutputByte);
-        for (unsigned i = 0; i < warmup; ++i) Launch<Threads>(fixture);
+        for (unsigned i = 0; i < warmup; ++i) Launch<Threads, Index32>(fixture);
         Cuda(cudaGetLastError(), "benchmark warmup launches");
         Cuda(cudaDeviceSynchronize(), "benchmark warmup synchronize");
         Cuda(cudaEventRecord(begin), "benchmark begin record");
-        for (unsigned i = 0; i < iterations; ++i) Launch<Threads>(fixture);
+        for (unsigned i = 0; i < iterations; ++i) Launch<Threads, Index32>(fixture);
         Cuda(cudaGetLastError(), "benchmark timed launches");
         Cuda(cudaEventRecord(end), "benchmark end record");
         Cuda(cudaEventSynchronize(end), "benchmark end synchronize");
@@ -408,18 +423,20 @@ private:
         Equal(actual_.Read(), expected, shape_.hd1, fixture.name + " benchmark output");
         weights_.CheckGuards();
         states_.CheckGuards();
-        std::printf("INPUT_HALF_BENCH {\"kind\":\"%s\",\"threads\":%u,\"rows\":%u,"
+        std::printf("INPUT_HALF_BENCH {\"kind\":\"%s\",\"threads\":%u,\"index_bits\":%u,\"rows\":%u,"
                     "\"state_len\":%u,\"state_value_pad\":%u,\"logical\":%u,\"hd1\":%u,"
                     "\"warmup\":%u,\"iterations\":%u,\"kernel_us\":%.6f}\n",
                     Threads == 0 ? "old_row_reference" : "production_tiled",
-                    Threads == 0 ? 256 : Threads, fixture.rows, shape_.state_len,
+                    Threads == 0 ? 256 : Threads, Index32 ? 32U : 64U,
+                    fixture.rows, shape_.state_len,
                     shape_.state_value_pad, fixture.logical, shape_.hd1, warmup, iterations,
                     static_cast<double>(elapsed_ms) * 1000.0 / iterations);
     }
 
     void Finish(const Fixture& fixture, const char* coverage) {
         ++passed_cases;
-        std::printf("PASS %-37s rows=%u capacity=%u logical=%u hd1=%u shape=%ux%u T=128,256 %s\n",
+        std::printf("PASS %-37s rows=%u capacity=%u logical=%u hd1=%u shape=%ux%u "
+                    "T=128u64,256u64,128u32 %s\n",
                     fixture.name.c_str(), fixture.rows, capacity_rows_, fixture.logical,
                     shape_.hd1, shape_.state_len, shape_.state_value_pad, coverage);
     }
