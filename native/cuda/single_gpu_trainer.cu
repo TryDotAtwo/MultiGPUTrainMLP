@@ -335,6 +335,9 @@ mgt::Status EnqueueSingleGpuTrainStep(
         trainer->input_active_bins.size() <
         static_cast<std::uint64_t>(trainer->shape.state_len) *
             trainer->shape.state_value_pad;
+    fp16.input_inactive_adam_state_is_pristine =
+        fp16.input_inactive_gradients_are_persistent_zero &&
+        trainer->info.adam.weight_decay == 0.0f;
     if (trainer->info.input_gradient_precision ==
         SingleGpuInputGradientPrecision::kFp16Mirror) {
         fp16.input_gradient_half =

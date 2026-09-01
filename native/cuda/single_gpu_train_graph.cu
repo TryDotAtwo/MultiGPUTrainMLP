@@ -60,8 +60,15 @@ mgt::Status InstantiateSingleGpuTrainGraph(
         const auto& walk = *static_cast<const RandomWalkKernelConfig*>(graph->parameters[0].kernelParams[0]);
         const auto& weight = *static_cast<const AdamWKernelConfig*>(graph->parameters[1].kernelParams[0]);
         const auto& affine = *static_cast<const AdamWKernelConfig*>(graph->parameters[2].kernelParams[0]);
+        std::uint64_t weight_physical_count = 0;
+        std::uint64_t affine_physical_count = 0;
         if (walk.sample_count != rows || !walk.original_p888_schedule ||
-            weight.param_count != weight_count || affine.param_count != affine_count)
+            QueryAdamWPhysicalParameterCount(weight, &weight_physical_count) !=
+                mgt::Status::kOk ||
+            QueryAdamWPhysicalParameterCount(affine, &affine_physical_count) !=
+                mgt::Status::kOk ||
+            weight_physical_count != weight_count ||
+            affine_physical_count != affine_count)
             return mgt::Status::kInvalidConfig;
         if (cudaGraphInstantiate(&graph->executable, source, 0) != cudaSuccess)
             return mgt::Status::kCudaFailure;

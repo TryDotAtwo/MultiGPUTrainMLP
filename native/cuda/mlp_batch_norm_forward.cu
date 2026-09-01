@@ -958,12 +958,99 @@ mgt::Status LaunchMlpBatchNormInputBackward(
         return mgt::Status::kCudaFailure;
     return mgt::Status::kOk;
 }
-mgt::Status LaunchMlpBatchNormAdamStep(const CudaMlpShape&s,const mgt::BatchNormTrainingPlan&p,const AdamWKernelConfig&base,float*w,const float*wg,float*wm,float*wv,float*aff,const float*ag,float*am,float*av,cudaStream_t st){if(ValidateCudaMlpShape(s)!=mgt::Status::kOk||p.logical_feature_count==0||!w||!wg||!wm||!wv||!aff||!ag||!am||!av)return mgt::Status::kInvalidConfig;AdamWKernelConfig wc=base;wc.param_count=OB(s)+s.output_dim;AdamWKernelConfig ac=base;ac.param_count=2ULL*p.logical_feature_count;if(LaunchAdamWKernel(wc,w,wg,wm,wv,st)!=mgt::Status::kOk||LaunchAdamWKernel(ac,aff,ag,am,av,st)!=mgt::Status::kOk)return mgt::Status::kCudaFailure;return mgt::Status::kOk;}
-static mgt::Status LaunchAdamBackend(const CudaMlpShape&s,const mgt::BatchNormTrainingPlan&p,const AdamWKernelConfig&base,MlpBatchNormStepBuffers b,NcclRankContext*ctx,cudaStream_t st){
+mgt::Status LaunchMlpBatchNormAdamStep(
+    const CudaMlpShape& s, const mgt::BatchNormTrainingPlan& p,
+    const AdamWKernelConfig& base, float* w, const float* wg, float* wm,
+    float* wv, float* aff, const float* ag, float* am, float* av,
+    cudaStream_t st) {
+    if (ValidateCudaMlpShape(s) != mgt::Status::kOk ||
+        p.logical_feature_count == 0 || !w || !wg || !wm || !wv || !aff ||
+        !ag || !am || !av) return mgt::Status::kInvalidConfig;
+    AdamWKernelConfig wc = base;
+    wc.param_count = OB(s) + s.output_dim;
+    wc.sparse_active_bins = nullptr;
+    wc.sparse_full_prefix_count = 0;
+    wc.sparse_row_width = 0;
+    wc.sparse_active_bin_count = 0;
+    AdamWKernelConfig ac = base;
+    ac.param_count = 2ULL * p.logical_feature_count;
+    ac.sparse_active_bins = nullptr;
+    ac.sparse_full_prefix_count = 0;
+    ac.sparse_row_width = 0;
+    ac.sparse_active_bin_count = 0;
+    if (LaunchAdamWKernel(wc, w, wg, wm, wv, st) != mgt::Status::kOk ||
+        LaunchAdamWKernel(ac, aff, ag, am, av, st) != mgt::Status::kOk)
+        return mgt::Status::kCudaFailure;
+    return mgt::Status::kOk;
+}
+
+static mgt::Status LaunchAdamBackend(
+    const CudaMlpShape& s, const mgt::BatchNormTrainingPlan& p,
+    const AdamWKernelConfig& base, MlpBatchNormStepBuffers b,
+    NcclRankContext* ctx, cudaStream_t st) {
 #ifdef MGT_LOCAL_MLP_IMPLEMENTATION
-if(auto*fp=LocalFp16(ctx)){AdamWKernelConfig wc=base;wc.param_count=OB(s)+s.output_dim;AdamWKernelConfig ac=base;ac.param_count=2ULL*p.logical_feature_count;if(LaunchAdamWKernelWithHalfMirror(wc,b.weights,fp->weight_mirror,b.weight_grad,b.weight_m,b.weight_v,st)!=mgt::Status::kOk||LaunchAdamWKernel(ac,b.affine,b.affine_grad,b.affine_m,b.affine_v,st)!=mgt::Status::kOk)return mgt::Status::kCudaFailure;return mgt::Status::kOk;}
+    if (auto* fp = LocalFp16(ctx)) {
+        const std::uint64_t full_count = OB(s) + s.output_dim;
+        const std::uint64_t input_count = IB(s);
+        const std::uint64_t bin_count =
+            static_cast<std::uint64_t>(s.state_len) * s.state_value_pad;
+        const std::uint64_t active_elements =
+            static_cast<std::uint64_t>(fp->input_active_bin_count) * s.hd1;
+
+        AdamWKernelConfig wc = base;
+        wc.param_count = full_count;
+        wc.sparse_active_bins = nullptr;
+        wc.sparse_full_prefix_count = 0;
+        wc.sparse_row_width = 0;
+        wc.sparse_active_bin_count = 0;
+        const bool sparse = fp->input_inactive_adam_state_is_pristine &&
+            fp->input_inactive_gradients_are_persistent_zero &&
+            base.weight_decay == 0.0f && fp->input_active_bins &&
+            fp->input_active_bin_count > 0 &&
+            fp->input_active_bin_count < bin_count && input_count <= full_count &&
+            active_elements <= input_count;
+        if (sparse) {
+            wc.param_count = active_elements + (full_count - input_count);
+            wc.sparse_active_bins = fp->input_active_bins;
+            wc.sparse_full_prefix_count = input_count;
+            wc.sparse_row_width = s.hd1;
+            wc.sparse_active_bin_count = fp->input_active_bin_count;
+        }
+        std::uint64_t physical_count = 0;
+        if (QueryAdamWPhysicalParameterCount(wc, &physical_count) !=
+                mgt::Status::kOk ||
+            physical_count != full_count)
+            return mgt::Status::kInvalidConfig;
+
+        AdamWKernelConfig ac = base;
+        ac.param_count = 2ULL * p.logical_feature_count;
+        ac.sparse_active_bins = nullptr;
+        ac.sparse_full_prefix_count = 0;
+        ac.sparse_row_width = 0;
+        ac.sparse_active_bin_count = 0;
+        if (LaunchAdamWKernelWithHalfMirror(
+                wc, b.weights, fp->weight_mirror, b.weight_grad, b.weight_m,
+                b.weight_v, st) != mgt::Status::kOk ||
+            LaunchAdamWKernel(
+                ac, b.affine, b.affine_grad, b.affine_m, b.affine_v, st) !=
+                mgt::Status::kOk)
+            return mgt::Status::kCudaFailure;
+        static thread_local const LocalMlpFp16Context* reported_context = nullptr;
+        if (reported_context != fp) {
+            std::fprintf(stderr,
+                "mgt weight_adam sparse_active=%u live=%llu full=%llu\n",
+                static_cast<unsigned>(sparse),
+                static_cast<unsigned long long>(wc.param_count),
+                static_cast<unsigned long long>(full_count));
+            reported_context = fp;
+        }
+        return mgt::Status::kOk;
+    }
 #endif
-return LaunchMlpBatchNormAdamStep(s,p,base,b.weights,b.weight_grad,b.weight_m,b.weight_v,b.affine,b.affine_grad,b.affine_m,b.affine_v,st);}
+    return LaunchMlpBatchNormAdamStep(
+        s, p, base, b.weights, b.weight_grad, b.weight_m, b.weight_v, b.affine,
+        b.affine_grad, b.affine_m, b.affine_v, st);
+}
 mgt::Status LaunchMlpBatchNormTrainStep(const CudaMlpShape&s,std::uint32_t lh1,std::uint32_t lh2,const mgt::TrainStateStorage*states,const float*labels,std::uint32_t lr,std::uint32_t gr,const mgt::BatchNormTrainingPlan&p,std::uint64_t fw_count,const AdamWKernelConfig&adam,MlpBatchNormStepBuffers b,NcclRankContext*ctx,cublasHandle_t blas,cudaStream_t st){
     if(!states||!labels||!b.weights||!b.weight_grad||!b.weight_m||!b.weight_v||!b.affine||!b.affine_grad||!b.affine_m||!b.affine_v||!b.running||!b.outputs||!b.forward_workspace||!b.loss||!b.output_dy||!b.block_grad||!b.fc1_grad||!b.residual_grad||!b.input_grad)return mgt::Status::kInvalidConfig;
     auto z=LaunchMlpBatchNormForward(s,lh1,lh2,b.weights,b.affine,b.running,states,lr,gr,b.outputs,b.forward_workspace,fw_count,p,ctx,blas,st);if(z!=mgt::Status::kOk)return z;

@@ -16,9 +16,23 @@ struct AdamWKernelConfig {
     float beta2;
     float eps;
     float weight_decay;
+    // Optional logical-to-physical map for a structurally sparse input-table
+    // prefix. param_count is then the launched live count. The first
+    // sparse_active_bin_count * sparse_row_width logical elements map through
+    // sparse_active_bins; the remaining logical elements map densely after
+    // sparse_full_prefix_count. The caller owns a device-readable, unique,
+    // in-range bin map and guarantees every skipped grad/m/v is persistent +0
+    // with an already coherent low-precision mirror. Weight decay must be zero.
+    // Zero/default fields retain dense indexing.
+    const std::uint16_t* sparse_active_bins = nullptr;
+    std::uint64_t sparse_full_prefix_count = 0;
+    std::uint32_t sparse_row_width = 0;
+    std::uint32_t sparse_active_bin_count = 0;
 };
 
 __host__ mgt::Status ValidateAdamWKernelConfig(const AdamWKernelConfig& config);
+__host__ mgt::Status QueryAdamWPhysicalParameterCount(
+    const AdamWKernelConfig& config, std::uint64_t* count);
 __host__ mgt::Status LaunchAdamWKernel(const AdamWKernelConfig& config,
                                        float* device_weights,
                                        const float* device_grad,

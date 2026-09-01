@@ -31,6 +31,37 @@ void CheckStructuralInputMap(SingleGpuTrainer* trainer) {
           "device structural input-map differs from host owner");
 }
 
+void CheckSparseAdamGraphConfig(SingleGpuTrainer* trainer) {
+    const auto& weight = *static_cast<const AdamWKernelConfig*>(
+        trainer->graph.parameters[1].kernelParams[0]);
+    const auto& affine = *static_cast<const AdamWKernelConfig*>(
+        trainer->graph.parameters[2].kernelParams[0]);
+    const std::uint64_t input_count =
+        static_cast<std::uint64_t>(trainer->shape.state_len) *
+        trainer->shape.state_value_pad * trainer->shape.hd1;
+    const std::uint64_t active_count =
+        trainer->input_active_bins.size() * trainer->shape.hd1;
+    const std::uint64_t expected_live = active_count +
+        trainer->layout.parameter_count - input_count;
+    std::uint64_t physical_count = 0;
+    Check(weight.param_count == expected_live &&
+          weight.sparse_active_bins == At<std::uint16_t>(
+              trainer->arena, trainer->layout.input_active_bins) &&
+          weight.sparse_full_prefix_count == input_count &&
+          weight.sparse_row_width == trainer->shape.hd1 &&
+          weight.sparse_active_bin_count == trainer->input_active_bins.size() &&
+          QueryAdamWPhysicalParameterCount(weight, &physical_count) ==
+              mgt::Status::kOk &&
+          physical_count == trainer->layout.parameter_count,
+          "captured weight Adam did not retain sparse physical map");
+    Check(!affine.sparse_active_bins &&
+          affine.param_count == trainer->plan.trainable_count &&
+          QueryAdamWPhysicalParameterCount(affine, &physical_count) ==
+              mgt::Status::kOk &&
+          physical_count == trainer->plan.trainable_count,
+          "captured affine Adam must remain dense");
+}
+
 void CheckImpossibleInputGradientsStayZero(SingleGpuTrainer* trainer) {
     const std::uint64_t bins =
         static_cast<std::uint64_t>(trainer->shape.state_len) *
@@ -79,6 +110,7 @@ void Run(unsigned rows, unsigned tail,
     Check(PrepareSingleGpuTrainer(b.trainer)==mgt::Status::kOk,"eager prepare");
     CheckStructuralInputMap(a.trainer);
     CheckStructuralInputMap(b.trainer);
+    CheckSparseAdamGraphConfig(a.trainer);
     Check(a.trainer->sequence==0&&!a.trainer->in_flight,"capture advanced training state");
     Check(a.trainer->graph.source&&a.trainer->graph.executable&&
         a.trainer->graph.rows==rows&&!b.trainer->graph.source&&!b.trainer->graph.executable,
