@@ -70,6 +70,8 @@ void RunCapture(unsigned rows, bool warm, bool own_workspace, const mgt::PuzzleD
             if(own_workspace)
                 Check(kinds[cudaGraphNodeTypeMemAlloc]==0&&kinds[cudaGraphNodeTypeMemFree]==0,
                     "provided workspace was lost: allocation/free nodes remain");
+            Check(kinds[cudaGraphNodeTypeMemcpy]==0,
+                  "BN backward still copies reduced affine gradients");
             if(!executable) {
                 Cuda(cudaGraphInstantiate(&executable,captured,0),"instantiate");
                 retained=captured;

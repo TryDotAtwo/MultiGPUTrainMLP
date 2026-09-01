@@ -232,9 +232,17 @@ __global__ void BackwardApplyCoalesced(
     const float* dy, int rows, int cols, int stride, const float* gamma,
     const float* inv_std, const float* normalized, const float* dgamma,
     const float* dbeta, float* dx, __half* half_output,
-    const float* activated, float* residual_grad) {
+    const float* activated, float* residual_grad,
+    float* dgamma_output, float* dbeta_output) {
     const int index = blockIdx.x * blockDim.x + threadIdx.x;
     if (index >= rows * stride) return;
+    // Full backward uses the first feature lanes to publish reduced gradients;
+    // apply-only leaves both optional outputs null. The previous kernel boundary
+    // guarantees the workspace reductions are complete before these reads.
+    if (index < cols && dgamma_output) {
+        dgamma_output[index] = dgamma[index];
+        dbeta_output[index] = dbeta[index];
+    }
     const int col = index % stride;
     float gradient = 0.0f;
     if (col < cols || Residual)
@@ -422,10 +430,11 @@ mgt::Status LaunchLocalStridedBatchNormForward(
         mean, inv_std, y, normalized, epilogue, stream);
 }
 
-mgt::Status LaunchLocalStridedBatchNormBackwardApply(
+static mgt::Status LaunchBackwardApply(
     const float* dy, int rows, int cols, int row_stride,
     const float* gamma, const float* inv_std, const float* normalized,
     const float* dgamma, const float* dbeta, float* dx,
+    float* dgamma_output, float* dbeta_output,
     LocalBatchNormBackwardEpilogue epilogue, cudaStream_t stream) {
     if (!ValidBackwardApply(dy, rows, cols, row_stride, gamma, inv_std,
                             normalized, dgamma, dbeta, dx, epilogue))
@@ -434,30 +443,42 @@ mgt::Status LaunchLocalStridedBatchNormBackwardApply(
     if (epilogue.residual_grad && epilogue.half_output) {
         BackwardApplyCoalesced<true, true, true><<<1 + (count - 1) / kThreads, kThreads, 0, stream>>>(
             dy, rows, cols, row_stride, gamma, inv_std, normalized, dgamma, dbeta,
-            dx, epilogue.half_output, epilogue.activated, epilogue.residual_grad);
+            dx, epilogue.half_output, epilogue.activated, epilogue.residual_grad,
+            dgamma_output, dbeta_output);
     } else if (epilogue.residual_grad) {
         BackwardApplyCoalesced<true, true, false><<<1 + (count - 1) / kThreads, kThreads, 0, stream>>>(
             dy, rows, cols, row_stride, gamma, inv_std, normalized, dgamma, dbeta,
-            dx, nullptr, epilogue.activated, epilogue.residual_grad);
+            dx, nullptr, epilogue.activated, epilogue.residual_grad,
+            dgamma_output, dbeta_output);
     } else if (epilogue.activated && epilogue.half_output) {
         BackwardApplyCoalesced<true, false, true><<<1 + (count - 1) / kThreads, kThreads, 0, stream>>>(
             dy, rows, cols, row_stride, gamma, inv_std, normalized, dgamma, dbeta,
-            dx, epilogue.half_output, epilogue.activated, nullptr);
+            dx, epilogue.half_output, epilogue.activated, nullptr,
+            dgamma_output, dbeta_output);
     } else if (epilogue.activated) {
         BackwardApplyCoalesced<true, false, false><<<1 + (count - 1) / kThreads, kThreads, 0, stream>>>(
             dy, rows, cols, row_stride, gamma, inv_std, normalized, dgamma, dbeta,
-            dx, nullptr, epilogue.activated, nullptr);
+            dx, nullptr, epilogue.activated, nullptr, dgamma_output, dbeta_output);
     } else if (epilogue.half_output) {
         BackwardApplyCoalesced<false, false, true><<<1 + (count - 1) / kThreads, kThreads, 0, stream>>>(
             dy, rows, cols, row_stride, gamma, inv_std, normalized, dgamma, dbeta,
-            dx, epilogue.half_output, nullptr, nullptr);
+            dx, epilogue.half_output, nullptr, nullptr, dgamma_output, dbeta_output);
     } else {
         BackwardApplyCoalesced<false, false, false><<<1 + (count - 1) / kThreads, kThreads, 0, stream>>>(
             dy, rows, cols, row_stride, gamma, inv_std, normalized, dgamma, dbeta,
-            dx, nullptr, nullptr, nullptr);
+            dx, nullptr, nullptr, nullptr, dgamma_output, dbeta_output);
     }
     return cudaPeekAtLastError() == cudaSuccess
         ? mgt::Status::kOk : mgt::Status::kCudaFailure;
+}
+
+mgt::Status LaunchLocalStridedBatchNormBackwardApply(
+    const float* dy, int rows, int cols, int row_stride,
+    const float* gamma, const float* inv_std, const float* normalized,
+    const float* dgamma, const float* dbeta, float* dx,
+    LocalBatchNormBackwardEpilogue epilogue, cudaStream_t stream) {
+    return LaunchBackwardApply(dy, rows, cols, row_stride, gamma, inv_std,
+        normalized, dgamma, dbeta, dx, nullptr, nullptr, epilogue, stream);
 }
 
 mgt::Status LaunchLocalStridedBatchNormBackward(
@@ -478,6 +499,19 @@ mgt::Status LaunchLocalStridedBatchNormBackward(
         Overlap(epilogue.activated, bytes, dbeta, stats_bytes / 2) ||
         Overlap(epilogue.residual_grad, bytes, stats_workspace, stats_bytes))
         return mgt::Status::kInvalidConfig;
+    const auto feature_bytes = static_cast<std::size_t>(cols) * sizeof(float);
+    const auto publish_output_safe = [&](const float* output, const float* other) {
+        if (Overlap(output, feature_bytes, other, feature_bytes)) return false;
+        for (const float* matrix : std::initializer_list<const float*>{
+                 dy, normalized, dx, epilogue.activated, epilogue.residual_grad})
+            if (Overlap(output, feature_bytes, matrix, bytes)) return false;
+        for (const float* feature : std::initializer_list<const float*>{gamma, inv_std})
+            if (Overlap(output, feature_bytes, feature, feature_bytes)) return false;
+        return !Overlap(output, feature_bytes, epilogue.half_output, half_bytes) &&
+               !Overlap(output, feature_bytes, stats_workspace, stats_bytes);
+    };
+    const bool publish = publish_output_safe(dgamma, dbeta) &&
+                         publish_output_safe(dbeta, dgamma);
     if (cudaMemsetAsync(stats_workspace, 0, stats_bytes, stream) != cudaSuccess)
         return mgt::Status::kCudaFailure;
     const dim3 block(kTileCols, kTileRows);
@@ -491,14 +525,15 @@ mgt::Status LaunchLocalStridedBatchNormBackward(
             dy, rows, cols, row_stride, normalized, stats_workspace,
             stats_workspace + cols, nullptr);
     }
-    const auto apply_status = LaunchLocalStridedBatchNormBackwardApply(
+    const auto apply_status = LaunchBackwardApply(
         dy, rows, cols, row_stride, gamma, inv_std, normalized,
-        stats_workspace, stats_workspace + cols, dx, epilogue, stream);
+        stats_workspace, stats_workspace + cols, dx,
+        publish ? dgamma : nullptr, publish ? dbeta : nullptr, epilogue, stream);
     if (apply_status != mgt::Status::kOk) return apply_status;
-    if (cudaMemcpyAsync(dgamma, stats_workspace, cols * sizeof(float),
-                        cudaMemcpyDeviceToDevice, stream) != cudaSuccess ||
-        cudaMemcpyAsync(dbeta, stats_workspace + cols, cols * sizeof(float),
-                        cudaMemcpyDeviceToDevice, stream) != cudaSuccess)
+    if (!publish && (cudaMemcpyAsync(dgamma, stats_workspace, feature_bytes,
+                                     cudaMemcpyDeviceToDevice, stream) != cudaSuccess ||
+                     cudaMemcpyAsync(dbeta, stats_workspace + cols, feature_bytes,
+                                     cudaMemcpyDeviceToDevice, stream) != cudaSuccess))
         return mgt::Status::kCudaFailure;
     return cudaPeekAtLastError() == cudaSuccess
         ? mgt::Status::kOk : mgt::Status::kCudaFailure;

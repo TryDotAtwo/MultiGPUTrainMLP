@@ -67,7 +67,8 @@ mgt::Status LaunchLocalStridedBatchNormBackwardApply(
     LocalBatchNormBackwardEpilogue epilogue, cudaStream_t stream);
 
 // Validate the optional mirror (including statistics/output-gradient ranges)
-// before any work is enqueued. Preserve the existing reduction and copy order.
+// before any work is enqueued. Reductions remain observable in stats_workspace.
+// The apply kernel publishes disjoint outputs; legacy aliases retain copies.
 // activated/residual_grad must also be disjoint from writable dgamma/dbeta and
 // stats_workspace; the mask is consumed before the in-place dx write.
 mgt::Status LaunchLocalStridedBatchNormBackward(

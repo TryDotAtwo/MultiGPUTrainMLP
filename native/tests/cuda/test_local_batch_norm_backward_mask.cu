@@ -400,6 +400,44 @@ void QuickCases() {
         h.Run(Fixture(17, 17, 2556, 2560), false, false, true, false, "wide-small-half-off");
     }
 }
+
+void OutputAliasFallback() {
+    constexpr int rows = 17, cols = 3, stride = 5;
+    Fixture f(rows, rows, cols, stride);
+    Device<float> dy(f.dy.size(), "alias dy"), normalized(f.normalized.size(), "alias normalized"),
+        gamma(cols, "alias gamma/dgamma"), inv(cols, "alias inverse/dbeta"),
+        dx_reference(f.dy.size(), "alias reference dx"), dx_alias(f.dy.size(), "alias output dx"),
+        dgamma(cols, "alias reference dgamma"), dbeta(cols, "alias reference dbeta"),
+        stats_reference(2 * cols, "alias reference stats"), stats_alias(2 * cols, "alias output stats");
+    Stream stream;
+    dy.Put(f.dy); normalized.Put(f.normalized); gamma.Put(f.gamma); inv.Put(f.inv);
+    dx_reference.Poison(); dgamma.Poison(); dbeta.Poison(); stats_reference.Poison();
+    auto status = mgt_cuda::LaunchLocalStridedBatchNormBackward(
+        dy.get(), rows, cols, stride, gamma.get(), inv.get(), normalized.get(),
+        dx_reference.get(), dgamma.get(), dbeta.get(), stats_reference.get(), stream.get());
+    stream.Sync();
+    Require(status == mgt::Status::kOk, "output-alias reference rejected");
+    const auto expected_dx = dx_reference.Read();
+    const auto expected_dgamma = dgamma.Read(), expected_dbeta = dbeta.Read();
+    const auto expected_stats = stats_reference.Read();
+
+    gamma.Put(f.gamma); inv.Put(f.inv); dx_alias.Poison(); stats_alias.Poison();
+    status = mgt_cuda::LaunchLocalStridedBatchNormBackward(
+        dy.get(), rows, cols, stride, gamma.get(), inv.get(), normalized.get(),
+        dx_alias.get(), gamma.get(), inv.get(), stats_alias.get(), stream.get());
+    stream.Sync();
+    Require(status == mgt::Status::kOk, "output aliases of gamma/inverse rejected");
+    Compare(dx_alias.Read(), expected_dx, expected_dx.size(), true, "output-alias fallback dx");
+    Compare(gamma.Read(), expected_dgamma, cols, true, "output-alias fallback dgamma");
+    Compare(inv.Read(), expected_dbeta, cols, true, "output-alias fallback dbeta");
+    Compare(stats_alias.Read(), expected_stats, expected_stats.size(), true,
+            "output-alias fallback stats");
+    SameBytes(dy.Read(), f.dy, "output-alias fallback dy immutable");
+    SameBytes(normalized.Read(), f.normalized, "output-alias fallback normalized immutable");
+    ++full_cases;
+    std::puts("PASS full  output aliases preserve post-apply copy semantics");
+}
+
 void AllCases() {
     QuickCases();
     {
@@ -500,6 +538,7 @@ int main(int argc, char** argv) {
     try {
         Require(std::fegetround() == FE_TONEAREST, "CPU RN oracle requires round-to-nearest");
         if (quick) QuickCases(); else AllCases();
+        OutputAliasFallback();
         InvalidCases();
         Require(!cleanup_failed, "CUDA cleanup failed");
         std::printf("PASS BN backward mask: apply=%u full=%u invalid=%u old-mask/FP32/RN-half "
