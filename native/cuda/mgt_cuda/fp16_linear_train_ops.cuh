@@ -34,6 +34,12 @@ struct LocalMlpFp16Context {
     // Tape: input activation, then each block input/fc1 activation pair.
     // Vector heads also need the final activation for forward and output dW.
     bool activation_has_final = false;
+    // Optional trainer-owned structural map for exact sparse input gradients.
+    // When the zero promise is true, bins absent from the map already contain
+    // zero and no operation in the context lifetime may mutate those bins.
+    const std::uint16_t* input_active_bins = nullptr;
+    std::uint32_t input_active_bin_count = 0;
+    bool input_inactive_gradients_are_persistent_zero = false;
 };
 
 mgt::Status LaunchFloatToHalf(

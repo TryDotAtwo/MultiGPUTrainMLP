@@ -108,5 +108,56 @@ __global__ void SparseInputGradGroupedRowsAdjacent2PackedU16(
     }
 }
 
+constexpr unsigned kSparseCompactActiveThreadsPerBin = 32;
+constexpr unsigned kSparseCompactActiveBinsPerBlock = 2;
+constexpr unsigned kSparseCompactActiveThreads =
+    kSparseCompactActiveThreadsPerBin * kSparseCompactActiveBinsPerBlock;
+
+// Compact trainer path: row lists are dense in active_index while output is
+// owner-written at the corresponding full-table bin. Impossible bins are not
+// touched; the trainer establishes and preserves their zero invariant.
+__global__ void SparseInputGradCompactActiveAdjacent2PackedU16(
+    CudaMlpShape s, const float* dz, unsigned rows,
+    const std::uint16_t* active_bins, unsigned active_count,
+    const unsigned* counts, const std::uint16_t* row_ids, float* grad) {
+    const unsigned bin_in_block = threadIdx.x >> 5;
+    const unsigned lane = threadIdx.x & 31U;
+    const unsigned active_index =
+        blockIdx.x * kSparseCompactActiveBinsPerBlock + bin_in_block;
+    const unsigned h0 = 2U *
+        (blockIdx.y * kSparseCompactActiveThreadsPerBin + lane);
+    if (active_index >= active_count || h0 >= s.hd1) return;
+    const unsigned bin = active_bins[active_index];
+    const std::uint64_t list_base =
+        static_cast<std::uint64_t>(active_index) * rows;
+    const std::uint64_t output_base =
+        static_cast<std::uint64_t>(bin) * s.hd1;
+    const unsigned count = counts[active_index];
+    float sum0 = 0.0f;
+    float sum1 = 0.0f;
+    if ((s.hd1 & 1U) == 0) {
+        for (unsigned i = 0; i < count; ++i) {
+            const std::uint64_t row_base =
+                static_cast<std::uint64_t>(row_ids[list_base + i]) * s.hd1;
+            const float2 value =
+                *reinterpret_cast<const float2*>(dz + row_base + h0);
+            sum0 = __fadd_rn(sum0, value.x);
+            sum1 = __fadd_rn(sum1, value.y);
+        }
+        *reinterpret_cast<float2*>(grad + output_base + h0) =
+            make_float2(sum0, sum1);
+    } else {
+        const bool has_h1 = h0 + 1U < s.hd1;
+        for (unsigned i = 0; i < count; ++i) {
+            const std::uint64_t row_base =
+                static_cast<std::uint64_t>(row_ids[list_base + i]) * s.hd1;
+            sum0 = __fadd_rn(sum0, dz[row_base + h0]);
+            if (has_h1) sum1 = __fadd_rn(sum1, dz[row_base + h0 + 1U]);
+        }
+        grad[output_base + h0] = sum0;
+        if (has_h1) grad[output_base + h0 + 1U] = sum1;
+    }
+}
+
 }  // namespace
 }  // namespace mgt_cuda::detail

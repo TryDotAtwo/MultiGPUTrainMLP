@@ -1,6 +1,7 @@
 #include "mgt_cuda/single_gpu_trainer.cuh"
 
 #include "mgt/batch_norm_training.hpp"
+#include "mgt/input_active_bins.hpp"
 #include "mgt_cuda/local_mlp_batch_norm.cuh"
 #include "mgt_cuda/random_walk_kernel.cuh"
 #include "mgt_cuda/single_gpu_train_graph.cuh"
@@ -21,6 +22,7 @@ struct ArenaLayout {
     std::uint64_t moves, target, states, labels, walk_meta, outputs, forward_workspace, loss;
     std::uint64_t output_dy, block_grad, fc1_grad, residual_grad, input_grad;
     std::uint64_t fp16_operand_a, fp16_operand_b;
+    std::uint64_t input_active_bins;
     std::uint64_t blas_workspace;
     std::uint64_t bytes, parameter_count, forward_workspace_floats;
 };
@@ -103,7 +105,9 @@ mgt::Status BuildLayout(const SingleGpuTrainerCreateInfo& info,
         !AddSlice(activation_tape_halfs,
                   sizeof(__half), &cursor, &out.fp16_operand_a) ||
         !AddSlice(static_cast<std::uint64_t>(info.capacity_rows) * shape.hd2,
-                  sizeof(__half), &cursor, &out.fp16_operand_b))
+                  sizeof(__half), &cursor, &out.fp16_operand_b) ||
+        !AddSlice(static_cast<std::uint64_t>(shape.state_len) * shape.state_value_pad,
+                  sizeof(std::uint16_t), &cursor, &out.input_active_bins))
         return mgt::Status::kCapacityExceeded;
     if (graph_mode && !AddSlice(detail::kSingleGpuBlasWorkspaceBytes, 1,
                                &cursor, &out.blas_workspace))
@@ -141,6 +145,7 @@ struct SingleGpuTrainer {
     mgt::PuzzleDefinition puzzle{};
     CudaMlpShape shape{};
     mgt::BatchNormTrainingPlan plan{};
+    std::vector<std::uint16_t> input_active_bins;
     ArenaLayout layout{};
     void* arena = nullptr;
     cudaStream_t stream = nullptr;
@@ -192,6 +197,13 @@ mgt::Status CreateSingleGpuTrainer(
     trainer->puzzle = *info.puzzle;
     trainer->info.puzzle = &trainer->puzzle;
     trainer->shape = Shape(info.contract);
+    status = mgt::BuildInputActiveBins(
+        trainer->puzzle, trainer->shape.state_len, trainer->shape.state_value_pad,
+        &trainer->input_active_bins);
+    if (status != mgt::Status::kOk) {
+        delete trainer;
+        return status;
+    }
     int device_count = 0;
     if (cudaGetDeviceCount(&device_count) != cudaSuccess ||
         info.device_id >= static_cast<std::uint32_t>(device_count)) {
@@ -227,6 +239,10 @@ mgt::Status PrepareSingleGpuTrainer(SingleGpuTrainer* trainer) {
                         cudaMemcpyHostToDevice, trainer->stream) != cudaSuccess ||
         cudaMemcpyAsync(At<mgt::TrainStateStorage>(trainer->arena, trainer->layout.target),
                         &trainer->puzzle.target, sizeof(trainer->puzzle.target),
+                        cudaMemcpyHostToDevice, trainer->stream) != cudaSuccess ||
+        cudaMemcpyAsync(At<std::uint16_t>(trainer->arena, trainer->layout.input_active_bins),
+                        trainer->input_active_bins.data(),
+                        trainer->input_active_bins.size() * sizeof(std::uint16_t),
                         cudaMemcpyHostToDevice, trainer->stream) != cudaSuccess)
         return FailTrainer(trainer);
     auto* affine = At<float>(trainer->arena, trainer->layout.affine);
@@ -308,6 +324,14 @@ mgt::Status EnqueueSingleGpuTrainStep(
             2ULL * trainer->shape.residual_blocks * trainer->info.capacity_rows *
                 trainer->shape.hd2,
         static_cast<std::uint64_t>(trainer->info.capacity_rows) * trainer->shape.hd2};
+    fp16.input_active_bins =
+        At<std::uint16_t>(arena, trainer->layout.input_active_bins);
+    fp16.input_active_bin_count =
+        static_cast<std::uint32_t>(trainer->input_active_bins.size());
+    fp16.input_inactive_gradients_are_persistent_zero =
+        trainer->input_active_bins.size() <
+        static_cast<std::uint64_t>(trainer->shape.state_len) *
+            trainer->shape.state_value_pad;
     status = LaunchLocalMlpBatchNormTrainStepFp16(
         trainer->shape, trainer->info.contract.logical_hd1,
         trainer->info.contract.logical_hd2,

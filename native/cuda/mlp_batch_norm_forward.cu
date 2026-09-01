@@ -256,9 +256,11 @@ __global__ void SparseInputGradCoalesced96(
 
 using detail::BuildGroupedInputRows;
 using detail::BuildGroupedInputRows16;
+using detail::BuildCompactActiveRows16;
 using detail::SparseInputGradGroupedRows;
 using detail::SparseInputGradGroupedRowsAdjacent2;
 using detail::SparseInputGradGroupedRowsAdjacent2PackedU16;
+using detail::SparseInputGradCompactActiveAdjacent2PackedU16;
 
 constexpr unsigned GROUPED_INPUT_MAX_POSITIONS = 4;
 
@@ -738,7 +740,27 @@ mgt::Status LaunchMlpBatchNormInputBackward(
             (reinterpret_cast<std::uintptr_t>(weight_grad) & (alignof(float2) - 1U)) == 0;
         const bool packed_u16 = adjacent2 &&
             input_launch.grouped_row_index_bytes == sizeof(std::uint16_t) && lr <= 65535U;
-        const std::uint64_t scratch_bytes = bins * sizeof(unsigned) + index_count *
+        const std::uint16_t* input_active_bins = nullptr;
+        std::uint32_t input_active_bin_count = 0;
+        bool inactive_gradients_are_persistent_zero = false;
+#ifdef MGT_LOCAL_MLP_IMPLEMENTATION
+        if (const auto* local_fp16 = LocalFp16(ctx)) {
+            input_active_bins = local_fp16->input_active_bins;
+            input_active_bin_count = local_fp16->input_active_bin_count;
+            inactive_gradients_are_persistent_zero =
+                local_fp16->input_inactive_gradients_are_persistent_zero;
+        }
+#endif
+        const bool compact_active = packed_u16 &&
+            inactive_gradients_are_persistent_zero && input_active_bins &&
+            input_active_bin_count > 0 && input_active_bin_count < bins;
+        const std::uint64_t scratch_bins = compact_active
+            ? input_active_bin_count : bins;
+        const std::uint64_t scratch_index_count = compact_active
+            ? static_cast<std::uint64_t>(lr) * input_active_bin_count
+            : index_count;
+        const std::uint64_t scratch_bytes = scratch_bins * sizeof(unsigned) +
+            scratch_index_count *
             (packed_u16 ? sizeof(std::uint16_t) : sizeof(unsigned));
         if(scratch_bytes>p.workspace_floats*sizeof(float)){
             if(cudaMemsetAsync(weight_grad,0,parameter_count*sizeof(float),st)!=cudaSuccess)return mgt::Status::kCudaFailure;
@@ -747,9 +769,28 @@ mgt::Status LaunchMlpBatchNormInputBackward(
             SparseInputGrad<<<grid,INPUT_T,shared,st>>>(s,states,input_grad,lr,weight_grad);
         }else{
             auto*counts=reinterpret_cast<unsigned*>(bn);
-            const unsigned builder_blocks=static_cast<unsigned>(
-                (bins+detail::kGroupedInputRowsWarps-1U)/detail::kGroupedInputRowsWarps);
-            if (packed_u16) {
+            if (compact_active) {
+                const unsigned active_count = input_active_bin_count;
+                auto* row_ids = reinterpret_cast<std::uint16_t*>(counts + active_count);
+                const unsigned builder_blocks =
+                    (active_count + detail::kCompactActiveRowsWarps - 1U) /
+                    detail::kCompactActiveRowsWarps;
+                BuildCompactActiveRows16
+                    <<<builder_blocks,detail::kCompactActiveRowsThreads,0,st>>>(
+                        s,states,lr,input_active_bins,active_count,
+                        counts,row_ids);
+                const dim3 grid(
+                    (active_count + detail::kSparseCompactActiveBinsPerBlock - 1U) /
+                        detail::kSparseCompactActiveBinsPerBlock,
+                    (s.hd1 / 2U + detail::kSparseCompactActiveThreadsPerBin - 1U) /
+                        detail::kSparseCompactActiveThreadsPerBin);
+                SparseInputGradCompactActiveAdjacent2PackedU16
+                    <<<grid,detail::kSparseCompactActiveThreads,0,st>>>(
+                        s,input_grad,lr,input_active_bins,active_count,
+                        counts,row_ids,weight_grad);
+            } else if (packed_u16) {
+                const unsigned builder_blocks=static_cast<unsigned>(
+                    (bins+detail::kGroupedInputRowsWarps-1U)/detail::kGroupedInputRowsWarps);
                 auto*row_ids=reinterpret_cast<std::uint16_t*>(counts+bins);
                 BuildGroupedInputRows16<<<builder_blocks,detail::kGroupedInputRowsThreads,0,st>>>(
                     s,states,lr,counts,row_ids);
@@ -762,6 +803,8 @@ mgt::Status LaunchMlpBatchNormInputBackward(
                     <<<grid,detail::kSparseAdjacent2PackedThreads,0,st>>>(
                         s,input_grad,lr,counts,row_ids,weight_grad);
             } else {
+                const unsigned builder_blocks=static_cast<unsigned>(
+                    (bins+detail::kGroupedInputRowsWarps-1U)/detail::kGroupedInputRowsWarps);
                 auto*row_ids=counts+bins;
                 BuildGroupedInputRows<<<builder_blocks,detail::kGroupedInputRowsThreads,0,st>>>(
                     s,states,lr,counts,row_ids);

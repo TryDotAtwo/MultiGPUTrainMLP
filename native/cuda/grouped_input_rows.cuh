@@ -7,6 +7,8 @@ namespace {
 
 constexpr unsigned kGroupedInputRowsThreads = 256;
 constexpr unsigned kGroupedInputRowsWarps = kGroupedInputRowsThreads / 32;
+constexpr unsigned kCompactActiveRowsThreads = 128;
+constexpr unsigned kCompactActiveRowsWarps = kCompactActiveRowsThreads / 32;
 
 template <class RowIndex>
 __device__ __forceinline__ void BuildGroupedInputRowsImpl(
@@ -53,6 +55,35 @@ __global__ void BuildGroupedInputRows16(
     CudaMlpShape s, const mgt::TrainStateStorage* states, unsigned rows,
     unsigned* counts, std::uint16_t* row_ids) {
     BuildGroupedInputRowsImpl(s, states, rows, counts, row_ids);
+}
+
+// Trainer-only compact layout. active_bins is a sorted structural map and the
+// row-list stride is rows, indexed by active-map position rather than full bin.
+// Four whole warps per CTA was the measured SM86 optimum for p888.
+__global__ void BuildCompactActiveRows16(
+    CudaMlpShape s, const mgt::TrainStateStorage* states, unsigned rows,
+    const std::uint16_t* active_bins, unsigned active_count,
+    unsigned* counts, std::uint16_t* row_ids) {
+    const unsigned lane = threadIdx.x & 31U;
+    const unsigned active_index =
+        blockIdx.x * kCompactActiveRowsWarps + (threadIdx.x >> 5);
+    if (active_index >= active_count) return;
+    const unsigned bin = active_bins[active_index];
+    const unsigned position = bin / s.state_value_pad;
+    const unsigned value = bin - position * s.state_value_pad;
+    const unsigned lower_lanes = (1U << lane) - 1U;
+    unsigned count = 0;
+    for (unsigned base = 0; base < rows; base += 32) {
+        const unsigned row = base + lane;
+        const bool match = row < rows && states[row].v[position] == value;
+        const unsigned mask = __ballot_sync(0xffffffffU, match);
+        if (match) {
+            row_ids[static_cast<std::uint64_t>(active_index) * rows + count +
+                    __popc(mask & lower_lanes)] = static_cast<std::uint16_t>(row);
+        }
+        count += __popc(mask);
+    }
+    if (lane == 0) counts[active_index] = count;
 }
 
 }  // namespace

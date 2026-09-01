@@ -23,6 +23,7 @@ add_library(mgt_core STATIC
     src/single_gpu_contract.cpp
     src/distributed_batch.cpp
     src/puzzle_io.cpp
+    src/input_active_bins.cpp
     src/benchmark_snapshot.cpp
     src/a100_bf16_policy.cpp
     src/a100_bf16_algorithm_table.cpp
@@ -59,6 +60,10 @@ add_executable(test_puzzle_io tests/test_puzzle_io.cpp)
 target_link_libraries(test_puzzle_io PRIVATE mgt_core)
 add_test(NAME puzzle_io COMMAND test_puzzle_io)
 set_tests_properties(puzzle_io PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/..")
+add_executable(test_input_active_bins tests/test_input_active_bins.cpp)
+target_link_libraries(test_input_active_bins PRIVATE mgt_core)
+add_test(NAME input_active_bins COMMAND test_input_active_bins)
+set_tests_properties(input_active_bins PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/..")
 add_executable(test_model_layout tests/test_model_layout.cpp)
 target_link_libraries(test_model_layout PRIVATE mgt_core)
 add_test(NAME model_layout COMMAND test_model_layout)
@@ -271,6 +276,11 @@ if(MGT_ENABLE_CUDA)
         PRIVATE MGT_TEST_GROUPED_INPUT_ROWS_U16=1)
     target_link_libraries(test_grouped_input_rows_u16 PRIVATE mgt_cuda)
     add_test(NAME grouped_input_rows_u16 COMMAND test_grouped_input_rows_u16)
+    add_executable(test_sparse_input_grad_compact_active
+        tests/cuda/test_sparse_input_grad_compact_active.cu)
+    target_link_libraries(test_sparse_input_grad_compact_active PRIVATE mgt_cuda)
+    add_test(NAME sparse_input_grad_compact_active
+        COMMAND test_sparse_input_grad_compact_active)
     add_executable(test_column_sum_tiled tests/cuda/test_column_sum_tiled.cu)
     target_link_libraries(test_column_sum_tiled PRIVATE mgt_cuda)
     add_test(NAME column_sum_tiled COMMAND test_column_sum_tiled)

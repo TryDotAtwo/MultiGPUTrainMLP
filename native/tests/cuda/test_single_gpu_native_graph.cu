@@ -13,6 +13,43 @@ struct NativeOwner {
     NativeOwner& operator=(const NativeOwner&)=delete;
 };
 
+void CheckStructuralInputMap(SingleGpuTrainer* trainer) {
+    const auto bins = static_cast<std::uint64_t>(trainer->shape.state_len) *
+                      trainer->shape.state_value_pad;
+    Check(trainer->input_active_bins.size() == trainer->shape.state_len * 24U,
+          "production structural input-map cardinality");
+    Check(trainer->input_active_bins.size() < bins &&
+          trainer->layout.input_active_bins % 256U == 0,
+          "compact input-map layout/gating");
+    std::vector<std::uint16_t> device(trainer->input_active_bins.size());
+    Cuda(cudaMemcpy(device.data(),
+                    At<std::uint16_t>(trainer->arena,
+                                      trainer->layout.input_active_bins),
+                    device.size() * sizeof(std::uint16_t),
+                    cudaMemcpyDeviceToHost), "input active-map download");
+    Check(device == trainer->input_active_bins,
+          "device structural input-map differs from host owner");
+}
+
+void CheckImpossibleInputGradientsStayZero(SingleGpuTrainer* trainer) {
+    const std::uint64_t bins =
+        static_cast<std::uint64_t>(trainer->shape.state_len) *
+        trainer->shape.state_value_pad;
+    std::vector<bool> active(bins, false);
+    for (std::uint16_t bin : trainer->input_active_bins) active[bin] = true;
+    std::vector<std::uint32_t> bits(bins * trainer->shape.hd1);
+    Cuda(cudaMemcpy(bits.data(),
+                    At<float>(trainer->arena, trainer->layout.weight_grad),
+                    bits.size() * sizeof(std::uint32_t), cudaMemcpyDeviceToHost),
+         "input gradient download");
+    for (std::uint64_t bin = 0; bin < bins; ++bin) {
+        if (active[bin]) continue;
+        for (unsigned h = 0; h < trainer->shape.hd1; ++h)
+            Check(bits[bin * trainer->shape.hd1 + h] == 0,
+                  "impossible input gradient lost persistent-zero invariant");
+    }
+}
+
 void Run(unsigned rows, unsigned tail) {
     const auto puzzle=Puzzle();
     SingleGpuTrainerCreateInfo eager{};
@@ -34,6 +71,8 @@ void Run(unsigned rows, unsigned tail) {
     Check(LaunchSingleGpuTrainStep(a.trainer,{rows,1,0,0},&ticket)==mgt::Status::kInvalidConfig,"unprepared graph accepted");
     Check(PrepareSingleGpuTrainer(a.trainer)==mgt::Status::kOk,"graph prepare");
     Check(PrepareSingleGpuTrainer(b.trainer)==mgt::Status::kOk,"eager prepare");
+    CheckStructuralInputMap(a.trainer);
+    CheckStructuralInputMap(b.trainer);
     Check(a.trainer->sequence==0&&!a.trainer->in_flight,"capture advanced training state");
     Check(a.trainer->graph.source&&a.trainer->graph.executable&&
         a.trainer->graph.rows==rows&&!b.trainer->graph.source&&!b.trainer->graph.executable,
@@ -54,6 +93,10 @@ void Run(unsigned rows, unsigned tail) {
         Check(LaunchSingleGpuTrainStep(b.trainer,request,&ticket)==mgt::Status::kOk,"eager enqueue");
         Cuda(cudaEventSynchronize(ticket.completion_event),"eager completion");
         Compare(a.trainer,b.trainer,rows<=256);
+        if(request.optimizer_step==1) {
+            CheckImpossibleInputGradientsStayZero(a.trainer);
+            CheckImpossibleInputGradientsStayZero(b.trainer);
+        }
         SingleGpuTrainerMetrics metrics{};
         Check(ReadSingleGpuMetrics(a.trainer,&metrics)==mgt::Status::kOk&&
             metrics.optimizer_step==request.optimizer_step&&std::isfinite(metrics.loss),"graph metrics");
@@ -78,6 +121,8 @@ void Run(unsigned rows, unsigned tail) {
     Cuda(cudaStreamSynchronize(a.trainer->stream),"queued graph completion");
     Cuda(cudaStreamSynchronize(b.trainer->stream),"queued eager completion");
     Compare(a.trainer,b.trainer,rows<=256);
+    CheckImpossibleInputGradientsStayZero(a.trainer);
+    CheckImpossibleInputGradientsStayZero(b.trainer);
     Check(SingleGpuTrainerAllocationCountForTest()==allocations,"arena allocation during steps");
     std::printf("PASS native queued full/tail rows=%u\n",rows);
     // Force an internal graph invariant failure before any CUDA call. The
