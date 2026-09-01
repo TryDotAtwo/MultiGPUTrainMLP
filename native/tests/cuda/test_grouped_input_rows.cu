@@ -18,7 +18,14 @@ constexpr unsigned kThreads = 256;
 constexpr unsigned kBinsPerBlock = 8;
 constexpr std::size_t kGuardElements = 256;
 constexpr unsigned char kGuardByte = 0xa5;
-constexpr unsigned kUnusedRow = std::numeric_limits<unsigned>::max();
+#ifdef MGT_TEST_GROUPED_INPUT_ROWS_U16
+using RowIndex = std::uint16_t;
+constexpr const char* kCandidateName = "u16";
+#else
+using RowIndex = unsigned;
+constexpr const char* kCandidateName = "u32";
+#endif
+constexpr RowIndex kUnusedRow = std::numeric_limits<RowIndex>::max();
 bool cleanup_failed = false;
 
 void Require(bool condition, const std::string& message) {
@@ -110,7 +117,7 @@ struct Fixture {
 
 struct Expected {
     std::vector<unsigned> counts;
-    std::vector<unsigned> row_ids;
+    std::vector<RowIndex> row_ids;
 };
 
 Fixture MakeFixture(const mgt_cuda::CudaMlpShape& shape, unsigned capacity_rows,
@@ -153,27 +160,29 @@ Fixture MakeFixture(const mgt_cuda::CudaMlpShape& shape, unsigned capacity_rows,
 // Independent CPU oracle visits each input row once and appends it to the
 // corresponding position/value list. It uses neither GPU ballot/prefix logic
 // nor production helpers. The physical output stride is the current row count,
-// not the allocation capacity, and every unused element remains UINT_MAX.
+// not the allocation capacity, and every unused element remains RowIndex max.
 Expected CpuOracle(const mgt_cuda::CudaMlpShape& shape, const Fixture& f) {
     const std::size_t bins = static_cast<std::size_t>(shape.state_len) * shape.state_value_pad;
     Expected expected{std::vector<unsigned>(bins, 0),
-                      std::vector<unsigned>(bins * f.states.size(), kUnusedRow)};
+                      std::vector<RowIndex>(bins * f.states.size(), kUnusedRow)};
     for (unsigned row = 0; row < f.rows; ++row) {
         for (unsigned position = 0; position < shape.state_len; ++position) {
             const unsigned value = f.states[row].v[position];
             if (value >= shape.state_value_pad) continue;
             const std::size_t bin = static_cast<std::size_t>(position) * shape.state_value_pad + value;
-            expected.row_ids[bin * f.rows + expected.counts[bin]++] = row;
+            expected.row_ids[bin * f.rows + expected.counts[bin]++] =
+                static_cast<RowIndex>(row);
         }
     }
     return expected;
 }
 
-void Equal(const std::vector<unsigned>& actual, const std::vector<unsigned>& expected,
+template <class T>
+void Equal(const std::vector<T>& actual, const std::vector<T>& expected,
            unsigned rows, const std::string& context) {
     Require(actual.size() == expected.size(), context + " output size mismatch");
     if (actual.empty() ||
-        std::memcmp(actual.data(), expected.data(), actual.size() * sizeof(unsigned)) == 0)
+        std::memcmp(actual.data(), expected.data(), actual.size() * sizeof(T)) == 0)
         return;
     for (std::size_t i = 0; i < actual.size(); ++i) {
         if (actual[i] == expected[i]) continue;
@@ -181,7 +190,7 @@ void Equal(const std::vector<unsigned>& actual, const std::vector<unsigned>& exp
         std::snprintf(detail, sizeof(detail),
                       " index=%zu bin=%zu entry=%zu got=%u expected=%u rows=%u",
                       i, rows == 0 ? 0 : i / rows, rows == 0 ? i : i % rows,
-                      actual[i], expected[i], rows);
+                      static_cast<unsigned>(actual[i]), static_cast<unsigned>(expected[i]), rows);
         throw std::runtime_error(context + detail);
     }
 }
@@ -215,7 +224,11 @@ public:
         // Regression contract: eight whole warps per CTA, one warp per bin,
         // including a partially occupied last CTA and a partial final row tile.
         const unsigned blocks = (bins_ + kBinsPerBlock - 1) / kBinsPerBlock;
+#ifdef MGT_TEST_GROUPED_INPUT_ROWS_U16
+        mgt_cuda::detail::BuildGroupedInputRows16<<<blocks, kThreads>>>(
+#else
         mgt_cuda::detail::BuildGroupedInputRows<<<blocks, kThreads>>>(
+#endif
             shape_, states_.get(), f.rows, counts_.get(), row_ids_.get());
         Cuda(cudaGetLastError(), f.name + " production launch");
         Cuda(cudaDeviceSynchronize(), f.name + " synchronize");
@@ -251,7 +264,7 @@ private:
     unsigned bins_;
     DeviceBuffer<mgt::TrainStateStorage> states_;
     DeviceBuffer<unsigned> counts_;
-    DeviceBuffer<unsigned> row_ids_;
+    DeviceBuffer<RowIndex> row_ids_;
 };
 
 void RunQuickCases() {
@@ -336,8 +349,9 @@ int main(int argc, char** argv) {
         Cuda(cudaSetDevice(0), "cudaSetDevice");
         cudaDeviceProp properties{};
         Cuda(cudaGetDeviceProperties(&properties, 0), "cudaGetDeviceProperties");
-        std::printf("BuildGroupedInputRows device=%s sm=%d%d mode=%s\n",
-                    properties.name, properties.major, properties.minor, quick ? "quick" : "all");
+        std::printf("BuildGroupedInputRows device=%s sm=%d%d mode=%s index=%s\n",
+                    properties.name, properties.major, properties.minor,
+                    quick ? "quick" : "all", kCandidateName);
         RunAllCases(quick);
         Require(!cleanup_failed, "CUDA allocation cleanup failed");
         std::printf("PASS stable grouped input rows: exact counts, ordered IDs, tails, input bytes and canaries\n");

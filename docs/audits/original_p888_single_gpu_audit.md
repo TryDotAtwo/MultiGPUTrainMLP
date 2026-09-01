@@ -7,10 +7,10 @@ semantic and numerical gates before it are green.
 
 The A0-A12 entries below retain earlier-stage measurements; their old full-step
 timings are not the current performance snapshot. The newest original p888/SM86
-batch4096 graph candidate has two retained ABBAAB medians of21.0515 and
-21.0526ms/step, arena744001024 bytes. Its matched prior-candidate medians are
-21.1081 and21.1062ms; both series are positive. The descriptive median of all
-six candidate run means is21.05205ms, about194.6k samples/s and+0.2617%
+batch4096 graph candidate has two retained ABBAAB medians of20.9811 and
+20.9760ms/step, arena744001024 bytes. Its matched prior-candidate medians are
+21.0617 and21.0511ms; both series are positive. The descriptive median of all
+six candidate run means is20.97855ms, about195.25k samples/s and+0.3711%
 throughput versus the prior candidate. Active clocks were observed, not locked.
 
 - [Column-sum tiling](2026-08-31-column-sum-tiling.md): same256-leaf FP32 tree,
@@ -64,6 +64,11 @@ throughput versus the prior candidate. Active clocks were observed, not locked.
   work while preserving two independent serial FP32 sums. Fresh Nsight measures
   the sparse consumer3.7392 ->3.6627ms; two ABBAAB series measure+0.269% and
   +0.255% throughput. T4/A100 policy is unchanged.
+- [Packed-u16 sparse row lists](2026-09-01-sparse-gradient-u16-packed.md):
+  SM86 stores exact ascending row IDs as u16 and packs four bins per CTA while
+  preserving each feature's FP32 sum. Fresh Nsight measures the complete sparse
+  stage3.9053 ->3.8339ms; two ABBAAB series measure+0.384% and+0.358%
+  throughput. T4/A100 policy is unchanged.
 
 No new precision/model approximation. CUDA exact oracles, targeted full-step
 regressions, sanitizer checks and Rust FFI passed. Earlier checkpoints also had
@@ -227,6 +232,14 @@ each feature's FP32 accumulation order. The production sparse consumer measures
 3.7392 ->3.6627ms; the graph remains363 kernels +71 memsets. T4/A100 automatic
 selection remains unchanged.
 
+The [packed-u16 row-list follow-up](2026-09-01-sparse-gradient-u16-packed.md)
+halves p888 row-list scratch and packs four independent bins per CTA, while
+keeping ascending row order and each feature's exact serial FP32 sum. The full
+u16 builder plus packed consumer measures3.9053 ->3.8339ms in fresh Nsight;
+two independent ABBAAB series are positive. The path is guarded by SM86,
+alignment, even width, and at most65535 live rows; all other cases retain the
+u32 fallback. T4/A100 automatic selection remains unchanged.
+
 ## A9. Optimizer and mirrors
 
 - Adam semantics, bias correction, step numbering, FP32 master/m/v, FP16 mirror,
@@ -255,7 +268,10 @@ selection remains unchanged.
   backward partial+apply sum by0.0332ms; its full-step effect also remains below
   run variance. Adjacent-feature sparse-gradient ownership keeps the same
   topology; two independent ABBAAB series reduce the full step by0.0566 and
-  0.0536ms, while fresh Nsight reduces the sparse family by0.0765ms.
+  0.0536ms, while fresh Nsight reduces the sparse family by0.0765ms. Packed u16
+  row lists also keep the topology; two further ABBAAB series reduce the median
+  step by0.0806 and0.0751ms, while fresh Nsight reduces builder plus consumer
+  by0.0714ms.
 
 ## A11. Training behavior
 
@@ -271,9 +287,9 @@ selection remains unchanged.
   measurement window, Nsight report, and NCU counters.
 - Current SM86 snapshot: 53.558 GFLOP of physically issued dense work and
   51.074 GFLOP of logical/useful dense work per train step. At the descriptive
-  pooled candidate median21.05205ms this is2.544 issued and2.426 useful end-to-end
+  pooled candidate median20.97855ms this is2.553 issued and2.435 useful end-to-end
   TFLOP/s, plus non-dense work not
   represented by those FLOP counts. GEMM-only throughput remains about9.12TFLOP/s.
   At the observed 780 MHz, the 40-SM FP16 Tensor Core envelope is about 15.97
-  TFLOP/s: GEMMs reach roughly57%, while the graph full step reaches roughly15.9%
+  TFLOP/s: GEMMs reach roughly57%, while the graph full step reaches roughly16.0%
   because sparse gather, BN, conversions, optimizer and scheduling are not GEMMs.

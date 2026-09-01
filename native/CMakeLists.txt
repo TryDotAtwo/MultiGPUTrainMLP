@@ -245,6 +245,13 @@ if(MGT_ENABLE_CUDA)
     target_link_libraries(test_sparse_input_grad_grouped_rows_adjacent2 PRIVATE mgt_cuda)
     add_test(NAME sparse_input_grad_grouped_rows_adjacent2
         COMMAND test_sparse_input_grad_grouped_rows_adjacent2)
+    add_executable(test_sparse_input_grad_grouped_rows_packed_u16
+        tests/cuda/test_sparse_input_grad_grouped_rows.cu)
+    target_compile_definitions(test_sparse_input_grad_grouped_rows_packed_u16
+        PRIVATE MGT_TEST_SPARSE_PACKED_U16=1)
+    target_link_libraries(test_sparse_input_grad_grouped_rows_packed_u16 PRIVATE mgt_cuda)
+    add_test(NAME sparse_input_grad_grouped_rows_packed_u16
+        COMMAND test_sparse_input_grad_grouped_rows_packed_u16)
     foreach(feature_tile IN ITEMS 32 64)
         add_executable(test_sparse_input_grad_grouped_rows_warp${feature_tile}
             tests/cuda/test_sparse_input_grad_grouped_rows.cu)
@@ -258,6 +265,12 @@ if(MGT_ENABLE_CUDA)
         tests/cuda/test_grouped_input_rows.cu)
     target_link_libraries(test_grouped_input_rows PRIVATE mgt_cuda)
     add_test(NAME grouped_input_rows COMMAND test_grouped_input_rows)
+    add_executable(test_grouped_input_rows_u16
+        tests/cuda/test_grouped_input_rows.cu)
+    target_compile_definitions(test_grouped_input_rows_u16
+        PRIVATE MGT_TEST_GROUPED_INPUT_ROWS_U16=1)
+    target_link_libraries(test_grouped_input_rows_u16 PRIVATE mgt_cuda)
+    add_test(NAME grouped_input_rows_u16 COMMAND test_grouped_input_rows_u16)
     add_executable(test_column_sum_tiled tests/cuda/test_column_sum_tiled.cu)
     target_link_libraries(test_column_sum_tiled PRIVATE mgt_cuda)
     add_test(NAME column_sum_tiled COMMAND test_column_sum_tiled)

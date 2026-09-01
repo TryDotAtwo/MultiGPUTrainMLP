@@ -8,13 +8,10 @@ namespace {
 constexpr unsigned kGroupedInputRowsThreads = 256;
 constexpr unsigned kGroupedInputRowsWarps = kGroupedInputRowsThreads / 32;
 
-// Private builder shared with the isolated exact grouping regression.
-// Launch a 1D grid of ceil(bins / kGroupedInputRowsWarps) CTAs, each with
-// kGroupedInputRowsThreads threads. Each whole warp owns one bin and emits
-// ascending row IDs; the consumer can keep its original FP32 addition order.
-__global__ void BuildGroupedInputRows(
+template <class RowIndex>
+__device__ __forceinline__ void BuildGroupedInputRowsImpl(
     CudaMlpShape s, const mgt::TrainStateStorage* states, unsigned rows,
-    unsigned* counts, unsigned* row_ids) {
+    unsigned* counts, RowIndex* row_ids) {
     const unsigned lane = threadIdx.x & 31U;
     const std::uint64_t bin =
         static_cast<std::uint64_t>(blockIdx.x) * kGroupedInputRowsWarps +
@@ -36,10 +33,26 @@ __global__ void BuildGroupedInputRows(
         const unsigned mask = __ballot_sync(0xffffffffU, match);
         if (match)
             row_ids[bin * rows + count + __popc(mask & lower_lanes)] =
-                static_cast<unsigned>(row);
+                static_cast<RowIndex>(row);
         count += __popc(mask);
     }
     if (lane == 0) counts[bin] = count;
+}
+
+// Private builders shared with isolated exact grouping regressions. Launch a
+// 1D grid of ceil(bins / kGroupedInputRowsWarps) CTAs, each with
+// kGroupedInputRowsThreads threads. Each whole warp owns one bin and emits
+// ascending row IDs; the consumer keeps its original FP32 addition order.
+__global__ void BuildGroupedInputRows(
+    CudaMlpShape s, const mgt::TrainStateStorage* states, unsigned rows,
+    unsigned* counts, unsigned* row_ids) {
+    BuildGroupedInputRowsImpl(s, states, rows, counts, row_ids);
+}
+
+__global__ void BuildGroupedInputRows16(
+    CudaMlpShape s, const mgt::TrainStateStorage* states, unsigned rows,
+    unsigned* counts, std::uint16_t* row_ids) {
+    BuildGroupedInputRowsImpl(s, states, rows, counts, row_ids);
 }
 
 }  // namespace

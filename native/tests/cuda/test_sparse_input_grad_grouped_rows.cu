@@ -28,6 +28,10 @@ constexpr const char* kCandidateName = "warp-bins";
 constexpr unsigned kFeatureTile = 128;
 constexpr unsigned kCandidateThreads = 64;
 constexpr const char* kCandidateName = "adjacent2";
+#elif defined(MGT_TEST_SPARSE_PACKED_U16)
+constexpr unsigned kFeatureTile = 64;
+constexpr unsigned kCandidateThreads = 128;
+constexpr const char* kCandidateName = "packed-u16";
 #elif defined(MGT_TEST_SPARSE_COLS2)
 constexpr unsigned kFeatureTile = 256;
 constexpr unsigned kBinsPerBlock = 1;
@@ -277,6 +281,9 @@ public:
           dz_(static_cast<std::size_t>(capacity_rows) * shape.hd1, "dz", tightly_sized),
           counts_(bins_, "counts", tightly_sized),
           row_ids_(static_cast<std::size_t>(bins_) * capacity_rows, "row_ids", tightly_sized),
+#ifdef MGT_TEST_SPARSE_PACKED_U16
+          row_ids16_(static_cast<std::size_t>(bins_) * capacity_rows, "row_ids16", tightly_sized),
+#endif
           actual_(static_cast<std::size_t>(bins_) * shape.hd1, "actual gradient", tightly_sized),
           expected_(static_cast<std::size_t>(bins_) * shape.hd1, "oracle gradient", tightly_sized) {}
 
@@ -296,6 +303,18 @@ public:
         dz_.Put(f.dz);
         counts_.Put(f.counts);
         row_ids_.Put(f.row_ids);
+#ifdef MGT_TEST_SPARSE_PACKED_U16
+        std::vector<std::uint16_t> row_ids16(f.row_ids.size());
+        for (std::size_t i = 0; i < f.row_ids.size(); ++i) {
+            Require(f.row_ids[i] == std::numeric_limits<unsigned>::max() ||
+                        f.row_ids[i] <= std::numeric_limits<std::uint16_t>::max(),
+                    f.name + " row ID exceeds uint16_t");
+            row_ids16[i] = f.row_ids[i] == std::numeric_limits<unsigned>::max()
+                ? std::numeric_limits<std::uint16_t>::max()
+                : static_cast<std::uint16_t>(f.row_ids[i]);
+        }
+        row_ids16_.Put(row_ids16);
+#endif
         // Both finite and NaN output poison are used by fixtures. Every physical
         // feature, including empty bins and zero-padding, must be overwritten.
         actual_.FillBytes(f.output_poison);
@@ -316,6 +335,9 @@ public:
 #elif defined(MGT_TEST_SPARSE_ADJACENT2)
         mgt_cuda::detail::SparseInputGradGroupedRowsAdjacent2
             <<<dim3(bins_, h_tiles), kCandidateThreads>>>(
+#elif defined(MGT_TEST_SPARSE_PACKED_U16)
+        mgt_cuda::detail::SparseInputGradGroupedRowsAdjacent2PackedU16
+            <<<dim3((bins_ + 3U) / 4U, h_tiles), kCandidateThreads>>>(
 #elif defined(MGT_TEST_SPARSE_COLS2)
         // The declaration intentionally exists only in the future candidate
         // build. The existing target does not require the X2 kernel to exist.
@@ -323,13 +345,22 @@ public:
 #else
         mgt_cuda::detail::SparseInputGradGroupedRows<<<dim3(bins_, h_tiles), kCandidateThreads>>>(
 #endif
-            shape_, dz_.get(), f.rows, counts_.get(), row_ids_.get(), actual_.get());
+            shape_, dz_.get(), f.rows, counts_.get(),
+#ifdef MGT_TEST_SPARSE_PACKED_U16
+            row_ids16_.get(),
+#else
+            row_ids_.get(),
+#endif
+            actual_.get());
         Cuda(cudaGetLastError(), f.name + " production launch");
         Cuda(cudaDeviceSynchronize(), f.name + " synchronize");
 
         dz_.RequireUnchanged(f.dz);
         counts_.RequireUnchanged(f.counts);
         row_ids_.RequireUnchanged(f.row_ids);
+#ifdef MGT_TEST_SPARSE_PACKED_U16
+        row_ids16_.RequireUnchanged(row_ids16);
+#endif
         const auto actual = actual_.Read();
         const auto expected = expected_.Read();
         Equal(actual, expected, shape_.hd1, f.name + " old-grid bitwise comparison");
@@ -358,6 +389,9 @@ private:
     DeviceBuffer<float> dz_;
     DeviceBuffer<unsigned> counts_;
     DeviceBuffer<unsigned> row_ids_;
+#ifdef MGT_TEST_SPARSE_PACKED_U16
+    DeviceBuffer<std::uint16_t> row_ids16_;
+#endif
     DeviceBuffer<float> actual_;
     DeviceBuffer<float> expected_;
 };
