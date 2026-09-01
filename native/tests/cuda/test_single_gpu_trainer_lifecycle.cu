@@ -35,6 +35,12 @@ int main() {
     if (mgt_cuda::QuerySingleGpuTrainerBytes(bad, &bytes) != mgt::Status::kInvalidConfig)
         return 3;
     bad = info;
+    bad.input_gradient_precision =
+        static_cast<mgt_cuda::SingleGpuInputGradientPrecision>(99);
+    if (mgt_cuda::QuerySingleGpuTrainerBytes(bad, &bytes) !=
+        mgt::Status::kInvalidConfig)
+        return 3;
+    bad = info;
     bad.device_id = std::numeric_limits<std::uint32_t>::max();
     mgt_cuda::SingleGpuTrainer* invalid = nullptr;
     if (mgt_cuda::CreateSingleGpuTrainer(bad, &invalid) != mgt::Status::kCudaFailure || invalid)

@@ -19,15 +19,18 @@ struct TrainerOwner {
 }
 
 int main(int argc, char** argv) {
-    if (argc != 6 && argc != 7) {
-        std::cerr << "usage: batch warmup steps group_json target_bin [eager|graph]\n";
+    if (argc < 6 || argc > 8) {
+        std::cerr << "usage: batch warmup steps group_json target_bin "
+                     "[eager|graph] [fp32|fp16]\n";
         return 2;
     }
     const auto batch = static_cast<std::uint32_t>(std::strtoul(argv[1], nullptr, 10));
     const auto warmup = static_cast<std::uint32_t>(std::strtoul(argv[2], nullptr, 10));
     const auto steps = static_cast<std::uint32_t>(std::strtoul(argv[3], nullptr, 10));
-    const std::string mode = argc == 7 ? argv[6] : "eager";
+    const std::string mode = argc >= 7 ? argv[6] : "eager";
+    const std::string precision = argc == 8 ? argv[7] : "fp32";
     if (!batch || !steps || (mode != "eager" && mode != "graph") ||
+        (precision != "fp32" && precision != "fp16") ||
         static_cast<std::uint64_t>(warmup) + steps >
             mgt::P888TrainingContract::kSamplesPerEpoch / batch) return 2;
     mgt::PuzzleDefinition puzzle{};
@@ -48,6 +51,9 @@ int main(int argc, char** argv) {
     info.k_max = 29;
     info.execution_mode = mode == "graph" ? mgt_cuda::SingleGpuExecutionMode::kFixedBatchGraph
                                           : mgt_cuda::SingleGpuExecutionMode::kEager;
+    info.input_gradient_precision = precision == "fp16"
+        ? mgt_cuda::SingleGpuInputGradientPrecision::kFp16Mirror
+        : mgt_cuda::SingleGpuInputGradientPrecision::kFp32;
     std::uint64_t arena_bytes = 0;
     if (mgt_cuda::QuerySingleGpuTrainerBytes(info, &arena_bytes) != mgt::Status::kOk)
         return 4;
@@ -85,6 +91,7 @@ int main(int argc, char** argv) {
     const double step_ms = total_ms / steps;
     std::cout << "{\"gpu\":\"" << device.name << "\",\"arch\":"
               << device.major * 10 + device.minor << ",\"mode\":\"" << mode << "\",\"batch\":" << batch
+              << ",\"input_gradient_precision\":\"" << precision << "\""
               << ",\"warmup\":" << warmup << ",\"steps\":" << steps
               << ",\"step_ms\":" << step_ms << ",\"samples_s\":"
               << batch * 1000.0 / step_ms << ",\"memory_bytes\":" << arena_bytes

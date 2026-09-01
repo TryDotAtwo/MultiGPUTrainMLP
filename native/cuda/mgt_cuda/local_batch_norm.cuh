@@ -51,7 +51,8 @@ mgt::Status LaunchLocalStridedBatchNormForward(
     LocalBatchNormForwardEpilogue epilogue = {});
 
 // FP32 dx remains authoritative. The optional half output is only a mirror
-// for a subsequent GEMM, not a lower-precision BN or gradient accumulator.
+// for a subsequent mixed-precision consumer, not a lower-precision BN or
+// gradient accumulator.
 // A nonnull activated input applies the old activated>0 ? dy : +0 select in
 // both partial statistics and apply. Use the original FP32 post-ReLU values.
 // residual_grad requires activated and receives incoming masked dy (not dx),

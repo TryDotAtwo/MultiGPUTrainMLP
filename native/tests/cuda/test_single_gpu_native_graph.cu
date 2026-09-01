@@ -50,12 +50,14 @@ void CheckImpossibleInputGradientsStayZero(SingleGpuTrainer* trainer) {
     }
 }
 
-void Run(unsigned rows, unsigned tail) {
+void Run(unsigned rows, unsigned tail,
+         SingleGpuInputGradientPrecision precision) {
     const auto puzzle=Puzzle();
     SingleGpuTrainerCreateInfo eager{};
     eager.contract=mgt::OriginalP888SingleGpuContract(); eager.capacity_rows=rows;
     eager.adam={0,1,1e-4f,.9f,.999f,1e-8f,0}; eager.puzzle=&puzzle;
     eager.base_seed=0x0888000000000001ULL;
+    eager.input_gradient_precision=precision;
     auto graph=eager;
     graph.execution_mode=SingleGpuExecutionMode::kFixedBatchGraph;
     std::uint64_t eager_bytes=0,graph_bytes=0;
@@ -65,6 +67,10 @@ void Run(unsigned rows, unsigned tail) {
     auto bad=graph;
     bad.execution_mode=static_cast<SingleGpuExecutionMode>(99);
     Check(QuerySingleGpuTrainerBytes(bad,&graph_bytes)==mgt::Status::kInvalidConfig,"unknown mode accepted");
+    bad=graph;
+    bad.input_gradient_precision=static_cast<SingleGpuInputGradientPrecision>(99);
+    Check(QuerySingleGpuTrainerBytes(bad,&graph_bytes)==mgt::Status::kInvalidConfig,
+          "unknown input-gradient precision accepted");
 
     NativeOwner a(graph),b(eager);
     SingleGpuTrainStepTicket ticket{};
@@ -100,9 +106,10 @@ void Run(unsigned rows, unsigned tail) {
         SingleGpuTrainerMetrics metrics{};
         Check(ReadSingleGpuMetrics(a.trainer,&metrics)==mgt::Status::kOk&&
             metrics.optimizer_step==request.optimizer_step&&std::isfinite(metrics.loss),"graph metrics");
-        std::printf("PASS native graph rows=%u active=%u step=%llu epoch=%llu exact_model=%u\n",
+        std::printf("PASS native graph rows=%u active=%u step=%llu epoch=%llu exact_model=%u precision=%s\n",
             rows,request.active_rows,(unsigned long long)request.optimizer_step,
-            (unsigned long long)request.epoch,rows<=256);
+            (unsigned long long)request.epoch,rows<=256,
+            precision==SingleGpuInputGradientPrecision::kFp16Mirror?"fp16":"fp32");
     }
     const auto saved=ticket;
     for(const auto& request:{SingleGpuTrainStepRequest{rows,0,0,0},
@@ -124,7 +131,8 @@ void Run(unsigned rows, unsigned tail) {
     CheckImpossibleInputGradientsStayZero(a.trainer);
     CheckImpossibleInputGradientsStayZero(b.trainer);
     Check(SingleGpuTrainerAllocationCountForTest()==allocations,"arena allocation during steps");
-    std::printf("PASS native queued full/tail rows=%u\n",rows);
+    std::printf("PASS native queued full/tail rows=%u precision=%s\n",rows,
+        precision==SingleGpuInputGradientPrecision::kFp16Mirror?"fp16":"fp32");
     // Force an internal graph invariant failure before any CUDA call. The
     // public request is valid; the trainer must fail-stop rather than use eager.
     const auto before_failure=ticket;
@@ -138,7 +146,8 @@ void Run(unsigned rows, unsigned tail) {
         LaunchSingleGpuTrainStep(a.trainer,{rows,11,2,0},&ticket)==mgt::Status::kCudaFailure&&
         ReadSingleGpuMetrics(a.trainer,&metrics)==mgt::Status::kCudaFailure,"failed trainer was reused");
     Compare(a.trainer,b.trainer,rows<=256);
-    std::printf("PASS native fail-stop rows=%u\n",rows);
+    std::printf("PASS native fail-stop rows=%u precision=%s\n",rows,
+        precision==SingleGpuInputGradientPrecision::kFp16Mirror?"fp16":"fp32");
 }
 
 int main(int argc,char** argv) {
@@ -147,7 +156,8 @@ int main(int argc,char** argv) {
         const unsigned rows=argc>=2?std::strtoul(argv[1],nullptr,10):4;
         const unsigned tail=argc==3?std::strtoul(argv[2],nullptr,10):rows-1;
         Check(rows>=2&&rows<=4096&&tail>0&&tail<rows,"test capacity/tail range");
-        Run(rows,tail);
+        Run(rows,tail,SingleGpuInputGradientPrecision::kFp32);
+        Run(rows,tail,SingleGpuInputGradientPrecision::kFp16Mirror);
         return 0;
     } catch(const std::exception& e) { std::fprintf(stderr,"FAIL native graph: %s\n",e.what()); return 1; }
 }

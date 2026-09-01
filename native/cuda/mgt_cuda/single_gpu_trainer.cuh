@@ -20,6 +20,14 @@ enum class SingleGpuExecutionMode : std::uint32_t {
     kFixedBatchGraph = 1,
 };
 
+enum class SingleGpuInputGradientPrecision : std::uint32_t {
+    // Exact ordered accumulation of authoritative FP32 BN dX.
+    kFp32 = 0,
+    // BN publishes one RN-half mirror; sparse embedding gradients consume it
+    // with ordered FP32 accumulation. Master weights, moments and Adam stay FP32.
+    kFp16Mirror = 1,
+};
+
 struct SingleGpuTrainerCreateInfo {
     mgt::SingleGpuModelContract contract{};
     std::uint32_t device_id = 0;
@@ -31,6 +39,8 @@ struct SingleGpuTrainerCreateInfo {
     std::uint32_t k_max = 29;
     std::uint32_t global_rank = 0;
     SingleGpuExecutionMode execution_mode = SingleGpuExecutionMode::kEager;
+    SingleGpuInputGradientPrecision input_gradient_precision =
+        SingleGpuInputGradientPrecision::kFp32;
 };
 
 struct SingleGpuTrainStepRequest {

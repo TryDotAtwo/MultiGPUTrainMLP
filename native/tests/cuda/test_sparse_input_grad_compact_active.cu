@@ -1,6 +1,7 @@
 #include "../../cuda/grouped_input_rows.cuh"
 #include "../../cuda/sparse_input_grad_grouped_rows.cuh"
 
+#include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
 #include <cstddef>
@@ -18,6 +19,31 @@ namespace {
 constexpr std::size_t kGuard = 128;
 constexpr unsigned char kPoison = 0xa5;
 bool cleanup_failed = false;
+
+__global__ void SparseInputGradCompactHalfSerialOracle(
+    mgt_cuda::CudaMlpShape shape, const mgt::TrainStateStorage* states,
+    const __half* dz, unsigned rows, const std::uint16_t* active_bins,
+    unsigned active_count, float* grad) {
+    const std::uint64_t index =
+        static_cast<std::uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const std::uint64_t count =
+        static_cast<std::uint64_t>(active_count) * shape.hd1;
+    if (index >= count) return;
+    const unsigned active_index = static_cast<unsigned>(index / shape.hd1);
+    const unsigned h = static_cast<unsigned>(index -
+        static_cast<std::uint64_t>(active_index) * shape.hd1);
+    const unsigned bin = active_bins[active_index];
+    const unsigned position = bin / shape.state_value_pad;
+    const unsigned value = bin - position * shape.state_value_pad;
+    float sum = 0.0f;
+    for (unsigned row = 0; row < rows; ++row) {
+        if (states[row].v[position] == value) {
+            sum = __fadd_rn(sum, __half2float(
+                dz[static_cast<std::uint64_t>(row) * shape.hd1 + h]));
+        }
+    }
+    grad[static_cast<std::uint64_t>(bin) * shape.hd1 + h] = sum;
+}
 
 void Require(bool condition, const std::string& message) {
     if (!condition) throw std::runtime_error(message);
@@ -88,6 +114,7 @@ public:
           elements_(static_cast<std::size_t>(bins_) * shape_.hd1),
           states_(capacity_rows_, "states"),
           dz_(static_cast<std::size_t>(capacity_rows_) * shape_.hd1, "dz"),
+          dz_half_(static_cast<std::size_t>(capacity_rows_) * shape_.hd1, "dz half"),
           active_(active_bins_.size(), "active bins"),
           full_counts_(bins_, "full counts"),
           full_rows_(static_cast<std::size_t>(bins_) * capacity_rows_, "full rows"),
@@ -128,6 +155,33 @@ public:
         CheckRows(states, rows);
     }
 
+    void RunHalfMirrorWitness() {
+        const unsigned rows = 33;
+        const auto states = MakeStates(29);
+        auto dz = MakeDz(31);
+        for (std::size_t index = 0; index < dz.size(); ++index) {
+            const int numerator = static_cast<int>((index * 23U + 7U) % 29U) - 14;
+            dz[index] += static_cast<float>(numerator) * 0.1f;
+        }
+        std::vector<__half> expected_half(dz.size());
+        for (std::size_t index = 0; index < dz.size(); ++index)
+            expected_half[index] = __float2half_rn(dz[index]);
+        PutInputs(states, dz);
+        baseline_.Fill(kPoison);
+        candidate_.Fill(kPoison);
+        LaunchHalfOracle(rows);
+        LaunchCompactHalf(rows);
+        Cuda(cudaDeviceSynchronize(), "half mirror witness synchronize");
+        EqualOutputs(baseline_.Read(), candidate_.Read(),
+                     "RN-half serial sparse result");
+        const auto actual_half = dz_half_.Read();
+        Require(std::memcmp(expected_half.data(), actual_half.data(),
+                            expected_half.size() * sizeof(__half)) == 0,
+                "half mirror input mutated");
+        CheckRows(states, rows);
+        candidate_.Fill(0);
+    }
+
     void RunReuse(unsigned rows, unsigned salt) {
         const auto states = MakeStates(salt);
         PutInputs(states, MakeDz(salt));
@@ -145,6 +199,7 @@ public:
         Require(active_.Read() == active_bins_, "active-bin map mutated");
         states_.CheckGuards();
         dz_.CheckGuards();
+        dz_half_.CheckGuards();
         full_counts_.CheckGuards();
         full_rows_.CheckGuards();
         compact_counts_.CheckGuards();
@@ -189,6 +244,10 @@ private:
                    const std::vector<float>& dz) {
         states_.Put(states);
         dz_.Put(dz);
+        std::vector<__half> dz_half(dz.size());
+        for (std::size_t index = 0; index < dz.size(); ++index)
+            dz_half[index] = __float2half_rn(dz[index]);
+        dz_half_.Put(dz_half);
         full_counts_.Fill(kPoison);
         full_rows_.Fill(0xff);
         compact_counts_.Fill(kPoison);
@@ -216,7 +275,7 @@ private:
         Cuda(cudaGetLastError(), "full launch");
     }
 
-    void LaunchCompact(unsigned rows) {
+    void BuildCompact(unsigned rows) {
         const unsigned active_count = static_cast<unsigned>(active_bins_.size());
         const unsigned builder_blocks =
             (active_count + mgt_cuda::detail::kCompactActiveRowsWarps - 1U) /
@@ -225,6 +284,11 @@ private:
             <<<builder_blocks, mgt_cuda::detail::kCompactActiveRowsThreads>>>(
                 shape_, states_.get(), rows, active_.get(), active_count,
                 compact_counts_.get(), compact_rows_.get());
+    }
+
+    void LaunchCompact(unsigned rows) {
+        const unsigned active_count = static_cast<unsigned>(active_bins_.size());
+        BuildCompact(rows);
         const dim3 grid(
             (active_count + mgt_cuda::detail::kSparseCompactActiveBinsPerBlock - 1U) /
                 mgt_cuda::detail::kSparseCompactActiveBinsPerBlock,
@@ -236,6 +300,33 @@ private:
                 shape_, dz_.get(), rows, active_.get(), active_count,
                 compact_counts_.get(), compact_rows_.get(), candidate_.get());
         Cuda(cudaGetLastError(), "compact launch");
+    }
+
+    void LaunchCompactHalf(unsigned rows) {
+        const unsigned active_count = static_cast<unsigned>(active_bins_.size());
+        BuildCompact(rows);
+        const dim3 grid(
+            (active_count + mgt_cuda::detail::kSparseCompactActiveBinsPerBlock - 1U) /
+                mgt_cuda::detail::kSparseCompactActiveBinsPerBlock,
+            (shape_.hd1 / 2U +
+             mgt_cuda::detail::kSparseCompactActiveThreadsPerBin - 1U) /
+                mgt_cuda::detail::kSparseCompactActiveThreadsPerBin);
+        mgt_cuda::detail::SparseInputGradCompactActiveAdjacent2PackedHalfU16
+            <<<grid, mgt_cuda::detail::kSparseCompactActiveThreads>>>(
+                shape_, dz_half_.get(), rows, active_.get(), active_count,
+                compact_counts_.get(), compact_rows_.get(), candidate_.get());
+        Cuda(cudaGetLastError(), "compact half launch");
+    }
+
+    void LaunchHalfOracle(unsigned rows) {
+        const unsigned active_count = static_cast<unsigned>(active_bins_.size());
+        const std::uint64_t count =
+            static_cast<std::uint64_t>(active_count) * shape_.hd1;
+        SparseInputGradCompactHalfSerialOracle<<<
+            static_cast<unsigned>((count + 255U) / 256U), 256>>>(
+                shape_, states_.get(), dz_half_.get(), rows, active_.get(),
+                active_count, baseline_.get());
+        Cuda(cudaGetLastError(), "half serial oracle launch");
     }
 
     void CheckRows(const std::vector<mgt::TrainStateStorage>& states, unsigned rows) {
@@ -275,6 +366,7 @@ private:
     std::size_t elements_;
     DeviceBuffer<mgt::TrainStateStorage> states_;
     DeviceBuffer<float> dz_;
+    DeviceBuffer<__half> dz_half_;
     DeviceBuffer<std::uint16_t> active_;
     DeviceBuffer<unsigned> full_counts_;
     DeviceBuffer<std::uint16_t> full_rows_;
@@ -293,6 +385,7 @@ int main() {
         Require(count > 0, "CUDA device required");
         Harness harness;
         harness.RunOwnershipWitness();
+        harness.RunHalfMirrorWitness();
         for (const auto [rows, salt] :
              {std::pair{1U, 11U}, std::pair{31U, 13U}, std::pair{32U, 17U},
               std::pair{33U, 19U}, std::pair{257U, 23U}}) {
@@ -300,7 +393,7 @@ int main() {
         }
         harness.Finish();
         Require(!cleanup_failed, "CUDA cleanup failed");
-        std::printf("PASS compact active input gradient: bitwise order, tails, owner writes, persistent zero, immutable map and canaries\n");
+        std::printf("PASS compact active input gradient: bitwise FP32/RN-half serial order, tails, owner writes, persistent zero, immutable inputs/map and canaries\n");
         return EXIT_SUCCESS;
     } catch (const std::exception& error) {
         std::fprintf(stderr, "FAIL compact active input gradient: %s\n", error.what());

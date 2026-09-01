@@ -466,6 +466,8 @@ bool RunCase(unsigned blocks, unsigned output_dim, unsigned hd1 = 3, unsigned hd
             operand_b.pointer, TapeCount(shape, kCapacityRows), gradient_capacity};
         auto alias_preflight = [&](unsigned rows) {
             const std::size_t live_b = static_cast<std::size_t>(rows) * std::max(hd2, output_dim);
+            const std::size_t live_input_half =
+                static_cast<std::size_t>(rows) * hd1;
             const std::size_t live_labels = static_cast<std::size_t>(rows) * output_dim;
             Cuda(cudaMemset(operand_b.pointer, 0xff, operand_b.count * sizeof(__half)),
                  "poison alias-test gradient scratch");
@@ -547,6 +549,30 @@ bool RunCase(unsigned blocks, unsigned output_dim, unsigned hd1 = 3, unsigned hd
               reject("null B", trial, buffers, mgt::Status::kCapacityExceeded); }
             { auto trial = trial_context(); trial.operand_b_capacity = live_b - 1;
               reject("short B", trial, buffers, mgt::Status::kCapacityExceeded); }
+            { auto trial = trial_context();
+              trial.input_gradient_half = tape.pointer + 1;
+              trial.input_gradient_half_capacity = live_input_half;
+              reject("input-gradient half must begin at tape", trial, buffers); }
+            { auto trial = trial_context();
+              trial.input_gradient_half = tape.pointer;
+              trial.input_gradient_half_capacity = live_input_half - 1;
+              reject("short input-gradient half", trial, buffers,
+                     mgt::Status::kCapacityExceeded); }
+            { auto trial = trial_context();
+              trial.input_gradient_half_capacity = live_input_half;
+              reject("null input-gradient half with capacity", trial, buffers); }
+            { auto trial = trial_context(); auto views = buffers;
+              trial.input_gradient_half = tape.pointer;
+              trial.input_gradient_half_capacity = live_input_half;
+              views.input_grad = reinterpret_cast<float*>(tape.pointer);
+              reject("input-gradient half overlaps FP32 input gradient", trial, views); }
+            { auto trial = trial_context();
+              trial.input_gradient_half = tape.pointer;
+              trial.input_gradient_half_capacity = live_input_half;
+              trial.input_active_bins =
+                  reinterpret_cast<const std::uint16_t*>(tape.pointer);
+              trial.input_active_bin_count = 1;
+              reject("input-gradient half overlaps active-bin map", trial, buffers); }
             // These deliberately non-dereferenceable ranges must be rejected
             // entirely on the host, before any kernel can observe the pointer.
             { auto trial = trial_context();
@@ -610,6 +636,11 @@ bool RunCase(unsigned blocks, unsigned output_dim, unsigned hd1 = 3, unsigned hd
                 restore();
                 ++accepted;
             };
+            { auto trial = trial_context();
+              trial.input_gradient_half = tape.pointer;
+              trial.input_gradient_half_capacity = live_input_half;
+              accept("input-gradient half reuses exact tape prefix", trial,
+                     labels.pointer); }
             // The backing allocation includes both views. Only active B bytes
             // count: its advertised capacity may extend through the label view.
             Device<__half> packed(live_b + 2 * live_labels);

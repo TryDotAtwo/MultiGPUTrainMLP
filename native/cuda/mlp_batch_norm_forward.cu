@@ -62,18 +62,21 @@ mgt::Status LocalBnBackward(
     const float* gamma, const float* inv_std, const float* normalized,
     float* dx, float* dgamma, float* dbeta, float* scratch,
     NcclRankContext*, cudaStream_t stream, const float* activated = nullptr,
-    float* residual_grad = nullptr, const float* relu_beta = nullptr) {
+    float* residual_grad = nullptr, const float* relu_beta = nullptr,
+    __half* half_output = nullptr) {
     if (rows != global_rows) return mgt::Status::kInvalidConfig;
     LocalBatchNormBackwardEpilogue epilogue;
     epilogue.activated = activated;
     epilogue.residual_grad = residual_grad;
     epilogue.relu_beta = relu_beta;
+    epilogue.half_output = half_output;
     return LaunchLocalStridedBatchNormBackward(
         dy, rows, cols, stride, gamma, inv_std, normalized, dx, dgamma,
         dbeta, scratch, stream, epilogue);
 }
-// Explicitly selected only at dense hidden/residual sites. The input BN feeds
-// FP32 sparse gradients and must not emit a mirror, even when hd1 == hd2.
+// Explicitly selected only at dense hidden/residual sites. Input BN precision
+// is selected independently by the sparse-gradient policy below, even when
+// hd1 == hd2.
 mgt::Status DenseBnBackward(
     const float* dy, int rows, int global_rows, int cols, int stride,
     const float* gamma, const float* inv_std, const float* normalized,
@@ -112,16 +115,19 @@ mgt::Status ReluBnBackward(
     const float* gamma, const float* inv_std, const float* normalized,
     float* dx, float* dgamma, float* dbeta, float* scratch,
     NcclRankContext* context, cudaStream_t stream,
-    const float* relu_beta = nullptr) {
+    const float* relu_beta = nullptr, __half* half_output = nullptr) {
     if (rows <= 0 || stride <= 0) return mgt::Status::kInvalidConfig;
 #ifdef MGT_LOCAL_MLP_IMPLEMENTATION
-    if constexpr (Dense) return DenseBnBackward(dy, rows, global_rows, cols, stride,
-        gamma, inv_std, normalized, dx, dgamma, dbeta, scratch, context, stream, activated);
+    if constexpr (Dense) {
+        if (half_output) return mgt::Status::kInvalidConfig;
+        return DenseBnBackward(dy, rows, global_rows, cols, stride,
+            gamma, inv_std, normalized, dx, dgamma, dbeta, scratch, context, stream, activated);
+    }
     return LocalBnBackward(dy, rows, global_rows, cols, stride,
         gamma, inv_std, normalized, dx, dgamma, dbeta, scratch, context, stream,
-        activated, nullptr, relu_beta);
+        activated, nullptr, relu_beta, half_output);
 #else
-    if (relu_beta) return mgt::Status::kInvalidConfig;
+    if (relu_beta || half_output) return mgt::Status::kInvalidConfig;
     if (LaunchBatchNormReluBackward(activated, dy, dy,
             static_cast<std::uint64_t>(rows) * stride, stream) != mgt::Status::kOk)
         return mgt::Status::kCudaFailure;
@@ -275,6 +281,7 @@ using detail::SparseInputGradGroupedRows;
 using detail::SparseInputGradGroupedRowsAdjacent2;
 using detail::SparseInputGradGroupedRowsAdjacent2PackedU16;
 using detail::SparseInputGradCompactActiveAdjacent2PackedU16;
+using detail::SparseInputGradCompactActiveAdjacent2PackedHalfU16;
 
 constexpr unsigned GROUPED_INPUT_MAX_POSITIONS = 4;
 
@@ -724,8 +731,9 @@ mgt::Status LaunchMlpBatchNormInputBackward(
     const auto& q = p.sites[0];
     const float* activated_mask = a1;
     const float* recompute_beta = nullptr;
+    __half* sparse_input_grad_half = nullptr;
 #ifdef MGT_LOCAL_MLP_IMPLEMENTATION
-    if (LocalFp16(ctx)) {
+    if (auto* local_fp16 = LocalFp16(ctx)) {
         const InputHalfIndexPolicy index_policy = ResolveInputHalfIndexPolicy();
         if (index_policy.status != mgt::Status::kOk) return index_policy.status;
         if (index_policy.use_u32 &&
@@ -734,6 +742,55 @@ mgt::Status LaunchMlpBatchNormInputBackward(
             recompute_beta =
                 aff + p.logical_feature_count + q.affine_offset;
         }
+        const std::uint64_t bins =
+            static_cast<std::uint64_t>(s.state_len) * s.state_value_pad;
+        const bool adjacent2 = input_launch.grouped_rows &&
+            input_launch.grouped_features_per_thread == 2U &&
+            (s.hd1 & 1U) == 0 &&
+            (reinterpret_cast<std::uintptr_t>(input_grad) &
+             (alignof(float2) - 1U)) == 0 &&
+            (reinterpret_cast<std::uintptr_t>(weight_grad) &
+             (alignof(float2) - 1U)) == 0;
+        const bool packed_u16 = adjacent2 &&
+            input_launch.grouped_row_index_bytes == sizeof(std::uint16_t) &&
+            lr <= 65535U;
+        const auto active_count = local_fp16->input_active_bin_count;
+        const bool compact_active = packed_u16 &&
+            local_fp16->input_inactive_gradients_are_persistent_zero &&
+            local_fp16->input_active_bins && active_count > 0 &&
+            active_count < bins;
+        const std::uint64_t scratch_bytes =
+            static_cast<std::uint64_t>(active_count) * sizeof(unsigned) +
+            static_cast<std::uint64_t>(active_count) * lr *
+                sizeof(std::uint16_t);
+        const std::uint64_t half_count =
+            static_cast<std::uint64_t>(lr) * s.hd1;
+        if (compact_active &&
+            scratch_bytes <= p.workspace_floats * sizeof(float) &&
+            local_fp16->input_gradient_half &&
+            half_count <= local_fp16->input_gradient_half_capacity &&
+            (reinterpret_cast<std::uintptr_t>(local_fp16->input_gradient_half) &
+             (alignof(__half2) - 1U)) == 0) {
+            ClearGradientHalfCache(local_fp16);
+            sparse_input_grad_half = local_fp16->input_gradient_half;
+        }
+        static thread_local const LocalMlpFp16Context* reported_context = nullptr;
+        if (reported_context != local_fp16) {
+            std::fprintf(stderr,
+                "mgt sparse_input_grad source=%s compact=%u active=%u scratch_fit=%u "
+                "capacity_fit=%u alignment_fit=%u\n",
+                sparse_input_grad_half ? "half" : "float",
+                static_cast<unsigned>(compact_active), active_count,
+                static_cast<unsigned>(
+                    scratch_bytes <= p.workspace_floats * sizeof(float)),
+                static_cast<unsigned>(local_fp16->input_gradient_half &&
+                    half_count <= local_fp16->input_gradient_half_capacity),
+                static_cast<unsigned>(local_fp16->input_gradient_half &&
+                    (reinterpret_cast<std::uintptr_t>(
+                         local_fp16->input_gradient_half) &
+                     (alignof(__half2) - 1U)) == 0));
+            reported_context = local_fp16;
+        }
     }
 #endif
     if (ReluBnBackward<false>(
@@ -741,7 +798,8 @@ mgt::Status LaunchMlpBatchNormInputBackward(
             aff + q.affine_offset, bn + q.inv_std_offset, bn + q.normalized_offset,
             input_grad, affine_grad + q.affine_offset,
             affine_grad + p.logical_feature_count + q.affine_offset,
-            bn + p.reduction_offset, ctx, st, recompute_beta) != mgt::Status::kOk) {
+            bn + p.reduction_offset, ctx, st, recompute_beta,
+            sparse_input_grad_half) != mgt::Status::kOk) {
         return mgt::Status::kCudaFailure;
     }
     const std::uint64_t parameter_count = HW(s);
@@ -798,10 +856,17 @@ mgt::Status LaunchMlpBatchNormInputBackward(
                         detail::kSparseCompactActiveBinsPerBlock,
                     (s.hd1 / 2U + detail::kSparseCompactActiveThreadsPerBin - 1U) /
                         detail::kSparseCompactActiveThreadsPerBin);
-                SparseInputGradCompactActiveAdjacent2PackedU16
-                    <<<grid,detail::kSparseCompactActiveThreads,0,st>>>(
-                        s,input_grad,lr,input_active_bins,active_count,
-                        counts,row_ids,weight_grad);
+                if (sparse_input_grad_half) {
+                    SparseInputGradCompactActiveAdjacent2PackedHalfU16
+                        <<<grid,detail::kSparseCompactActiveThreads,0,st>>>(
+                            s,sparse_input_grad_half,lr,input_active_bins,
+                            active_count,counts,row_ids,weight_grad);
+                } else {
+                    SparseInputGradCompactActiveAdjacent2PackedU16
+                        <<<grid,detail::kSparseCompactActiveThreads,0,st>>>(
+                            s,input_grad,lr,input_active_bins,active_count,
+                            counts,row_ids,weight_grad);
+                }
             } else if (packed_u16) {
                 const unsigned builder_blocks=static_cast<unsigned>(
                     (bins+detail::kGroupedInputRowsWarps-1U)/detail::kGroupedInputRowsWarps);

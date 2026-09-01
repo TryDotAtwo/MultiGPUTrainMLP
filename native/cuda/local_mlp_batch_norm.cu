@@ -28,7 +28,7 @@ bool FitsSlice(std::uint64_t offset, std::uint64_t count, std::uint64_t capacity
     return offset <= capacity && count <= capacity - offset;
 }
 
-mgt::Status ValidateGradientMirror(
+mgt::Status ValidateGradientMirrors(
     const CudaMlpShape& shape, std::uint32_t logical_hd1,
     std::uint32_t logical_hd2, std::uint32_t rows,
     const mgt::BatchNormTrainingPlan& plan, std::uint64_t workspace_capacity,
@@ -91,6 +91,48 @@ mgt::Status ValidateGradientMirror(
     if (shape.residual_blocks &&
         (!separate(b.fc1_grad, bh2, sizeof(float)) ||
          !separate(b.residual_grad, bh2, sizeof(float))))
+        return mgt::Status::kInvalidConfig;
+    if (!fp16.input_gradient_half) {
+        if (fp16.input_gradient_half_capacity != 0)
+            return mgt::Status::kInvalidConfig;
+        return mgt::Status::kOk;
+    }
+    if (fp16.input_gradient_half != fp16.operand_a)
+        return mgt::Status::kInvalidConfig;
+    if (bh1 > fp16.input_gradient_half_capacity ||
+        bh1 > fp16.operand_a_capacity)
+        return mgt::Status::kCapacityExceeded;
+    const auto input_mirror_bytes = bh1 * sizeof(__half);
+    const auto input_separate = [&](const void* other, std::uint64_t count,
+                                    std::uint64_t bytes) {
+        return GradientMirrorDisjoint(fp16.input_gradient_half,
+                                      input_mirror_bytes, other, count, bytes);
+    };
+    for (const float* tensor : {b.weights, b.weight_grad, b.weight_m, b.weight_v})
+        if (!input_separate(tensor, parameters, sizeof(float)))
+            return mgt::Status::kInvalidConfig;
+    for (const float* tensor : {b.affine, b.affine_grad, b.affine_m,
+                                b.affine_v, b.running})
+        if (!input_separate(tensor, plan.logical_feature_count,
+                            2 * sizeof(float)))
+            return mgt::Status::kInvalidConfig;
+    for (const float* tensor : {static_cast<const float*>(b.outputs),
+                               static_cast<const float*>(b.output_dy), labels})
+        if (!input_separate(tensor, outputs, sizeof(float)))
+            return mgt::Status::kInvalidConfig;
+    if (!input_separate(fp16.weight_mirror, parameters, sizeof(__half)) ||
+        !input_separate(fp16.operand_b, mirror_halfs, sizeof(__half)) ||
+        !input_separate(fp16.input_active_bins, fp16.input_active_bin_count,
+                        sizeof(std::uint16_t)) ||
+        !input_separate(b.forward_workspace, workspace, sizeof(float)) ||
+        !input_separate(b.loss, 1, sizeof(float)) ||
+        !input_separate(b.block_grad, bh2, sizeof(float)) ||
+        !input_separate(b.input_grad, bh1, sizeof(float)) ||
+        !input_separate(states, rows, sizeof(mgt::TrainStateStorage)))
+        return mgt::Status::kInvalidConfig;
+    if (shape.residual_blocks &&
+        (!input_separate(b.fc1_grad, bh2, sizeof(float)) ||
+         !input_separate(b.residual_grad, bh2, sizeof(float))))
         return mgt::Status::kInvalidConfig;
     return mgt::Status::kOk;
 }
@@ -165,7 +207,7 @@ mgt::Status LaunchLocalMlpBatchNormTrainStepFp16(
             rows * shape.hd2;
     if (!fp16->operand_a || fp16->operand_a_capacity < activation_tape_halfs)
         return mgt::Status::kCapacityExceeded;
-    const auto scratch_status = ValidateGradientMirror(shape, logical_hd1, logical_hd2,
+    const auto scratch_status = ValidateGradientMirrors(shape, logical_hd1, logical_hd2,
         rows, plan, forward_workspace_floats, states, labels, buffers, *fp16,
         activation_tape_halfs);
     if (scratch_status != mgt::Status::kOk) return scratch_status;

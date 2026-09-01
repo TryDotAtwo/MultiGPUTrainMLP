@@ -40,6 +40,11 @@ struct LocalMlpFp16Context {
     const std::uint16_t* input_active_bins = nullptr;
     std::uint32_t input_active_bin_count = 0;
     bool input_inactive_gradients_are_persistent_zero = false;
+    // Optional final-backward scratch for an RN-half input-gradient mirror.
+    // The trainer aliases the now-dead input-activation tape slot; consumers
+    // still accumulate the rounded values into FP32 parameter gradients.
+    __half* input_gradient_half = nullptr;
+    std::uint64_t input_gradient_half_capacity = 0;
 };
 
 mgt::Status LaunchFloatToHalf(

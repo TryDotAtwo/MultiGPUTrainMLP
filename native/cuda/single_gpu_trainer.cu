@@ -49,6 +49,9 @@ mgt::Status BuildLayout(const SingleGpuTrainerCreateInfo& info,
                         mgt::BatchNormTrainingPlan* plan, ArenaLayout* layout) {
     const bool graph_mode = info.execution_mode == SingleGpuExecutionMode::kFixedBatchGraph;
     if ((info.execution_mode != SingleGpuExecutionMode::kEager && !graph_mode) ||
+        (info.input_gradient_precision != SingleGpuInputGradientPrecision::kFp32 &&
+         info.input_gradient_precision !=
+             SingleGpuInputGradientPrecision::kFp16Mirror) ||
         (graph_mode && (!detail::kSingleGpuTrainGraphSupported ||
                        info.capacity_rows > mgt::P888TrainingContract::kSamplesPerEpoch)))
         return mgt::Status::kInvalidConfig;
@@ -332,6 +335,14 @@ mgt::Status EnqueueSingleGpuTrainStep(
         trainer->input_active_bins.size() <
         static_cast<std::uint64_t>(trainer->shape.state_len) *
             trainer->shape.state_value_pad;
+    if (trainer->info.input_gradient_precision ==
+        SingleGpuInputGradientPrecision::kFp16Mirror) {
+        fp16.input_gradient_half =
+            At<__half>(arena, trainer->layout.fp16_operand_a);
+        fp16.input_gradient_half_capacity =
+            static_cast<std::uint64_t>(trainer->info.capacity_rows) *
+                trainer->shape.hd1;
+    }
     status = LaunchLocalMlpBatchNormTrainStepFp16(
         trainer->shape, trainer->info.contract.logical_hd1,
         trainer->info.contract.logical_hd2,
