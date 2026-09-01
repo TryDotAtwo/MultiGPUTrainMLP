@@ -64,9 +64,12 @@ def finish_job(src: Path, dst_dir: Path, job: dict[str, Any]) -> Path:
 
 
 def run_job(job_path: Path, paths: dict[str, Path], root: Path, cooldown_sec: float) -> None:
+    # Read before the cross-directory rename. Docker Desktop bind mounts can
+    # briefly hide the destination immediately after replace(), leaving a
+    # ghost running job that never launched.
+    job = load_json(job_path)
     running_path = paths["running"] / job_path.name
     job_path.replace(running_path)
-    job = load_json(running_path)
     job_id = str(job.get("id", running_path.stem))
     label = str(job.get("label", job_id))
     command = job.get("command")
