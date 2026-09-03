@@ -31,7 +31,7 @@ void CheckStructuralInputMap(SingleGpuTrainer* trainer) {
           "device structural input-map differs from host owner");
 }
 
-void CheckSparseAdamGraphConfig(SingleGpuTrainer* trainer) {
+void CheckSparseAdamGraphConfig(SingleGpuTrainer* trainer, bool expect_fused) {
     const auto& weight = *static_cast<const AdamWKernelConfig*>(
         trainer->graph.parameters[1].kernelParams[0]);
     const auto& affine = *static_cast<const AdamWKernelConfig*>(
@@ -44,17 +44,35 @@ void CheckSparseAdamGraphConfig(SingleGpuTrainer* trainer) {
     const std::uint64_t expected_live = active_count +
         trainer->layout.parameter_count - input_count;
     std::uint64_t physical_count = 0;
-    Check(weight.param_count == expected_live &&
-          weight.sparse_active_bins == At<std::uint16_t>(
-              trainer->arena, trainer->layout.input_active_bins) &&
-          weight.sparse_full_prefix_count == input_count &&
-          weight.sparse_row_width == trainer->shape.hd1 &&
-          weight.sparse_active_bin_count == trainer->input_active_bins.size() &&
-          QueryAdamWPhysicalParameterCount(weight, &physical_count) ==
-              mgt::Status::kOk &&
-          physical_count == trainer->layout.parameter_count,
-          "captured weight Adam did not retain sparse physical map");
+    if (expect_fused) {
+        Check(trainer->graph.nodes[3] && !weight.sparse_active_bins &&
+              weight.param_count == trainer->layout.parameter_count - input_count &&
+              weight.dense_physical_offset == input_count &&
+              QueryAdamWPhysicalParameterCount(weight, &physical_count) ==
+                  mgt::Status::kOk &&
+              physical_count == trainer->layout.parameter_count,
+              "captured weight Adam did not retain dense tail ownership");
+        const auto& fused = *static_cast<const AdamWKernelConfig*>(
+            trainer->graph.parameters[3].kernelParams[0]);
+        Check(fused.param_count == active_count &&
+              fused.step == weight.step && fused.weight_decay == 0.0f &&
+              !fused.sparse_active_bins && !fused.dense_physical_offset,
+              "captured fused input Adam config mismatch");
+    } else {
+        Check(!trainer->graph.nodes[3] && weight.param_count == expected_live &&
+              weight.sparse_active_bins == At<std::uint16_t>(
+                  trainer->arena, trainer->layout.input_active_bins) &&
+              weight.sparse_full_prefix_count == input_count &&
+              weight.sparse_row_width == trainer->shape.hd1 &&
+              weight.sparse_active_bin_count == trainer->input_active_bins.size() &&
+              !weight.dense_physical_offset &&
+              QueryAdamWPhysicalParameterCount(weight, &physical_count) ==
+                  mgt::Status::kOk &&
+              physical_count == trainer->layout.parameter_count,
+              "captured weight Adam did not retain sparse physical map");
+    }
     Check(!affine.sparse_active_bins &&
+          !affine.dense_physical_offset &&
           affine.param_count == trainer->plan.trainable_count &&
           QueryAdamWPhysicalParameterCount(affine, &physical_count) ==
               mgt::Status::kOk &&
@@ -110,7 +128,12 @@ void Run(unsigned rows, unsigned tail,
     Check(PrepareSingleGpuTrainer(b.trainer)==mgt::Status::kOk,"eager prepare");
     CheckStructuralInputMap(a.trainer);
     CheckStructuralInputMap(b.trainer);
-    CheckSparseAdamGraphConfig(a.trainer);
+    cudaDeviceProp properties{};
+    Cuda(cudaGetDeviceProperties(&properties, 0), "device properties");
+    const bool expect_fused =
+        precision == SingleGpuInputGradientPrecision::kFp16Mirror &&
+        properties.major == 8 && properties.minor == 6;
+    CheckSparseAdamGraphConfig(a.trainer, expect_fused);
     Check(a.trainer->sequence==0&&!a.trainer->in_flight,"capture advanced training state");
     Check(a.trainer->graph.source&&a.trainer->graph.executable&&
         a.trainer->graph.rows==rows&&!b.trainer->graph.source&&!b.trainer->graph.executable,

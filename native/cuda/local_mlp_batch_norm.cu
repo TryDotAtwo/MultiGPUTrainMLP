@@ -4,6 +4,13 @@
 #include <climits>
 #include <limits>
 
+namespace mgt_cuda::detail {
+const void* FusedInputAdamTrainingKernel() {
+    return reinterpret_cast<const void*>(
+        SparseInputGradCompactActiveAdjacent2PackedHalfU16U32AdamW);
+}
+}  // namespace mgt_cuda::detail
+
 namespace mgt_cuda {
 namespace {
 
@@ -211,6 +218,11 @@ mgt::Status LaunchLocalMlpBatchNormTrainStepFp16(
         rows, plan, forward_workspace_floats, states, labels, buffers, *fp16,
         activation_tape_halfs);
     if (scratch_status != mgt::Status::kOk) return scratch_status;
+    fp16->input_adam = adam;
+    fp16->weight_grad = buffers.weight_grad;
+    fp16->weight_m = buffers.weight_m;
+    fp16->weight_v = buffers.weight_v;
+    fp16->input_active_adam_fused = false;
     fp16->activation_workspace = buffers.forward_workspace;
     fp16->activation_rows = rows;
     fp16->activation_hd1 = shape.hd1;

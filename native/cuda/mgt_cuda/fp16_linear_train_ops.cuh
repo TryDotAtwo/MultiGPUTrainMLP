@@ -1,6 +1,7 @@
 #pragma once
 
 #include "mgt/status.hpp"
+#include "mgt_cuda/adamw.cuh"
 
 #include <cublas_v2.h>
 #include <cuda_fp16.h>
@@ -49,6 +50,13 @@ struct LocalMlpFp16Context {
     // still accumulate the rounded values into FP32 parameter gradients.
     __half* input_gradient_half = nullptr;
     std::uint64_t input_gradient_half_capacity = 0;
+    // Step-local trainer-only state for fusing the active input-table Adam
+    // update into its owner-written sparse-gradient kernel.
+    AdamWKernelConfig input_adam{};
+    float* weight_grad = nullptr;
+    float* weight_m = nullptr;
+    float* weight_v = nullptr;
+    bool input_active_adam_fused = false;
 };
 
 mgt::Status LaunchFloatToHalf(

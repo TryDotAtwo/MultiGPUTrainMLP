@@ -170,6 +170,78 @@ int main() {
         !SameDeviceBytes(reference_half, fused_half, kSparseCount))
         return EXIT_FAILURE;
 
+    constexpr std::uint64_t kOffsetCount = 37;
+    constexpr std::uint64_t kOffset = 11;
+    for (std::uint64_t i = 0; i < kOffsetCount; ++i) {
+        weights[i] = static_cast<float>(static_cast<int>((i * 11) % 41) - 20) *
+            .0017f;
+        grad[i] = static_cast<float>(static_cast<int>((i * 13) % 37) - 18) *
+            .00021f;
+        moment1[i] = static_cast<float>(static_cast<int>((i * 7) % 31) - 15) *
+            .00013f;
+        moment2[i] = static_cast<float>((i * 17) % 29) * .000007f;
+    }
+    for (auto* pointer : {reference_weights, fused_weights})
+        if (!Cuda(cudaMemcpy(pointer, weights.data(),
+                             kOffsetCount * sizeof(float),
+                             cudaMemcpyHostToDevice))) return EXIT_FAILURE;
+    for (auto* pointer : {reference_m, fused_m})
+        if (!Cuda(cudaMemcpy(pointer, moment1.data(),
+                             kOffsetCount * sizeof(float),
+                             cudaMemcpyHostToDevice))) return EXIT_FAILURE;
+    for (auto* pointer : {reference_v, fused_v})
+        if (!Cuda(cudaMemcpy(pointer, moment2.data(),
+                             kOffsetCount * sizeof(float),
+                             cudaMemcpyHostToDevice))) return EXIT_FAILURE;
+    if (!Cuda(cudaMemcpy(device_grad, grad.data(),
+                         kOffsetCount * sizeof(float), cudaMemcpyHostToDevice)) ||
+        mgt_cuda::LaunchFloatToHalf(reference_weights, reference_half,
+                                    kOffsetCount, nullptr) != mgt::Status::kOk ||
+        mgt_cuda::LaunchFloatToHalf(fused_weights, fused_half,
+                                    kOffsetCount, nullptr) != mgt::Status::kOk)
+        return EXIT_FAILURE;
+    mgt_cuda::AdamWKernelConfig full{
+        kOffsetCount, 1, .0001f, .9f, .999f, 1e-8f, .01f};
+    auto prefix = full;
+    prefix.param_count = kOffset;
+    auto tail = full;
+    tail.param_count = kOffsetCount - kOffset;
+    tail.dense_physical_offset = kOffset;
+    if (mgt_cuda::QueryAdamWPhysicalParameterCount(tail, &physical_count) !=
+            mgt::Status::kOk ||
+        physical_count != kOffsetCount)
+        return EXIT_FAILURE;
+    invalid = sparse;
+    invalid.dense_physical_offset = 1;
+    if (mgt_cuda::ValidateAdamWKernelConfig(invalid) == mgt::Status::kOk)
+        return EXIT_FAILURE;
+    invalid = full;
+    invalid.param_count = 10;
+    invalid.dense_physical_offset = UINT64_MAX - 5;
+    if (mgt_cuda::ValidateAdamWKernelConfig(invalid) == mgt::Status::kOk)
+        return EXIT_FAILURE;
+    for (const auto step : std::array<std::uint64_t, 4>{1, 2, 997, 65535}) {
+        full.step = step;
+        prefix.step = step;
+        tail.step = step;
+        if (mgt_cuda::LaunchAdamWKernelWithHalfMirror(
+                full, reference_weights, reference_half, device_grad,
+                reference_m, reference_v, nullptr) != mgt::Status::kOk ||
+            mgt_cuda::LaunchAdamWKernelWithHalfMirror(
+                prefix, fused_weights, fused_half, device_grad, fused_m,
+                fused_v, nullptr) != mgt::Status::kOk ||
+            mgt_cuda::LaunchAdamWKernelWithHalfMirror(
+                tail, fused_weights, fused_half, device_grad, fused_m,
+                fused_v, nullptr) != mgt::Status::kOk)
+            return EXIT_FAILURE;
+    }
+    if (!Cuda(cudaDeviceSynchronize()) ||
+        !SameDeviceBytes(reference_weights, fused_weights, kOffsetCount) ||
+        !SameDeviceBytes(reference_m, fused_m, kOffsetCount) ||
+        !SameDeviceBytes(reference_v, fused_v, kOffsetCount) ||
+        !SameDeviceBytes(reference_half, fused_half, kOffsetCount))
+        return EXIT_FAILURE;
+
     cudaFree(device_active_bins);
     cudaFree(fused_half);
     cudaFree(reference_half);

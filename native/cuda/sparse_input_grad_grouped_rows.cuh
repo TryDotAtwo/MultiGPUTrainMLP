@@ -1,5 +1,6 @@
 #pragma once
 
+#include "mgt_cuda/adamw.cuh"
 #include "mgt_cuda/mlp_forward.cuh"
 #include <cuda_fp16.h>
 
@@ -242,6 +243,61 @@ __global__ void SparseInputGradCompactActiveAdjacent2PackedHalfU16U32(
         sum1 = __fadd_rn(sum1, value.y);
     }
     grad2[bin * hd1_half2 + h2] = make_float2(sum0, sum1);
+}
+
+// Single-GPU SM86 trainer path. The same owner thread that publishes each
+// active embedding gradient immediately applies its exact FP32 Adam update.
+// Inactive table rows remain untouched; a separate dense-offset Adam kernel
+// owns every parameter after the full input-table prefix.
+__global__ void SparseInputGradCompactActiveAdjacent2PackedHalfU16U32AdamW(
+    AdamWKernelConfig adam, CudaMlpShape s,
+    const __half* __restrict__ dz, unsigned rows,
+    const std::uint16_t* __restrict__ active_bins, unsigned active_count,
+    const unsigned* __restrict__ counts,
+    const std::uint16_t* __restrict__ row_ids, float* __restrict__ grad,
+    float* __restrict__ weights, __half* __restrict__ weights_half,
+    float* __restrict__ moment1, float* __restrict__ moment2) {
+    __shared__ float bias1;
+    __shared__ float bias2;
+    if (threadIdx.x == 0) {
+        bias1 = 1.0f - powf(adam.beta1, static_cast<float>(adam.step));
+        bias2 = 1.0f - powf(adam.beta2, static_cast<float>(adam.step));
+    }
+    __syncthreads();
+    const unsigned bin_in_block = threadIdx.x >> 5;
+    const unsigned lane = threadIdx.x & 31U;
+    const unsigned active_index =
+        blockIdx.x * kSparseCompactActiveHalfU32BinsPerBlock + bin_in_block;
+    const unsigned h2 = blockIdx.y * kSparseCompactActiveThreadsPerBin + lane;
+    const unsigned hd1_half2 = s.hd1 >> 1;
+    if (active_index >= active_count || h2 >= hd1_half2) return;
+    const unsigned bin = active_bins[active_index];
+    const unsigned list_base = active_index * rows;
+    const unsigned count = counts[active_index];
+    const auto* dz2 = reinterpret_cast<const __half2*>(dz);
+    auto* grad2 = reinterpret_cast<float2*>(grad);
+    float sum0 = 0.0f;
+    float sum1 = 0.0f;
+    for (unsigned i = 0; i < count; ++i) {
+        const unsigned row = row_ids[list_base + i];
+        const float2 value = __half22float2(dz2[row * hd1_half2 + h2]);
+        sum0 = __fadd_rn(sum0, value.x);
+        sum1 = __fadd_rn(sum1, value.y);
+    }
+    const unsigned physical2 = bin * hd1_half2 + h2;
+    grad2[physical2] = make_float2(sum0, sum1);
+    const unsigned physical0 = physical2 << 1;
+    const unsigned physical1 = physical0 + 1U;
+    const float next0 = detail::AdamWUpdateOneWithBias(
+        adam, bias1, bias2, weights[physical0], sum0, moment1 + physical0,
+        moment2 + physical0);
+    const float next1 = detail::AdamWUpdateOneWithBias(
+        adam, bias1, bias2, weights[physical1], sum1, moment1 + physical1,
+        moment2 + physical1);
+    weights[physical0] = next0;
+    weights[physical1] = next1;
+    weights_half[physical0] = __float2half_rn(next0);
+    weights_half[physical1] = __float2half_rn(next1);
 }
 
 }  // namespace

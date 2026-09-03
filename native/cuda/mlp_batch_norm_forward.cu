@@ -296,6 +296,7 @@ using detail::SparseInputGradGroupedRowsAdjacent2PackedU16;
 using detail::SparseInputGradCompactActiveAdjacent2PackedU16;
 using detail::SparseInputGradCompactActiveAdjacent2PackedHalfU16;
 using detail::SparseInputGradCompactActiveAdjacent2PackedHalfU16U32;
+using detail::SparseInputGradCompactActiveAdjacent2PackedHalfU16U32AdamW;
 
 constexpr unsigned GROUPED_INPUT_MAX_POSITIONS = 4;
 
@@ -747,8 +748,11 @@ mgt::Status LaunchMlpBatchNormInputBackward(
     const float* recompute_beta = nullptr;
     __half* sparse_input_grad_half = nullptr;
     bool sparse_input_grad_half_u32 = false;
+    bool fuse_input_active_adam = false;
 #ifdef MGT_LOCAL_MLP_IMPLEMENTATION
+    AdamWKernelConfig fused_input_adam{};
     if (auto* local_fp16 = LocalFp16(ctx)) {
+        local_fp16->input_active_adam_fused = false;
         const InputHalfIndexPolicy index_policy = ResolveInputHalfIndexPolicy();
         if (index_policy.status != mgt::Status::kOk) return index_policy.status;
         if (index_policy.use_u32 &&
@@ -791,11 +795,26 @@ mgt::Status LaunchMlpBatchNormInputBackward(
             sparse_input_grad_half_u32 = index_policy.use_u32 &&
                 SparseInputGradHalfU32ExtentsFit(s, lr, active_count);
         }
+        fused_input_adam = local_fp16->input_adam;
+        fused_input_adam.param_count =
+            static_cast<std::uint64_t>(active_count) * s.hd1;
+        fused_input_adam.sparse_active_bins = nullptr;
+        fused_input_adam.sparse_full_prefix_count = 0;
+        fused_input_adam.sparse_row_width = 0;
+        fused_input_adam.sparse_active_bin_count = 0;
+        fused_input_adam.dense_physical_offset = 0;
+        fuse_input_active_adam = sparse_input_grad_half_u32 &&
+            local_fp16->input_inactive_adam_state_is_pristine &&
+            local_fp16->weight_grad == weight_grad &&
+            local_fp16->master_weights && local_fp16->weight_mirror &&
+            local_fp16->weight_m && local_fp16->weight_v &&
+            fused_input_adam.weight_decay == 0.0f &&
+            ValidateAdamWKernelConfig(fused_input_adam) == mgt::Status::kOk;
         static thread_local const LocalMlpFp16Context* reported_context = nullptr;
         if (reported_context != local_fp16) {
             std::fprintf(stderr,
                 "mgt sparse_input_grad source=%s compact=%u active=%u scratch_fit=%u "
-                "capacity_fit=%u alignment_fit=%u u32=%u\n",
+                "capacity_fit=%u alignment_fit=%u u32=%u adam_fusion=%u\n",
                 sparse_input_grad_half ? "half" : "float",
                 static_cast<unsigned>(compact_active), active_count,
                 static_cast<unsigned>(
@@ -806,7 +825,8 @@ mgt::Status LaunchMlpBatchNormInputBackward(
                     (reinterpret_cast<std::uintptr_t>(
                          local_fp16->input_gradient_half) &
                      (alignof(__half2) - 1U)) == 0),
-                static_cast<unsigned>(sparse_input_grad_half_u32));
+                static_cast<unsigned>(sparse_input_grad_half_u32),
+                static_cast<unsigned>(fuse_input_active_adam));
             reported_context = local_fp16;
         }
     }
@@ -883,11 +903,26 @@ mgt::Status LaunchMlpBatchNormInputBackward(
                             (s.hd1 / 2U +
                              detail::kSparseCompactActiveThreadsPerBin - 1U) /
                                 detail::kSparseCompactActiveThreadsPerBin);
-                        SparseInputGradCompactActiveAdjacent2PackedHalfU16U32
-                            <<<half_u32_grid,
-                               detail::kSparseCompactActiveHalfU32Threads,0,st>>>(
-                                s,sparse_input_grad_half,lr,input_active_bins,
-                                active_count,counts,row_ids,weight_grad);
+                        if (fuse_input_active_adam) {
+#ifdef MGT_LOCAL_MLP_IMPLEMENTATION
+                            auto* local_fp16 = LocalFp16(ctx);
+                            SparseInputGradCompactActiveAdjacent2PackedHalfU16U32AdamW
+                                <<<half_u32_grid,
+                                   detail::kSparseCompactActiveHalfU32Threads,0,st>>>(
+                                    fused_input_adam,s,sparse_input_grad_half,lr,
+                                    input_active_bins,active_count,counts,row_ids,
+                                    weight_grad,local_fp16->master_weights,
+                                    local_fp16->weight_mirror,local_fp16->weight_m,
+                                    local_fp16->weight_v);
+                            local_fp16->input_active_adam_fused = true;
+#endif
+                        } else {
+                            SparseInputGradCompactActiveAdjacent2PackedHalfU16U32
+                                <<<half_u32_grid,
+                                   detail::kSparseCompactActiveHalfU32Threads,0,st>>>(
+                                    s,sparse_input_grad_half,lr,input_active_bins,
+                                    active_count,counts,row_ids,weight_grad);
+                        }
                     } else {
                         SparseInputGradCompactActiveAdjacent2PackedHalfU16
                             <<<grid,detail::kSparseCompactActiveThreads,0,st>>>(
@@ -972,12 +1007,14 @@ mgt::Status LaunchMlpBatchNormAdamStep(
     wc.sparse_full_prefix_count = 0;
     wc.sparse_row_width = 0;
     wc.sparse_active_bin_count = 0;
+    wc.dense_physical_offset = 0;
     AdamWKernelConfig ac = base;
     ac.param_count = 2ULL * p.logical_feature_count;
     ac.sparse_active_bins = nullptr;
     ac.sparse_full_prefix_count = 0;
     ac.sparse_row_width = 0;
     ac.sparse_active_bin_count = 0;
+    ac.dense_physical_offset = 0;
     if (LaunchAdamWKernel(wc, w, wg, wm, wv, st) != mgt::Status::kOk ||
         LaunchAdamWKernel(ac, aff, ag, am, av, st) != mgt::Status::kOk)
         return mgt::Status::kCudaFailure;
@@ -1003,13 +1040,19 @@ static mgt::Status LaunchAdamBackend(
         wc.sparse_full_prefix_count = 0;
         wc.sparse_row_width = 0;
         wc.sparse_active_bin_count = 0;
+        wc.dense_physical_offset = 0;
         const bool sparse = fp->input_inactive_adam_state_is_pristine &&
             fp->input_inactive_gradients_are_persistent_zero &&
             base.weight_decay == 0.0f && fp->input_active_bins &&
             fp->input_active_bin_count > 0 &&
             fp->input_active_bin_count < bin_count && input_count <= full_count &&
             active_elements <= input_count;
-        if (sparse) {
+        const bool fused = fp->input_active_adam_fused;
+        if (fused && !sparse) return mgt::Status::kInvalidConfig;
+        if (fused) {
+            wc.param_count = full_count - input_count;
+            wc.dense_physical_offset = input_count;
+        } else if (sparse) {
             wc.param_count = active_elements + (full_count - input_count);
             wc.sparse_active_bins = fp->input_active_bins;
             wc.sparse_full_prefix_count = input_count;
@@ -1028,6 +1071,7 @@ static mgt::Status LaunchAdamBackend(
         ac.sparse_full_prefix_count = 0;
         ac.sparse_row_width = 0;
         ac.sparse_active_bin_count = 0;
+        ac.dense_physical_offset = 0;
         if (LaunchAdamWKernelWithHalfMirror(
                 wc, b.weights, fp->weight_mirror, b.weight_grad, b.weight_m,
                 b.weight_v, st) != mgt::Status::kOk ||
@@ -1038,8 +1082,9 @@ static mgt::Status LaunchAdamBackend(
         static thread_local const LocalMlpFp16Context* reported_context = nullptr;
         if (reported_context != fp) {
             std::fprintf(stderr,
-                "mgt weight_adam sparse_active=%u live=%llu full=%llu\n",
-                static_cast<unsigned>(sparse),
+                "mgt weight_adam sparse_active=%u fused_input=%u live=%llu full=%llu\n",
+                static_cast<unsigned>(sparse && !fused),
+                static_cast<unsigned>(fused),
                 static_cast<unsigned long long>(wc.param_count),
                 static_cast<unsigned long long>(full_count));
             reported_context = fp;

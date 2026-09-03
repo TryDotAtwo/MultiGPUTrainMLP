@@ -214,6 +214,159 @@ public:
         candidate_.Fill(0);
     }
 
+    void RunFusedAdamWitness(unsigned rows, unsigned salt) {
+        constexpr std::uint64_t tail_count = 37;
+        const std::uint64_t total_count = elements_ + tail_count;
+        const std::uint64_t active_elements =
+            active_bins_.size() * shape_.hd1;
+        const std::uint64_t live_count = active_elements + tail_count;
+        const auto states = MakeStates(salt);
+        PutInputs(states, MakeDz(salt + 41U));
+        BuildCompact(rows);
+
+        std::vector<float> weights(total_count), grad(total_count, 0.0f);
+        std::vector<float> moment1(total_count, 0.0f);
+        std::vector<float> moment2(total_count, 0.0f);
+        std::vector<__half> half(total_count);
+        std::vector<bool> active_mask(bins_, false);
+        for (std::uint16_t bin : active_bins_) active_mask[bin] = true;
+        for (std::uint64_t i = 0; i < total_count; ++i) {
+            weights[i] = static_cast<float>(
+                static_cast<int>((i * 17U + salt) % 43U) - 21) * .0013f;
+            half[i] = __float2half_rn(weights[i]);
+            const bool active_input = i < elements_ &&
+                active_mask[i / shape_.hd1];
+            const bool tail = i >= elements_;
+            if (active_input || tail) {
+                grad[i] = static_cast<float>(
+                    static_cast<int>((i * 19U + salt) % 31U) - 15) * .00017f;
+                moment1[i] = static_cast<float>(
+                    static_cast<int>((i * 23U + salt) % 29U) - 14) * .00011f;
+                moment2[i] = static_cast<float>((i * 13U + salt) % 37U) *
+                    .000006f;
+            }
+        }
+
+        DeviceBuffer<float> reference_weights(total_count, "reference weights");
+        DeviceBuffer<__half> reference_half(total_count, "reference half");
+        DeviceBuffer<float> reference_grad(total_count, "reference grad");
+        DeviceBuffer<float> reference_m(total_count, "reference m");
+        DeviceBuffer<float> reference_v(total_count, "reference v");
+        DeviceBuffer<float> fused_weights(total_count, "fused weights");
+        DeviceBuffer<__half> fused_half(total_count, "fused half");
+        DeviceBuffer<float> fused_grad(total_count, "fused grad");
+        DeviceBuffer<float> fused_m(total_count, "fused m");
+        DeviceBuffer<float> fused_v(total_count, "fused v");
+        for (auto* buffer : {&reference_weights, &fused_weights})
+            buffer->Put(weights);
+        for (auto* buffer : {&reference_half, &fused_half}) buffer->Put(half);
+        for (auto* buffer : {&reference_grad, &fused_grad}) buffer->Put(grad);
+        for (auto* buffer : {&reference_m, &fused_m}) buffer->Put(moment1);
+        for (auto* buffer : {&reference_v, &fused_v}) buffer->Put(moment2);
+
+        mgt_cuda::AdamWKernelConfig sparse{
+            live_count, 1, .0001f, .9f, .999f, 1e-8f, 0.0f};
+        sparse.sparse_active_bins = active_.get();
+        sparse.sparse_full_prefix_count = elements_;
+        sparse.sparse_row_width = shape_.hd1;
+        sparse.sparse_active_bin_count =
+            static_cast<std::uint32_t>(active_bins_.size());
+        auto fused = sparse;
+        fused.param_count = active_elements;
+        fused.sparse_active_bins = nullptr;
+        fused.sparse_full_prefix_count = 0;
+        fused.sparse_row_width = 0;
+        fused.sparse_active_bin_count = 0;
+        auto tail = fused;
+        tail.param_count = tail_count;
+        tail.dense_physical_offset = elements_;
+        std::uint64_t physical_count = 0;
+        Require(mgt_cuda::QueryAdamWPhysicalParameterCount(
+                    sparse, &physical_count) == mgt::Status::kOk &&
+                    physical_count == total_count,
+                "sparse Adam physical extent");
+        Require(mgt_cuda::QueryAdamWPhysicalParameterCount(
+                    tail, &physical_count) == mgt::Status::kOk &&
+                    physical_count == total_count,
+                "tail Adam physical extent");
+
+        const unsigned active_count =
+            static_cast<unsigned>(active_bins_.size());
+        const dim3 grid(
+            (active_count +
+             mgt_cuda::detail::kSparseCompactActiveHalfU32BinsPerBlock - 1U) /
+                mgt_cuda::detail::kSparseCompactActiveHalfU32BinsPerBlock,
+            (shape_.hd1 / 2U +
+             mgt_cuda::detail::kSparseCompactActiveThreadsPerBin - 1U) /
+                mgt_cuda::detail::kSparseCompactActiveThreadsPerBin);
+        for (std::uint64_t step : {1ULL, 2ULL, 997ULL, 65535ULL}) {
+            sparse.step = step;
+            fused.step = step;
+            tail.step = step;
+            mgt_cuda::detail::
+                SparseInputGradCompactActiveAdjacent2PackedHalfU16U32
+                <<<grid,
+                   mgt_cuda::detail::kSparseCompactActiveHalfU32Threads>>>(
+                    shape_, dz_half_.get(), rows, active_.get(), active_count,
+                    compact_counts_.get(), compact_rows_.get(),
+                    reference_grad.get());
+            Require(mgt_cuda::LaunchAdamWKernelWithHalfMirror(
+                        sparse, reference_weights.get(), reference_half.get(),
+                        reference_grad.get(), reference_m.get(),
+                        reference_v.get(), nullptr) == mgt::Status::kOk,
+                    "reference sparse Adam launch");
+            mgt_cuda::detail::
+                SparseInputGradCompactActiveAdjacent2PackedHalfU16U32AdamW
+                <<<grid,
+                   mgt_cuda::detail::kSparseCompactActiveHalfU32Threads>>>(
+                    fused, shape_, dz_half_.get(), rows, active_.get(),
+                    active_count, compact_counts_.get(), compact_rows_.get(),
+                    fused_grad.get(), fused_weights.get(), fused_half.get(),
+                    fused_m.get(), fused_v.get());
+            Require(mgt_cuda::LaunchAdamWKernelWithHalfMirror(
+                        tail, fused_weights.get(), fused_half.get(),
+                        fused_grad.get(), fused_m.get(), fused_v.get(),
+                        nullptr) == mgt::Status::kOk,
+                    "dense tail Adam launch");
+            Cuda(cudaGetLastError(), "fused Adam launches");
+        }
+        Cuda(cudaDeviceSynchronize(), "fused Adam synchronize");
+        const auto same = [](const auto& left, const auto& right,
+                             const char* field) {
+            const auto a = left.Read();
+            const auto b = right.Read();
+            Require(a.size() == b.size() &&
+                        std::memcmp(a.data(), b.data(),
+                                    a.size() * sizeof(a[0])) == 0,
+                    std::string("fused Adam byte mismatch: ") + field);
+        };
+        same(reference_weights, fused_weights, "weights");
+        same(reference_half, fused_half, "half mirror");
+        same(reference_grad, fused_grad, "gradient");
+        same(reference_m, fused_m, "moment1");
+        same(reference_v, fused_v, "moment2");
+        const auto final_grad = fused_grad.Read();
+        const auto final_m = fused_m.Read();
+        const auto final_v = fused_v.Read();
+        const auto final_weights = fused_weights.Read();
+        const auto final_half = fused_half.Read();
+        for (unsigned bin = 0; bin < bins_; ++bin) {
+            if (active_mask[bin]) continue;
+            for (unsigned h = 0; h < shape_.hd1; ++h) {
+                const std::size_t index =
+                    static_cast<std::size_t>(bin) * shape_.hd1 + h;
+                Require(Bits(final_grad[index]) == 0 &&
+                            Bits(final_m[index]) == 0 &&
+                            Bits(final_v[index]) == 0 &&
+                            Bits(final_weights[index]) == Bits(weights[index]) &&
+                            std::memcmp(&final_half[index], &half[index],
+                                        sizeof(__half)) == 0,
+                        "fused Adam touched pristine inactive state");
+            }
+        }
+        CheckRows(states, rows);
+    }
+
     void Finish() {
         Require(active_.Read() == active_bins_, "active-bin map mutated");
         states_.CheckGuards();
@@ -427,10 +580,11 @@ int main() {
               std::pair{33U, 19U}, std::pair{257U, 23U}}) {
             harness.RunReuse(rows, salt);
             harness.RunHalfU32Reuse(rows, salt + 37U);
+            harness.RunFusedAdamWitness(rows, salt + 73U);
         }
         harness.Finish();
         Require(!cleanup_failed, "CUDA cleanup failed");
-        std::printf("PASS compact active input gradient: bitwise FP32/RN-half serial order, tails, owner writes, persistent zero, immutable inputs/map and canaries\n");
+        std::printf("PASS compact active input gradient: bitwise FP32/RN-half serial order, fused active Adam+dense tail, owner writes, persistent zero, immutable inputs/map and canaries\n");
         return EXIT_SUCCESS;
     } catch (const std::exception& error) {
         std::fprintf(stderr, "FAIL compact active input gradient: %s\n", error.what());

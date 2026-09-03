@@ -12,14 +12,16 @@ inline constexpr bool kSingleGpuTrainGraphSupported = CUDART_VERSION >= 12080;
 struct SingleGpuTrainGraph {
     cudaGraph_t source = nullptr;
     cudaGraphExec_t executable = nullptr;
-    std::array<cudaGraphNode_t, 3> nodes{};
-    std::array<cudaKernelNodeParams, 3> parameters{};
+    // walk, remaining-weight Adam, affine Adam, optional fused input Adam.
+    std::array<cudaGraphNode_t, 4> nodes{};
+    std::array<cudaKernelNodeParams, 4> parameters{};
     std::uint32_t rows = 0;
 };
 
 const void* RandomWalkTrainingKernel();
 const void* WeightAdamTrainingKernel();
 const void* AffineAdamTrainingKernel();
+const void* FusedInputAdamTrainingKernel();
 
 // Takes ownership of source once arguments are accepted, including on failure.
 mgt::Status InstantiateSingleGpuTrainGraph(
