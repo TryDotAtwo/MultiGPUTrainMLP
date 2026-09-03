@@ -122,12 +122,35 @@ run(["nvidia-smi", "-L"])
 env = os.environ.copy()
 env["CUDA_VISIBLE_DEVICES"] = "0"
 env["MGT_CUDA_ARCH"] = "75"
-run(["bash", "scripts/ensure_cutlass.sh"], cwd=WORK, env=env)
+cutlass_output = subprocess.check_output(
+    ["bash", "scripts/ensure_cutlass.sh"], cwd=WORK, env=env, text=True)
+print(cutlass_output, end="", flush=True)
+cutlass_lines = [line.split("=", 1)[1] for line in cutlass_output.splitlines()
+                 if line.startswith("cutlass_root=")]
+if len(cutlass_lines) != 1:
+    raise RuntimeError(f"cannot resolve CUTLASS root from: {cutlass_output!r}")
+cutlass_root = cutlass_lines[0]
+
+ldconfig = subprocess.check_output(["ldconfig", "-p"], text=True)
+driver_candidates = [Path(line.split("=>", 1)[1].strip())
+                     for line in ldconfig.splitlines()
+                     if "libcuda.so.1" in line and "=>" in line]
+for root in [Path("/usr/local/nvidia"), Path("/usr/local/cuda/compat"),
+             Path("/usr/lib/x86_64-linux-gnu"), Path("/lib/x86_64-linux-gnu")]:
+    if root.exists():
+        driver_candidates.extend(root.glob("**/libcuda.so*"))
+if not driver_candidates:
+    raise RuntimeError(f"Kaggle loader exposes no libcuda.so.1: {ldconfig}")
+driver_dir = Path("/tmp/cuda-driver")
+driver_dir.mkdir(exist_ok=True)
+(driver_dir / "libcuda.so").symlink_to(driver_candidates[0])
+env["CMAKE_LIBRARY_PATH"] = str(driver_dir)
+env["LIBRARY_PATH"] = str(driver_dir)
 run([
     "cmake", "-S", "native", "-B", str(BUILD),
     "-DMGT_ENABLE_CUDA=ON", "-DMGT_ENABLE_NCCL=OFF",
     "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_CUDA_ARCHITECTURES=75",
-    f"-DMGT_CUTLASS_ROOT={env.get('CUTLASS_ROOT', '/opt/cutlass')}",
+    f"-DMGT_CUTLASS_ROOT={cutlass_root}",
 ], cwd=WORK, env=env)
 targets = [
     "test_single_gpu_benchmark", "test_cuda_adamw_half_mirror_exact",
