@@ -1,4 +1,5 @@
 #include "mgt/puzzle_io.hpp"
+#include "mgt/single_gpu_benchmark.hpp"
 #include "mgt/single_gpu_contract.hpp"
 #include "mgt_cuda/single_gpu_trainer.cuh"
 
@@ -7,6 +8,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <iomanip>
 #include <iostream>
 #include <cmath>
 #include <string>
@@ -16,6 +18,16 @@ struct TrainerOwner {
     mgt_cuda::SingleGpuTrainer* value = nullptr;
     ~TrainerOwner() { if (value) mgt_cuda::DestroySingleGpuTrainer(&value); }
 };
+
+double DenseFp16PeakTflops(int arch) {
+    if (const char* text = std::getenv("MGT_DENSE_FP16_PEAK_TFLOPS")) {
+        char* end = nullptr;
+        const double value = std::strtod(text, &end);
+        if (end != text && *end == '\0' && std::isfinite(value) && value > 0.0)
+            return value;
+    }
+    return arch == 75 ? 65.13 : 15.9744;
+}
 }
 
 int main(int argc, char** argv) {
@@ -29,10 +41,10 @@ int main(int argc, char** argv) {
     const auto steps = static_cast<std::uint32_t>(std::strtoul(argv[3], nullptr, 10));
     const std::string mode = argc >= 7 ? argv[6] : "eager";
     const std::string precision = argc == 8 ? argv[7] : "fp32";
-    if (!batch || !steps || (mode != "eager" && mode != "graph") ||
-        (precision != "fp32" && precision != "fp16") ||
-        static_cast<std::uint64_t>(warmup) + steps >
-            mgt::P888TrainingContract::kSamplesPerEpoch / batch) return 2;
+    if (!batch || !steps ||
+        batch > mgt::P888TrainingContract::kSamplesPerEpoch ||
+        (mode != "eager" && mode != "graph") ||
+        (precision != "fp32" && precision != "fp16")) return 2;
     mgt::PuzzleDefinition puzzle{};
     if (mgt::LoadPuzzleDefinition(argv[4], argv[5], &puzzle) != mgt::Status::kOk)
         return 3;
@@ -68,16 +80,22 @@ int main(int argc, char** argv) {
     std::uint64_t sequence = 0;
     for (std::uint32_t i = 0; i < warmup; ++i) {
         ++sequence;
+        const auto position = mgt::SingleGpuBenchmarkPosition(
+            sequence, batch, mgt::P888TrainingContract::kSamplesPerEpoch);
         if (mgt_cuda::LaunchSingleGpuTrainStep(
-                trainer, {batch, sequence, 0, (sequence - 1) * batch}, &ticket) !=
+                trainer, {batch, sequence, position.epoch,
+                          position.epoch_sample_offset}, &ticket) !=
             mgt::Status::kOk) return 6;
     }
     if (warmup && cudaEventSynchronize(ticket.completion_event) != cudaSuccess) return 7;
     const auto begin = std::chrono::steady_clock::now();
     for (std::uint32_t i = 0; i < steps; ++i) {
         ++sequence;
+        const auto position = mgt::SingleGpuBenchmarkPosition(
+            sequence, batch, mgt::P888TrainingContract::kSamplesPerEpoch);
         if (mgt_cuda::LaunchSingleGpuTrainStep(
-                trainer, {batch, sequence, 0, (sequence - 1) * batch}, &ticket) !=
+                trainer, {batch, sequence, position.epoch,
+                          position.epoch_sample_offset}, &ticket) !=
             mgt::Status::kOk) return 8;
     }
     if (cudaEventSynchronize(ticket.completion_event) != cudaSuccess) return 9;
@@ -89,12 +107,29 @@ int main(int argc, char** argv) {
     cudaDeviceProp device{};
     if (cudaGetDeviceProperties(&device, 0) != cudaSuccess) return 10;
     const double step_ms = total_ms / steps;
-    std::cout << "{\"gpu\":\"" << device.name << "\",\"arch\":"
+    constexpr std::uint64_t useful_flops_per_sample = 12469164ULL;
+    constexpr std::uint64_t issued_flops_per_sample = 13075776ULL;
+    const double fixed_dense_fp16_peak_tflops =
+        DenseFp16PeakTflops(device.major * 10 + device.minor);
+    const auto throughput = mgt::SingleGpuBenchmarkThroughput(
+        batch, step_ms, useful_flops_per_sample, issued_flops_per_sample,
+        fixed_dense_fp16_peak_tflops);
+    std::cout << std::setprecision(9)
+              << "{\"gpu\":\"" << device.name << "\",\"arch\":"
               << device.major * 10 + device.minor << ",\"mode\":\"" << mode << "\",\"batch\":" << batch
               << ",\"input_gradient_precision\":\"" << precision << "\""
               << ",\"warmup\":" << warmup << ",\"steps\":" << steps
               << ",\"step_ms\":" << step_ms << ",\"samples_s\":"
-              << batch * 1000.0 / step_ms << ",\"memory_bytes\":" << arena_bytes
+              << throughput.samples_per_second
+              << ",\"useful_flops_per_sample\":" << useful_flops_per_sample
+              << ",\"issued_flops_per_sample\":" << issued_flops_per_sample
+              << ",\"useful_tflops\":" << throughput.useful_tflops
+              << ",\"issued_tflops\":" << throughput.issued_tflops
+              << ",\"fixed_dense_fp16_peak_tflops\":"
+              << fixed_dense_fp16_peak_tflops
+              << ",\"useful_peak_utilization_percent\":"
+              << throughput.useful_peak_utilization_percent
+              << ",\"memory_bytes\":" << arena_bytes
               << ",\"prepare_ms\":" << std::chrono::duration<double, std::milli>(prepare_end - prepare_begin).count()
               << ",\"loss\":" << metrics.loss << ",\"status\":\"ok\"}\n";
     return mgt_cuda::DestroySingleGpuTrainer(&owner.value) == mgt::Status::kOk ? 0 : 11;

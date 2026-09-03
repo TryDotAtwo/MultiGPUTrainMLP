@@ -53,9 +53,13 @@ target_link_libraries(test_static_contracts PRIVATE mgt_core)
 add_executable(test_single_gpu_contract tests/test_single_gpu_contract.cpp)
 target_link_libraries(test_single_gpu_contract PRIVATE mgt_core)
 
+add_executable(test_single_gpu_benchmark tests/test_single_gpu_benchmark.cpp)
+target_link_libraries(test_single_gpu_benchmark PRIVATE mgt_core)
+
 enable_testing()
 add_test(NAME static_contracts COMMAND test_static_contracts)
 add_test(NAME single_gpu_contract COMMAND test_single_gpu_contract)
+add_test(NAME single_gpu_benchmark COMMAND test_single_gpu_benchmark)
 add_executable(test_puzzle_io tests/test_puzzle_io.cpp)
 target_link_libraries(test_puzzle_io PRIVATE mgt_core)
 add_test(NAME puzzle_io COMMAND test_puzzle_io)
